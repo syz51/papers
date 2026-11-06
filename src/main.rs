@@ -312,6 +312,49 @@ enum RegistryAction {
         #[arg(long, value_enum, default_value_t = finding::Format::Text)]
         format: finding::Format,
     },
+    /// Record a text file already in the project (fetched by hand, or by another
+    /// tool) in an entry's `texts`, with its sha256. Replaces a text at the same path.
+    Attach {
+        /// Registry key of the entry.
+        #[arg(long)]
+        key: String,
+        /// The text file; it must be inside the project root.
+        #[arg(long, value_name = "PATH")]
+        text: PathBuf,
+        /// Where the text came from, such as the URL of the original.
+        #[arg(long, value_name = "URL")]
+        origin: Option<String>,
+        /// Registry file (overrides [papers] registry).
+        #[arg(long, value_name = "PATH")]
+        registry: Option<PathBuf>,
+    },
+}
+
+/// The registry entry for a text file inside the project: its root-relative path and sha256.
+fn local_text(
+    config: &config::Config,
+    cwd: &Path,
+    path: &Path,
+    origin: Option<String>,
+) -> Result<registry::Text, String> {
+    let abs = config::normalize(&cwd.join(path));
+    let rel = abs
+        .strip_prefix(&config.root)
+        .ok()
+        .filter(|p| !p.as_os_str().is_empty() && !p.starts_with(".."))
+        .ok_or_else(|| {
+            format!(
+                "{} is outside the project root {}; texts are recorded relative to it",
+                abs.display(),
+                config.root.display()
+            )
+        })?;
+    let bytes = std::fs::read(&abs).map_err(|e| format!("{}: {e}", abs.display()))?;
+    Ok(registry::Text {
+        path: rel.to_string_lossy().into_owned(),
+        sha256: http::sha256_hex(&bytes),
+        origin,
+    })
 }
 
 fn parse_date(s: &str) -> Result<Date, String> {
@@ -728,21 +771,58 @@ fn seen(
 
 fn registry(mut config: config::Config, action: RegistryAction) -> Result<bool, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
-    let (RegistryAction::Build { source, .. } | RegistryAction::Check { source, .. }) = &action;
-    let mut from = source.from;
-    if let Some(path) = &source.catalogue {
-        config.catalogue = Some(config::normalize(&cwd.join(path)));
-        from = from.or(Some(registry_cmd::From::Catalogue));
-    }
-    if let Some(path) = &source.registry {
-        config.registry = config::normalize(&cwd.join(path));
-    }
+    let set_registry = |config: &mut config::Config, path: Option<PathBuf>| {
+        if let Some(path) = path {
+            config.registry = config::normalize(&cwd.join(path));
+        }
+    };
+    // `--catalogue` overrides the configured one and implies `--from catalogue`.
+    let apply = |config: &mut config::Config, source: RegistrySource| {
+        set_registry(config, source.registry);
+        match source.catalogue {
+            Some(path) => {
+                config.catalogue = Some(config::normalize(&cwd.join(path)));
+                source.from.or(Some(registry_cmd::From::Catalogue))
+            }
+            None => source.from,
+        }
+    };
     match action {
-        RegistryAction::Build { dry_run, .. } => {
+        RegistryAction::Build { source, dry_run } => {
+            let from = apply(&mut config, source);
             let from = from.unwrap_or_else(|| registry_cmd::default_from(&config));
             registry_cmd::build(&config, from, dry_run)
         }
-        RegistryAction::Check { format, .. } => registry_cmd::check(&config, from, format),
+        RegistryAction::Check { source, format } => {
+            let from = apply(&mut config, source);
+            registry_cmd::check(&config, from, format)
+        }
+        RegistryAction::Attach {
+            key,
+            text,
+            origin,
+            registry,
+        } => {
+            set_registry(&mut config, registry);
+            let text = local_text(&config, &cwd, &text, origin)?;
+            registry::update(&config.registry, |records| {
+                let r = records.iter_mut().find(|r| r.key == key).ok_or_else(|| {
+                    format!(
+                        "{}: no entry with key {key}",
+                        config.display(&config.registry)
+                    )
+                })?;
+                r.texts.retain(|t| t.path != text.path);
+                r.texts.push(text.clone());
+                Ok(())
+            })?;
+            println!(
+                "recorded in {} (key {key})",
+                config.display(&config.registry)
+            );
+            println!("{}", serde_json::to_string(&text).expect("texts serialize"));
+            Ok(true)
+        }
     }
 }
 

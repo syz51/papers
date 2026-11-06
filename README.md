@@ -38,6 +38,7 @@ This needs Rust 1.99 or newer (edition 2024). `papers read` can retry a page tha
 | `seen` | Is a work already in the registry or notes? Prints matching keys | `papers seen 10.1234/abc` |
 | `registry build` | Parse the catalogue or notes into the registry, keeping tool-added state | `papers registry build` |
 | `registry check` | Duplicates, missing ids, bad dates, parse problems, as `rf.finding/1` | `papers registry check --format jsonl` |
+| `registry attach` | Record a text file already in the project in an entry's `texts`, with its sha256 | `papers registry attach --key 12 --text sources/text/12.txt --origin <url>` |
 | `verify` | Compare registry entries (or notes) with arXiv, Crossref, OpenAlex | `papers verify --keys 12,40 --format jsonl` |
 | `read` | Download an open-access PDF and extract its text, with a sha256 manifest | `papers read --key 12 --record` |
 | `refs` | Works a paper cites (OpenAlex, else Semantic Scholar) | `papers refs 2601.00001 --max 50` |
@@ -162,7 +163,7 @@ These parse issues are also reported:
 
 `papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file.
 
-Running it again skips the download when the stored text still has the recorded hash; `--force` downloads anyway. `--record` (with `--key`) adds the manifest to the entry's `texts`.
+Running it again skips the download when the stored text still has the recorded hash; `--force` downloads anyway. `--record` (with `--key`) adds the manifest to the entry's `texts`. For a text obtained another way (by hand, or listed in an existing manifest), `papers registry attach --key <key> --text <path> [--origin <url>]` records it the same way: the path must be inside the project root, and a text already recorded at that path is replaced.
 
 Unless `--no-browser` is given, a candidate retries in headless Chromium only when its plain-HTTP reply was a JavaScript check page: a 202 HTML reply (how AWS WAF serves its challenge, as on figshare) or a small 200 HTML page with a challenge marker. A 403, a 429, any other refusal, and transport errors are reported and never retried in the browser. When a host blocks automated browsers, `papers` reports the block. It does no CAPTCHA solving or fingerprint spoofing.
 
