@@ -1,0 +1,38 @@
+{
+  "meta": {"count": 3, "db_response_time_ms": 12, "page": 1, "per_page": 25},
+  "results": [
+    {
+      "id": "https://openalex.org/W9000000011",
+      "doi": "https://doi.org/10.5555/ssrn.0000111",
+      "title": "Network-Based Detection of Synthetic Wash Trading",
+      "publication_year": 2025,
+      "type": "preprint",
+      "authorships": [
+        {"author": {"display_name": "Hale Brennick"}},
+        {"author": {"display_name": "Ines Okonkwo-Lind"}},
+        {"author": {"display_name": "Jory Castellane"}},
+        {"author": null, "raw_author_name": "K. Wendmark"}
+      ],
+      "primary_location": {"is_oa": true, "landing_page_url": "https://papers.example.org/111", "source": {"display_name": "Example Preprint Service", "type": "repository"}},
+      "locations": [],
+      "open_access": {"oa_status": "green"}
+    },
+    {
+      "id": "https://openalex.org/W9000000012",
+      "doi": null,
+      "title": "Wash Trading Measures for Toy Markets",
+      "publication_year": 2024,
+      "type": "article",
+      "authorships": [{"author": {"display_name": "Lark Fennimore"}}],
+      "primary_location": null,
+      "locations": []
+    },
+    {
+      "id": "https://openalex.org/W9000000013",
+      "title": null,
+      "display_name": "Order-Book <i>Spoofing</i> in Simulated Venues",
+      "publication_year": 2023,
+      "authorships": []
+    }
+  ]
+}

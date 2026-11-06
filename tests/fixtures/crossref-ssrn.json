@@ -1,0 +1,19 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message": {
+    "DOI": "10.5555/ssrn.0000101",
+    "type": "posted-content",
+    "subtype": "preprint",
+    "title": ["Funding Spreads Between Synthetic Perpetual Venues"],
+    "author": [
+      {"given": "Dara", "family": "Penhallow", "sequence": "first", "affiliation": []},
+      {"given": "Corin Ashby", "family": "Vale", "sequence": "additional", "affiliation": []},
+      {"given": "Elio", "family": "Marchetti-Sund", "sequence": "additional", "affiliation": []}
+    ],
+    "group-title": "SSRN",
+    "publisher": "Example Preprint Service",
+    "posted": {"date-parts": [[2025]]},
+    "issued": {"date-parts": [[2025]]}
+  }
+}

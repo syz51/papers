@@ -1,0 +1,39 @@
+{
+  "id": "https://openalex.org/W9000000001",
+  "doi": "https://doi.org/10.5555/synth.2020.0001",
+  "title": "Widget Arbitrage Across Synthetic Exchanges",
+  "display_name": "Widget Arbitrage Across Synthetic Exchanges",
+  "publication_year": 2018,
+  "publication_date": "2018-05-20",
+  "type": "article",
+  "authorships": [
+    {"author_position": "first", "author": {"id": "https://openalex.org/A9000000001", "display_name": "Ada Quill"}, "raw_author_name": "Ada Quill"},
+    {"author_position": "last", "author": {"id": "https://openalex.org/A9000000002", "display_name": "Bram Tolliver"}, "raw_author_name": "B. Tolliver"}
+  ],
+  "primary_location": {
+    "is_oa": false,
+    "landing_page_url": "https://doi.org/10.5555/synth.2020.0001",
+    "pdf_url": null,
+    "version": "publishedVersion",
+    "source": {"id": "https://openalex.org/S9000000001", "display_name": "Journal of Synthetic Finance", "type": "journal"}
+  },
+  "locations": [
+    {
+      "is_oa": false,
+      "landing_page_url": "https://doi.org/10.5555/synth.2020.0001",
+      "pdf_url": null,
+      "version": "publishedVersion",
+      "source": {"display_name": "Journal of Synthetic Finance", "type": "journal"}
+    },
+    {
+      "is_oa": true,
+      "landing_page_url": "https://repository.example.edu/eprint/42/",
+      "pdf_url": "https://repository.example.edu/eprint/42/widget-arbitrage.pdf",
+      "version": "acceptedVersion",
+      "source": {"display_name": "Example University Repository", "type": "repository"}
+    }
+  ],
+  "open_access": {"is_oa": true, "oa_status": "green", "oa_url": "https://repository.example.edu/eprint/42/widget-arbitrage.pdf"},
+  "abstract_inverted_index": null,
+  "referenced_works": ["https://openalex.org/W9000000101", "https://openalex.org/W9000000102"]
+}

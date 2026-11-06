@@ -1,0 +1,16 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message": {
+    "DOI": "10.5555/w99001",
+    "type": "report",
+    "title": ["Synthetic Stablecoin Runs and Arbitrage Capacity"],
+    "author": [
+      {"given": "Fen", "family": "Ostrander", "sequence": "first", "affiliation": []}
+    ],
+    "institution": [{"name": "Example Bureau of Economic Research"}],
+    "publisher": "Example Bureau of Economic Research",
+    "published": {"date-parts": [[2025, 6]]},
+    "issued": {"date-parts": [[2025, 6]]}
+  }
+}

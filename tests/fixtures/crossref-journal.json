@@ -1,0 +1,25 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message-version": "1.0.0",
+  "message": {
+    "DOI": "10.5555/synth.2020.0001",
+    "type": "journal-article",
+    "title": ["Widget arbitrage across synthetic exchanges"],
+    "subtitle": [],
+    "author": [
+      {"given": "Ada", "family": "Quill", "sequence": "first", "affiliation": []},
+      {"given": "Bram", "family": "Tolliver", "sequence": "additional", "affiliation": []}
+    ],
+    "container-title": ["Journal of Synthetic Finance"],
+    "volume": "12",
+    "issue": "3",
+    "page": "101-120",
+    "publisher": "Example Academic Press",
+    "published-online": {"date-parts": [[2020, 1, 6]]},
+    "published-print": {"date-parts": [[2020, 2]]},
+    "published": {"date-parts": [[2020, 1, 6]]},
+    "issued": {"date-parts": [[2020, 1, 6]]},
+    "URL": "https://doi.org/10.5555/synth.2020.0001"
+  }
+}

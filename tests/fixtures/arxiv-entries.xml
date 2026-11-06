@@ -1,0 +1,71 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/synthetic-feed</id>
+  <title>arXiv Query: search_query=&amp;id_list=hep-th/9901999,2601.99901v4,2601.99902&amp;start=0&amp;max_results=10</title>
+  <updated>2026-11-05T00:00:00Z</updated>
+  <link href="https://arxiv.org/api/query?search_query=&amp;start=0&amp;max_results=10&amp;id_list=hep-th/9901999,2601.99901v4,2601.99902" type="application/atom+xml"/>
+  <opensearch:itemsPerPage>10</opensearch:itemsPerPage>
+  <opensearch:totalResults>3</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/2601.99901v4</id>
+    <title>Rebalancing Costs of a Synthetic Market Maker</title>
+    <updated>2026-03-15T09:30:00Z</updated>
+    <link href="https://arxiv.org/abs/2601.99901v4" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2601.99901v4" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Synthetic market makers quote prices from a fixed curve. We measure what a
+passive liquidity provider loses to rebalancing against a toy reference price.</summary>
+    <category term="q-fin.MF" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="q-fin.TR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.GT" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="econ.TH" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="math.PR" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2026-01-12T08:00:00Z</published>
+    <arxiv:comment>12 pages, 3 figures</arxiv:comment>
+    <arxiv:primary_category term="q-fin.MF"/>
+    <author>
+      <name>Mira Ellingwood</name>
+    </author>
+    <author>
+      <name>Niles O. Barrow</name>
+    </author>
+    <author>
+      <name>Opal Strand</name>
+    </author>
+    <author>
+      <name>Pell Anders Kemp</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2601.99902v1</id>
+    <title>Internal Conversions in Toy Exchanges</title>
+    <updated>2026-01-20T10:00:00Z</updated>
+    <link href="https://arxiv.org/abs/2601.99902v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2601.99902v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>We simulate indirect conversions between toy assets.</summary>
+    <category term="q-fin.TR" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2026-01-20T10:00:00Z</published>
+    <arxiv:primary_category term="q-fin.TR"/>
+    <author>
+      <name>Quin Hollis</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/hep-th/9901999v3</id>
+    <title>A Synthetic Old-Style Entry</title>
+    <updated>1999-05-10T04:45:54Z</updated>
+    <link href="https://arxiv.org/abs/hep-th/9901999v3" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/hep-th/9901999v3" rel="related" type="application/pdf" title="pdf"/>
+    <summary>  We explicitly give a toy correspondence between two invented spectra.</summary>
+    <category term="hep-th" scheme="http://arxiv.org/schemas/atom"/>
+    <published>1999-01-31T01:01:10Z</published>
+    <arxiv:comment>8 pages</arxiv:comment>
+    <arxiv:primary_category term="hep-th"/>
+    <arxiv:journal_ref>Synth. J. Phys. 1:1-8,1999</arxiv:journal_ref>
+    <author>
+      <name>Rue Talbot</name>
+    </author>
+    <arxiv:doi>10.5555/SJP.1.1</arxiv:doi>
+    <link rel="related" href="https://doi.org/10.5555/SJP.1.1" title="doi"/>
+  </entry>
+</feed>

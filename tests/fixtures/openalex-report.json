@@ -1,0 +1,33 @@
+{
+  "id": "https://openalex.org/W9000000002",
+  "doi": "https://doi.org/10.5555/ecb-swp.2026.0007",
+  "title": "Liquidations on a Synthetic Lending Protocol",
+  "display_name": "Liquidations on a Synthetic Lending Protocol",
+  "publication_year": 2026,
+  "publication_date": "2026-03-02",
+  "type": "report",
+  "authorships": [
+    {"author": {"display_name": "Gale Northcott"}, "raw_author_name": "Gale Northcott"}
+  ],
+  "primary_location": {
+    "is_oa": true,
+    "landing_page_url": "https://www.example.org/research/swp-2026-7/",
+    "pdf_url": "https://www.example.org/research/swp-2026-7.pdf",
+    "source": {"display_name": "Example Central Bank Research", "type": "repository"}
+  },
+  "locations": [
+    {
+      "is_oa": true,
+      "landing_page_url": "https://www.example.org/research/swp-2026-7/",
+      "pdf_url": "https://www.example.org/research/swp-2026-7.pdf",
+      "version": "publishedVersion",
+      "source": {"display_name": "Example Central Bank Research", "type": "repository"}
+    }
+  ],
+  "open_access": {"is_oa": true, "oa_status": "green"},
+  "abstract_inverted_index": {
+    "We": [0], "study": [1], "decentralized": [2], "lending": [3, 11], "on": [4],
+    "a": [5], "synthetic": [6], "protocol,": [7], "the": [8], "largest": [9],
+    "toy": [10], "venue.": [12]
+  }
+}
