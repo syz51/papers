@@ -860,36 +860,33 @@ fn show_config(c: &config::Config, json: bool) {
     }
 }
 
-/// Note paths keyed by [`Ref::key`]; empty when the directory is absent.
-/// Notes by identifier key, with paths relative to the project root.
-fn note_index(config: &config::Config) -> Result<HashMap<String, PathBuf>, String> {
-    let mut index = notes::load(&config.notes)?
+/// Note paths keyed by [`Ref::key`], for display: relative to the project
+/// root, as `seen` and the registry give them. Empty when the directory is absent.
+fn note_index(config: &config::Config) -> Result<HashMap<String, String>, String> {
+    Ok(notes::load(&config.notes)?
         .map(|n| notes::index(&n))
-        .unwrap_or_default();
-    for path in index.values_mut() {
-        *path = PathBuf::from(config.display(path));
-    }
-    Ok(index)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, path)| (key, config.display(&path)))
+        .collect())
 }
 
 /// The note citing an arXiv paper, by its id or its journal DOI.
-fn paper_note<'a>(index: &'a HashMap<String, PathBuf>, paper: &Paper) -> Option<&'a Path> {
+fn paper_note<'a>(index: &'a HashMap<String, String>, paper: &Paper) -> Option<&'a str> {
     index
         .get(&format!("arxiv:{}", paper.id))
         .or_else(|| {
             let doi = Doi::parse(paper.doi.as_deref()?)?;
             index.get(&Ref::Doi(doi).key())
         })
-        .map(PathBuf::as_path)
+        .map(String::as_str)
 }
 
-fn doi_note<'a>(index: &'a HashMap<String, PathBuf>, doi: &Doi) -> Option<&'a Path> {
-    index
-        .get(&Ref::Doi(doi.clone()).key())
-        .map(PathBuf::as_path)
+fn doi_note<'a>(index: &'a HashMap<String, String>, doi: &Doi) -> Option<&'a str> {
+    index.get(&Ref::Doi(doi.clone()).key()).map(String::as_str)
 }
 
-fn print_paper(paper: &Paper, note: Option<&Path>, with_abstract: bool, json: bool) {
+fn print_paper(paper: &Paper, note: Option<&str>, with_abstract: bool, json: bool) {
     if json {
         #[derive(Serialize)]
         struct Line<'a> {
@@ -899,7 +896,7 @@ fn print_paper(paper: &Paper, note: Option<&Path>, with_abstract: bool, json: bo
         }
         let line = Line {
             paper,
-            note: note.map(|p| p.display().to_string()),
+            note: note.map(str::to_owned),
         };
         println!(
             "{}",
@@ -925,7 +922,7 @@ fn print_paper(paper: &Paper, note: Option<&Path>, with_abstract: bool, json: bo
         out += &format!("  [doi: {d}]");
     }
     if let Some(p) = note {
-        out += &format!("\nnote: {}", p.display());
+        out += &format!("\nnote: {p}");
     }
     if with_abstract {
         out += &format!("\n{}", paper.abstract_text);
@@ -959,7 +956,7 @@ struct DoiLine<'a> {
 }
 
 impl<'a> DoiLine<'a> {
-    fn new(r: &'a Resolved, note: Option<&Path>) -> Self {
+    fn new(r: &'a Resolved, note: Option<&str>) -> Self {
         let rec: Record = r.record();
         let oa = r.openalex.as_ref();
         let (dates, kind, publisher) = match (&r.crossref, oa) {
@@ -989,12 +986,12 @@ impl<'a> DoiLine<'a> {
             oa_status: oa.and_then(|o| o.oa_status.as_deref()),
             oa_locations: oa.map_or(&[], |o| o.oa_locations.as_slice()),
             url: r.doi.url(),
-            note: note.map(|p| p.display().to_string()),
+            note: note.map(str::to_owned),
         }
     }
 }
 
-fn print_resolved(r: &Resolved, note: Option<&Path>, with_abstract: bool, json: bool) {
+fn print_resolved(r: &Resolved, note: Option<&str>, with_abstract: bool, json: bool) {
     let line = DoiLine::new(r, note);
     if json {
         println!(
@@ -1246,7 +1243,7 @@ fn fetch_title(
             .doi
             .as_ref()
             .and_then(|d| doi_note(&index, d))
-            .map(|p| p.display().to_string());
+            .map(str::to_owned);
         if json {
             #[derive(Serialize)]
             struct Line<'a> {
@@ -2163,7 +2160,7 @@ fn stub(http: &Http, config: &config::Config, input: &str, write: bool) -> Resul
         })?;
     file.write_all(note.as_bytes())
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    println!("{}", path.display());
+    println!("{}", config.display(&path));
     Ok(true)
 }
 
@@ -2177,19 +2174,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("papers-note-index-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("research/papers")).unwrap();
+        // An explicit config, so a research.toml above the temp dir is not used.
+        std::fs::write(dir.join("research.toml"), "[papers]\n").unwrap();
         std::fs::write(
             dir.join("research/papers/2026-lee-synthetic.md"),
             "---\nid: 2026-lee-synthetic\ntitle: A Synthetic Title\nauthors: [Ann Lee]\nyear: 2026\nurl: https://doi.org/10.1234/synthetic\n---\n",
         )
         .unwrap();
-        let config = config::Config::load(None, &dir).unwrap();
-        let index = note_index(&config).unwrap();
+        let config = config::Config::load(Some(&dir.join("research.toml")), &dir).unwrap();
+        let index = note_index(&config);
+        std::fs::remove_dir_all(&dir).unwrap();
         let doi = Doi::parse("10.1234/synthetic").unwrap();
         assert_eq!(
-            doi_note(&index, &doi),
-            Some(Path::new("research/papers/2026-lee-synthetic.md"))
+            doi_note(&index.unwrap(), &doi),
+            Some("research/papers/2026-lee-synthetic.md")
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

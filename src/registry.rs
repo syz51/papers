@@ -48,6 +48,10 @@ pub struct Reference {
     /// Optional: true when the source lists only the first authors ("et al.").
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authors_truncated: bool,
+    /// Optional: other spellings of the first author that an index uses, when
+    /// its metadata misspells the name. `verify` accepts any of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub author_variants: Vec<String>,
     /// Fields this version does not know, kept when the registry is rewritten.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -107,6 +111,7 @@ impl Reference {
             source: None,
             verified: None,
             authors_truncated: false,
+            author_variants: Vec::new(),
             extra: Map::new(),
         }
     }

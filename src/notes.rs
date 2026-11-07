@@ -100,6 +100,7 @@ impl Note {
         r.kind = Some("paper".to_owned());
         r.title = meta.title.clone();
         r.authors = (!meta.authors.is_empty()).then(|| meta.authors.clone());
+        r.author_variants = meta.author_variants.clone();
         r.year = meta.year;
         r.venue = meta.venue.clone();
         r.ids.url = meta.url.clone();

@@ -74,7 +74,7 @@ impl Subject {
                 let doi = Doi::parse(r.ids.doi.as_deref()?)?;
                 Some(doi.arxiv()?.id)
             }),
-            author_variants: vec![],
+            author_variants: r.author_variants.clone(),
             checked: None,
             duplicate_of: r.duplicate_of.clone(),
             invalid: None,
@@ -179,15 +179,26 @@ fn compare_people(
         return diffs;
     };
     let first = ours.first().map_or("", String::as_str);
+    // Variants stand in for a misspelt index name, never for a missing author.
+    let variants: &[String] = if ours.is_empty() {
+        &[]
+    } else {
+        &s.author_variants
+    };
     if let Some(family) = family
         && !std::iter::once(first)
-            .chain(s.author_variants.iter().map(String::as_str))
+            .chain(variants.iter().map(String::as_str))
             .any(|name| text::has_surname(name, family))
     {
+        let tried = if variants.is_empty() {
+            String::new()
+        } else {
+            format!(" or author_variants {variants:?}")
+        };
         diffs.push(diff(
             "verify-first-author",
             format!(
-                "first author: ours {first:?} lacks {src} surname {family:?} ({})",
+                "first author: ours {first:?}{tried} lacks {src} surname {family:?} ({})",
                 authors.first().map_or("", String::as_str)
             ),
         ));
@@ -761,7 +772,37 @@ mod tests {
         s.author_variants.push("Ann Leeb".into());
         assert!(compare_paper(&s, &p).is_empty());
         s.author_variants = vec!["Ann Lee".into()];
-        assert_eq!(rules(&compare_paper(&s, &p)), ["verify-first-author"]);
+        let diffs = compare_paper(&s, &p);
+        assert_eq!(rules(&diffs), ["verify-first-author"]);
+        assert!(diffs[0].message.contains("author_variants"), "{diffs:?}");
+        // A variant never stands in for a missing author list.
+        s.authors = Some(vec![]);
+        s.author_variants = vec!["Ann Leeb".into()];
+        assert!(rules(&compare_paper(&s, &p)).contains(&"verify-first-author"));
+    }
+
+    #[test]
+    fn author_variants_reach_verify_from_notes_and_the_registry() {
+        let note = Note {
+            path: "research/papers/2026-leebo-widgets.md".into(),
+            meta: crate::notes::parse_meta(
+                "---\ntitle: Synthetic Widgets\nauthors: [Ann Leebo]\nauthor_variants: [Ann Leeb]\nurl: https://arxiv.org/abs/2601.00001\n---\n",
+            ),
+        };
+        let from_note = Subject::from_note(&note, "research/papers/2026-leebo-widgets.md");
+        assert_eq!(from_note.author_variants, ["Ann Leeb"]);
+        let reference =
+            note.to_reference("research/papers/2026-leebo-widgets.md", &Default::default());
+        let line = serde_json::to_string(&reference).unwrap();
+        let back: Reference = serde_json::from_str(&line).unwrap();
+        assert_eq!(Subject::from_reference(&back).author_variants, ["Ann Leeb"]);
+        let mut plain = reference.clone();
+        plain.author_variants.clear();
+        assert!(
+            !serde_json::to_string(&plain)
+                .unwrap()
+                .contains("author_variants")
+        );
     }
 
     fn record(journal: Option<&str>, years: Option<(i64, i64)>) -> Record {

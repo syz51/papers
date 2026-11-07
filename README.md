@@ -48,6 +48,8 @@ This needs Rust 1.99 or newer (edition 2024). `papers read` can retry a page tha
 | `stub` | Print, or `--write`, a paper note from the archive's template | `papers stub 2601.00001 --write` |
 | `config` | Show the resolved configuration | `papers config --json` |
 
+Paths that `papers` prints (a result's `note`, a written stub, and registry `texts`) are relative to the project root, the directory holding `research.toml`.
+
 `papers <command> --help` lists every option. The global options are:
 
 - `--config <PATH>`: use this `research.toml`.
@@ -105,6 +107,7 @@ Optional fields that `papers` adds to the contract:
 | Field | Meaning |
 | --- | --- |
 | `authors_truncated` | `true` when the source lists only the first authors ("et al."). It is omitted when false. `verify` then skips the author count, and exports end the list with "and others" or "et al.". |
+| `author_variants` | Other spellings of the first author that an index uses when its metadata misspells the name; `verify` accepts any of them. Copied from a note's frontmatter. It is omitted when empty. |
 | `citekey` | A citation key that overrides the generated one in `bib` and `cite`. It is set by hand and kept when the registry is rebuilt. |
 
 Fields that `papers` does not know are kept when it rewrites the registry.
@@ -159,7 +162,7 @@ These parse issues are also reported:
 | `verify-manual` | info | No index lists the work, and a note's `checked` date records a hand check. |
 | `verify-skipped` | info | There is nothing to look up or compare: a duplicate, a non-paper without a DOI or arXiv id, or an entry with neither title nor authors. |
 
-When an index's metadata is wrong rather than the note, record why in the note's frontmatter instead of copying the error: `former_titles` lists earlier titles an index may still show, `author_variants` lists other spellings of the first author that an index uses (for example a name arXiv lists with a letter missing), and `checked: <date>` marks a work no index lists whose metadata was confirmed by hand.
+When an index's metadata is wrong rather than the note, record why in the note's frontmatter instead of copying the error: `former_titles` lists earlier titles an index may still show, `author_variants` lists other spellings of the first author that an index uses (for example a name arXiv lists with a letter missing; `papers registry build` copies it into the registry), and `checked: <date>` marks a work no index lists whose metadata was confirmed by hand.
 
 ## `read`
 
