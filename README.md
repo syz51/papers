@@ -119,7 +119,7 @@ Fields that `papers` does not know are kept when it rewrites the registry.
 
 Every value comes from the text. When the text does not settle a value, it stays `null` and is reported as a parse issue. A rebuild keeps tool-added state (`texts`, `verified`, and fields `papers` does not know) and warns about keys that have disappeared. Keys are never renumbered.
 
-Every write (`registry build`, `verify --record`, `read --record`) takes an exclusive lock on `<registry>.lock` next to the registry, reads the registry afresh, applies its change, and replaces the file atomically. Long runs apply their results at the end, so concurrent runs do not overwrite each other's changes. The lock file holds no data; keep it out of version control.
+Every write (`registry build`, `registry attach`, `verify --record`, `read --record`) takes an exclusive lock on `<registry>.lock` next to the registry, reads the registry afresh, applies its change, and replaces the file atomically. Long runs apply their results at the end, so concurrent runs do not overwrite each other's changes. The lock file holds no data; keep it out of version control.
 
 ### `registry check` rules
 
@@ -168,7 +168,7 @@ When an index's metadata is wrong rather than the note, record why in the note's
 
 `papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file.
 
-Running it again skips the download when the stored text still has the recorded hash; `--force` downloads anyway. `--record` (with `--key`) adds the manifest to the entry's `texts`. For a text obtained another way (by hand, or listed in an existing manifest), `papers registry attach --key <key> --text <path> [--origin <url>]` records it the same way: the path must be inside the project root, and a text already recorded at that path is replaced.
+Running it again skips the download when the stored text still has the recorded hash; `--force` downloads anyway. `--record` (with `--key`) adds the manifest to the entry's `texts`. For a text obtained another way (by hand, or listed in an existing manifest), `papers registry attach --key <key> --text <path> [--origin <url>]` records it the same way: the file must be non-empty UTF-8 text inside the project root (symlinks are resolved first), and a text already recorded at that path is replaced, keeping its origin when `--origin` is not given.
 
 Unless `--no-browser` is given, a candidate retries in headless Chromium only when its plain-HTTP reply was a JavaScript check page: a 202 HTML reply (how AWS WAF serves its challenge, as on figshare) or a small 200 HTML page with a challenge marker. A 403, a 429, any other refusal, and transport errors are reported and never retried in the browser. When a host blocks automated browsers, `papers` reports the block. It does no CAPTCHA solving or fingerprint spoofing.
 

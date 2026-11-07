@@ -82,7 +82,7 @@ impl Config {
     pub fn load(explicit: Option<&Path>, cwd: &Path) -> Result<Config, String> {
         let file = match explicit {
             Some(path) => {
-                let path = cwd.join(path);
+                let path = normalize(&cwd.join(path));
                 if !path.is_file() {
                     return Err(format!("{}: no such config file", path.display()));
                 }

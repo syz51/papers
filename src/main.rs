@@ -240,7 +240,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Build or check the reference registry (rf.reference/1 JSONL).
+    /// Build or check the reference registry (rf.reference/1 JSONL), or attach a text to an entry.
     Registry {
         #[command(subcommand)]
         action: RegistryAction,
@@ -330,30 +330,78 @@ enum RegistryAction {
     },
 }
 
-/// The registry entry for a text file inside the project: its root-relative path and sha256.
+/// The registry entry for a text file inside the project: its root-relative path
+/// (with `/` separators) and sha256. Symlinks are resolved before the root check,
+/// so a link that leads out of the project is refused and the recorded path is
+/// the file's real one.
 fn local_text(
     config: &config::Config,
     cwd: &Path,
     path: &Path,
     origin: Option<String>,
 ) -> Result<registry::Text, String> {
-    let abs = config::normalize(&cwd.join(path));
-    let rel = abs
-        .strip_prefix(&config.root)
-        .ok()
-        .filter(|p| !p.as_os_str().is_empty() && !p.starts_with(".."))
-        .ok_or_else(|| {
-            format!(
-                "{} is outside the project root {}; texts are recorded relative to it",
-                abs.display(),
-                config.root.display()
-            )
-        })?;
-    let bytes = std::fs::read(&abs).map_err(|e| format!("{}: {e}", abs.display()))?;
+    let given = cwd.join(path);
+    let real = std::fs::canonicalize(&given).map_err(|e| format!("{}: {e}", given.display()))?;
+    if !real.is_file() {
+        return Err(format!("{} is not a file", given.display()));
+    }
+    let root = std::fs::canonicalize(&config.root)
+        .map_err(|e| format!("{}: {e}", config.root.display()))?;
+    let rel = real.strip_prefix(&root).map_err(|_| {
+        format!(
+            "{} is outside the project root {}; texts are recorded relative to it",
+            real.display(),
+            root.display()
+        )
+    })?;
+    let rel = rel
+        .iter()
+        .map(|c| c.to_str())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| format!("{}: the path is not valid UTF-8", real.display()))?
+        .join("/");
+    let bytes = std::fs::read(&real).map_err(|e| format!("{}: {e}", real.display()))?;
+    if bytes.is_empty() {
+        return Err(format!("{} is empty", given.display()));
+    }
+    if std::str::from_utf8(&bytes).is_err() {
+        return Err(format!(
+            "{} is not UTF-8 text; attach the extracted text, not the PDF",
+            given.display()
+        ));
+    }
     Ok(registry::Text {
-        path: rel.to_string_lossy().into_owned(),
+        path: rel,
         sha256: http::sha256_hex(&bytes),
         origin,
+    })
+}
+
+/// Records `text` in entry `key`'s `texts`, replacing a text at the same path.
+/// The replaced text's origin is kept when `text` has none. Returns the text as
+/// recorded.
+fn record_text(
+    config: &config::Config,
+    key: &str,
+    mut text: registry::Text,
+    missing: impl FnOnce() -> String,
+) -> Result<registry::Text, String> {
+    registry::update(&config.registry, |records| {
+        let r = records
+            .iter_mut()
+            .find(|r| r.key == key)
+            .ok_or_else(missing)?;
+        if let Some(target) = &r.duplicate_of {
+            println!("note: entry {key} is a duplicate of {target}");
+        }
+        if let Some(old) = r.texts.iter().find(|t| t.path == text.path)
+            && text.origin.is_none()
+        {
+            text.origin = old.origin.clone();
+        }
+        r.texts.retain(|t| t.path != text.path);
+        r.texts.push(text.clone());
+        Ok(text)
     })
 }
 
@@ -804,17 +852,18 @@ fn registry(mut config: config::Config, action: RegistryAction) -> Result<bool, 
             registry,
         } => {
             set_registry(&mut config, registry);
+            if !config.registry.is_file() {
+                return Err(format!(
+                    "attach needs a registry; none at {}",
+                    config.display(&config.registry)
+                ));
+            }
             let text = local_text(&config, &cwd, &text, origin)?;
-            registry::update(&config.registry, |records| {
-                let r = records.iter_mut().find(|r| r.key == key).ok_or_else(|| {
-                    format!(
-                        "{}: no entry with key {key}",
-                        config.display(&config.registry)
-                    )
-                })?;
-                r.texts.retain(|t| t.path != text.path);
-                r.texts.push(text.clone());
-                Ok(())
+            let text = record_text(&config, &key, text, || {
+                format!(
+                    "{}: no entry with key {key}",
+                    config.display(&config.registry)
+                )
             })?;
             println!(
                 "recorded in {} (key {key})",
@@ -1693,16 +1742,8 @@ fn finish_read(
         && let Some(entry) = entry
     {
         // Applied to the registry as it is now, not the copy loaded before the download.
-        registry::update(&config.registry, |records| {
-            let r = records
-                .iter_mut()
-                .find(|r| r.key == entry.key)
-                .ok_or_else(|| {
-                    format!("entry {} left the registry during the download", entry.key)
-                })?;
-            r.texts.retain(|t| t.path != text.path);
-            r.texts.push(text.clone());
-            Ok(())
+        record_text(config, &entry.key, text, || {
+            format!("entry {} left the registry during the download", entry.key)
         })?;
         println!(
             "recorded in {} (key {})",
