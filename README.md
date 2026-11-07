@@ -115,6 +115,7 @@ Fields that `papers` does not know are kept when it rewrites the registry.
 `registry build` reads one of two sources:
 
 - **A catalogue.** A numbered Markdown file with one `## Reference N` section per work. The entry line reads `[N] Authors. **Title**. Venue … [Original](url). Accessed <date>.`
+  An entry's reading depth comes from a line `Inspection depth: <level>`, where the level is one of `metadata`, `abstract`, `method`, `full`, `artifact` or `reproduced`. Without one, it comes from `Inspection:` lines that name exactly one level in plain words, such as "abstract only" or "read in full"; when they name none or several, the depth stays `null`.
 - **Notes.** One Markdown file per paper, with YAML frontmatter.
 
 Every value comes from the text. When the text does not settle a value, it stays `null` and is reported as a parse issue. A rebuild keeps tool-added state (`texts`, `verified`, and fields `papers` does not know) and warns about keys that have disappeared. Keys are never renumbered.

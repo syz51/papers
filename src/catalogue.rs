@@ -14,7 +14,7 @@ use regex::Regex;
 use crate::finding::Severity;
 use crate::id::ArxivId;
 use crate::refs::Doi;
-use crate::registry::{Reference, Source};
+use crate::registry::{DEPTHS, Reference, Source};
 use crate::text::squash;
 
 /// A problem found while parsing, reported by `registry check`.
@@ -837,14 +837,27 @@ static DEPTH_PHRASES: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
 });
 re!(NEGATION, r"(?i)\b(?:not|no|without|never)\b[^.;]{0,20}$");
 
-/// The inspection depth when the section's `Inspection:` lines name exactly one
-/// level in plain words (negated mentions such as "not full read" are ignored).
+/// The inspection depth. A line `Inspection depth: <level>` that names one
+/// `rf.reference/1` level and nothing else states it outright and wins over
+/// prose; otherwise it is the level when the section's `Inspection:` lines name
+/// exactly one in plain words (negated mentions such as "not full read" are
+/// ignored). Conflicting explicit levels leave the depth unknown.
 fn depth(section: &Section) -> Option<String> {
+    let mut explicit = BTreeSet::new();
     let mut levels = BTreeSet::new();
     for &(_, line) in &section.body {
         let Some(c) = INSPECTION.captures(line.trim()) else {
             continue;
         };
+        let stated = c[1]
+            .trim()
+            .trim_end_matches('.')
+            .trim()
+            .to_ascii_lowercase();
+        if let Some(level) = DEPTHS.iter().find(|d| **d == stated) {
+            explicit.insert(*level);
+            continue;
+        }
         let mut text = c[1].to_owned();
         for (level, re) in DEPTH_PHRASES.iter() {
             let mut hit = false;
@@ -858,6 +871,9 @@ fn depth(section: &Section) -> Option<String> {
             }
             text = re.replace_all(&text, " ").into_owned();
         }
+    }
+    if !explicit.is_empty() {
+        levels = explicit;
     }
     (levels.len() == 1)
         .then(|| levels.first().map(|l| (*l).to_owned()))
@@ -996,6 +1012,42 @@ Example Corp. **Pricing Notes.** Official web page, date not stated. https://exa
         assert_eq!(r.year, Some(2025));
         assert_eq!(r.duplicate_of.as_deref(), Some("1"));
         assert_eq!(r.depth, None);
+    }
+
+    #[test]
+    fn an_explicit_depth_line_wins_over_prose_and_conflicts_stay_unknown() {
+        let catalogue = "\
+## Reference 1
+
+[1] Doe, Jane. **Explicit Over Prose**. Example Venue, 2025. [Original](https://example.org/1). Accessed 2026-01-05.
+
+Inspection: selected original methods read.
+Inspection depth: Artifact.
+
+## Reference 2
+
+[2] Doe, Jane. **Only The Explicit Line**. Example Venue, 2025. [Original](https://example.org/2). Accessed 2026-01-05.
+
+**Inspection depth:** reproduced
+
+## Reference 3
+
+[3] Doe, Jane. **Two Explicit Levels**. Example Venue, 2025. [Original](https://example.org/3). Accessed 2026-01-05.
+
+Inspection depth: abstract.
+Inspection depth: full.
+
+## Reference 4
+
+[4] Doe, Jane. **Not A Level**. Example Venue, 2025. [Original](https://example.org/4). Accessed 2026-01-05.
+
+Inspection depth: skimmed.
+";
+        let p = parse(catalogue, "docs/references.md");
+        assert_eq!(get(&p, "1").depth.as_deref(), Some("artifact"));
+        assert_eq!(get(&p, "2").depth.as_deref(), Some("reproduced"));
+        assert_eq!(get(&p, "3").depth, None, "conflicting explicit levels");
+        assert_eq!(get(&p, "4").depth, None, "unknown word is not a level");
     }
 
     #[test]
