@@ -909,30 +909,16 @@ fn show_config(c: &config::Config, json: bool) {
     }
 }
 
-/// Note paths keyed by [`Ref::key`], for display: relative to the project
-/// root, as `seen` and the registry give them. Empty when the directory is absent.
-fn note_index(config: &config::Config) -> Result<HashMap<String, String>, String> {
-    Ok(notes::load(&config.notes)?
-        .map(|n| notes::index(&n))
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(key, path)| (key, config.display(&path)))
-        .collect())
-}
-
 /// The note citing an arXiv paper, by its id or its journal DOI.
-fn paper_note<'a>(index: &'a HashMap<String, String>, paper: &Paper) -> Option<&'a str> {
-    index
-        .get(&format!("arxiv:{}", paper.id))
-        .or_else(|| {
-            let doi = Doi::parse(paper.doi.as_deref()?)?;
-            index.get(&Ref::Doi(doi).key())
-        })
-        .map(String::as_str)
+fn paper_note<'a>(index: &'a seen::Index, paper: &Paper) -> Option<&'a str> {
+    index.note(&format!("arxiv:{}", paper.id)).or_else(|| {
+        let doi = Doi::parse(paper.doi.as_deref()?)?;
+        doi_note(index, &doi)
+    })
 }
 
-fn doi_note<'a>(index: &'a HashMap<String, String>, doi: &Doi) -> Option<&'a str> {
-    index.get(&Ref::Doi(doi.clone()).key()).map(String::as_str)
+fn doi_note<'a>(index: &'a seen::Index, doi: &Doi) -> Option<&'a str> {
+    index.note(&Ref::from_doi(doi.clone()).key())
 }
 
 fn print_paper(paper: &Paper, note: Option<&str>, with_abstract: bool, json: bool) {
@@ -1161,13 +1147,13 @@ fn work_found(w: &openalex::Work) -> searchlog::Found {
 fn log_searches(
     config: &config::Config,
     out: Output,
+    index: &seen::Index,
     entries: impl FnOnce(&seen::Index) -> Vec<searchlog::Entry>,
 ) -> Result<(), String> {
     if !out.log {
         return Ok(());
     }
-    let index = seen::Index::load(config)?;
-    searchlog::append(&config.search_log, &entries(&index))
+    searchlog::append(&config.search_log, &entries(index))
 }
 
 fn fetch(
@@ -1192,7 +1178,7 @@ fn fetch(
         Client::new(http).fetch(&arxiv_ids)
     }
     .into_iter();
-    let index = note_index(config)?;
+    let index = seen::Index::load(config)?;
     let mut all_ok = true;
     for (input, reference) in inputs.iter().zip(parsed) {
         let result = match reference {
@@ -1246,7 +1232,7 @@ fn fetch(
             report_error(input, &message, json);
         }
     }
-    log_searches(config, out, |index| {
+    log_searches(config, out, &index, |index| {
         logged
             .iter()
             .map(|(query, source, found)| {
@@ -1271,7 +1257,8 @@ fn fetch_title(
 ) -> Result<bool, String> {
     let (with_abstract, json) = (out.with_abstract, out.json);
     let results = openalex::Client::new(http).search_title(title, TITLE_RESULTS)?;
-    log_searches(config, out, |index| {
+    let index = seen::Index::load(config)?;
+    log_searches(config, out, &index, |index| {
         let found: Vec<searchlog::Found> = results.iter().map(work_found).collect();
         vec![searchlog::Entry::new(
             "openalex",
@@ -1285,7 +1272,6 @@ fn fetch_title(
         eprintln!("papers: OpenAlex found no works for title {title:?}");
         return Ok(false);
     }
-    let index = note_index(config)?;
     for w in &results {
         let score = text::similarity(title, &w.title);
         let note = w
@@ -1356,7 +1342,8 @@ fn search(
         return Err("empty search query".to_owned());
     }
     let (total, results) = client.search(query, sort, max)?;
-    log_searches(config, out, |index| {
+    let index = seen::Index::load(config)?;
+    log_searches(config, out, &index, |index| {
         let found: Vec<searchlog::Found> = results.iter().map(paper_found).collect();
         let mut params = params;
         params["total"] = total.into();
@@ -1366,7 +1353,6 @@ fn search(
         "papers: {total} results for {query} (showing {})",
         results.len()
     );
-    let index = note_index(config)?;
     for paper in &results {
         print_paper(paper, paper_note(&index, paper), with_abstract, json);
     }
@@ -2223,13 +2209,16 @@ mod tests {
         )
         .unwrap();
         let config = config::Config::load(Some(&dir.join("research.toml")), &dir).unwrap();
-        let index = note_index(&config);
+        let index = seen::Index::load(&config);
         std::fs::remove_dir_all(&dir).unwrap();
+        let index = index.unwrap();
         let doi = Doi::parse("10.1234/synthetic").unwrap();
         assert_eq!(
-            doi_note(&index.unwrap(), &doi),
+            doi_note(&index, &doi),
             Some("research/papers/2026-lee-synthetic.md")
         );
+        // A registry entry with the same DOI is not a note.
+        assert_eq!(index.note("doi:10.9999/none"), None);
     }
 
     #[test]

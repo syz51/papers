@@ -1,6 +1,5 @@
 //! One-note-per-paper archives: frontmatter, verification, and stubs.
 
-use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -24,14 +23,29 @@ pub struct Meta {
     /// Date the metadata was confirmed by hand, for papers no index lists.
     pub checked: Option<String>,
     /// Earlier titles of the same paper (indexes often keep the first posting's).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "one_or_many")]
     pub former_titles: Vec<String>,
     /// Spellings an index uses for the first author when it differs from the
     /// paper itself (a misspelt name in arXiv's or Crossref's metadata).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "one_or_many")]
     pub author_variants: Vec<String>,
     /// Reading status, mapped to a registry depth by `[papers] status_depth`.
     pub status: Option<String>,
+}
+
+/// A list of strings, a single string as a one-item list, or nothing.
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<OneOrMany>::deserialize(d)? {
+        None => Vec::new(),
+        Some(OneOrMany::One(s)) => vec![s],
+        Some(OneOrMany::Many(v)) => v,
+    })
 }
 
 pub struct Note {
@@ -53,23 +67,6 @@ impl Note {
             .and_then(Doi::parse)
             .map(Ref::Doi)
             .or(from_url)
-    }
-
-    /// Every index key the note answers to: its arXiv id, `doi` field, and url DOI.
-    fn keys(&self) -> Vec<String> {
-        let Ok(meta) = &self.meta else {
-            return Vec::new();
-        };
-        let mut keys: Vec<String> = [
-            meta.url.as_deref().and_then(Ref::from_note_url),
-            meta.doi.as_deref().and_then(Doi::parse).map(Ref::Doi),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|r| r.key())
-        .collect();
-        keys.dedup();
-        keys
     }
 }
 
@@ -162,21 +159,6 @@ pub fn load(dir: &Path) -> Result<Option<Vec<Note>>, String> {
     }
     notes.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(Some(notes))
-}
-
-/// Maps [`Ref::key`]s (`arxiv:<id>`, `doi:<doi>`) to the notes that cite them;
-/// warns about unreadable notes.
-pub fn index(notes: &[Note]) -> HashMap<String, PathBuf> {
-    let mut map = HashMap::new();
-    for note in notes {
-        if let Err(e) = &note.meta {
-            eprintln!("papers: skipping {}: {e}", note.path.display());
-        }
-        for key in note.keys() {
-            map.entry(key).or_insert_with(|| note.path.clone());
-        }
-    }
-    map
 }
 
 /// True when a title-search hit may stand in for a note: equal normalized titles.
@@ -521,8 +503,11 @@ mod tests {
                 Some("10.1234/X"),
             )),
         };
-        let idx = index(std::slice::from_ref(&note));
-        assert!(idx.contains_key("arxiv:2208.06046") && idx.contains_key("doi:10.1234/x"));
+        // The seen index files the note under both its arXiv id and its DOI.
+        let mut idx = crate::seen::Index::default();
+        idx.add(&note.to_reference("n.md", &Default::default()), "n.md");
+        assert_eq!(idx.note("arxiv:2208.06046"), Some("n.md"));
+        assert_eq!(idx.note("doi:10.1234/x"), Some("n.md"));
     }
 
     #[test]

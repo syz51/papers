@@ -162,7 +162,7 @@ These parse issues are also reported:
 | `verify-manual` | info | No index lists the work, and a note's `checked` date records a hand check. |
 | `verify-skipped` | info | There is nothing to look up or compare: a duplicate, a non-paper without a DOI or arXiv id, or an entry with neither title nor authors. |
 
-When an index's metadata is wrong rather than the note, record why in the note's frontmatter instead of copying the error: `former_titles` lists earlier titles an index may still show, `author_variants` lists other spellings of the first author that an index uses (for example a name arXiv lists with a letter missing; `papers registry build` copies it into the registry), and `checked: <date>` marks a work no index lists whose metadata was confirmed by hand.
+When an index's metadata is wrong rather than the note, record why in the note's frontmatter instead of copying the error: `former_titles` lists earlier titles an index may still show, `author_variants` lists other spellings of the first author that an index uses (for example a name arXiv lists with a letter missing; `papers registry build` copies it into the registry), and `checked: <date>` marks a work no index lists whose metadata was confirmed by hand. `former_titles` and `author_variants` take a list or a single string.
 
 ## `read`
 

@@ -65,12 +65,26 @@ impl Index {
         }
         if let Some(all) = notes::load(&config.notes)? {
             index.loaded = true;
-            for note in all.iter().filter(|n| n.meta.is_ok()) {
+            for note in &all {
+                if let Err(e) = &note.meta {
+                    eprintln!("papers: skipping {}: {e}", note.path.display());
+                    continue;
+                }
                 let path = config.display(&note.path);
                 index.add(&note.to_reference(&path, &config.status_depth), &path);
             }
         }
         Ok(index)
+    }
+
+    /// The first note (not the registry) filed under an index key such as
+    /// `arxiv:<id>` or `doi:<doi>`, by its path.
+    pub fn note(&self, key: &str) -> Option<&str> {
+        self.map
+            .get(key)?
+            .iter()
+            .find(|(_, origin)| origin != "registry")
+            .map(|(_, origin)| origin.as_str())
     }
 
     pub fn add(&mut self, r: &Reference, origin: &str) {

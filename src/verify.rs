@@ -805,6 +805,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scalar_list_fields_parse_and_verify() {
+        let note = Note {
+            path: "research/papers/2026-leebo-widgets.md".into(),
+            meta: crate::notes::parse_meta(
+                "---\ntitle: Synthetic Widgets\nformer_titles: Widgets, Synthetically\nauthors: [Ann Leebo, Bo Chan]\nyear: 2022\nauthor_variants: Ann Leeb\nurl: https://arxiv.org/abs/2601.00001\n---\n",
+            ),
+        };
+        let s = Subject::from_note(&note, "research/papers/2026-leebo-widgets.md");
+        assert_eq!(s.author_variants, ["Ann Leeb"]);
+        assert!(s.titles.iter().any(|t| t == "Widgets, Synthetically"));
+        let p = paper("Synthetic Widgets", &["Ann Leeb", "Bo Chan"]);
+        assert!(
+            compare_paper(&s, &p).is_empty(),
+            "{:?}",
+            compare_paper(&s, &p)
+        );
+        // An empty field is no variants, not an invalid note.
+        let empty = crate::notes::parse_meta("---\ntitle: T\nauthor_variants:\n---\n").unwrap();
+        assert!(empty.author_variants.is_empty());
+    }
+
     fn record(journal: Option<&str>, years: Option<(i64, i64)>) -> Record {
         Record {
             source: "Crossref",
