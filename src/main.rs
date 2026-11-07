@@ -1757,7 +1757,15 @@ fn read(http: &Http, config: &config::Config, o: &ReadOptions) -> Result<bool, S
             .and_then(|r| r.title.clone())
             .unwrap_or_default(),
     };
-    let saved = download(http, &input, reference.as_ref(), target, o.browser)?;
+    let mut browse = |pages: &[String], target: &Target| {
+        if o.browser {
+            try_in_browser(pages, target)
+        } else {
+            println!("not retrying the JavaScript check page(s) in a browser (--no-browser)");
+            Ok(None)
+        }
+    };
+    let saved = download(http, &input, reference.as_ref(), target, &mut browse)?;
     match saved {
         Some(Saved::Text(t)) => finish_read(config, o, entry.as_ref(), &sidecar, t),
         Some(Saved::PdfOnly) => Ok(false),
@@ -1796,13 +1804,17 @@ fn finish_read(
     Ok(true)
 }
 
+/// Retries JavaScript check pages in a browser: `try_in_browser`, or a
+/// stand-in in tests.
+type Browse<'b> = dyn FnMut(&[String], &Target) -> Result<Option<Saved>, String> + 'b;
+
 /// Finds and downloads an open-access PDF; `None` when no candidate was one.
 fn download(
     http: &Http,
     input: &str,
     reference: Option<&Ref>,
     mut target: Target,
-    use_browser: bool,
+    browse: &mut Browse,
 ) -> Result<Option<Saved>, String> {
     let candidates = match reference {
         Some(Ref::Arxiv(id)) => {
@@ -1851,7 +1863,7 @@ fn download(
         // The copy the user named comes first: its JavaScript check pages are
         // retried in the browser before other copies are looked for. A browser
         // failure here leaves those other copies to try.
-        match retry_challenged(&mut challenged, &target, use_browser) {
+        match retry_challenged(&mut challenged, &target, browse) {
             Ok(Some(saved)) => return Ok(Some(saved)),
             Ok(None) => {}
             Err(e) => println!("browser: {e}"),
@@ -1927,7 +1939,7 @@ fn download(
             }
         }
     }
-    retry_challenged(&mut challenged, &target, use_browser)
+    retry_challenged(&mut challenged, &target, browse)
 }
 
 /// Looks `doi` up and prints it. Returns its title and the open-access
@@ -1945,22 +1957,17 @@ fn doi_candidates(http: &Http, doi: &Doi) -> Result<Option<(String, Vec<Candidat
     )))
 }
 
-/// Retries the JavaScript check pages in `challenged` in a browser (see
-/// `try_in_browser`), unless `use_browser` is off, and empties `challenged`.
+/// Retries the JavaScript check pages in `challenged` with `browse`, and
+/// empties `challenged`.
 fn retry_challenged(
     challenged: &mut Vec<String>,
     target: &Target,
-    use_browser: bool,
+    browse: &mut Browse,
 ) -> Result<Option<Saved>, String> {
     if challenged.is_empty() {
         return Ok(None);
     }
-    let pages = std::mem::take(challenged);
-    if !use_browser {
-        println!("not retrying the JavaScript check page(s) in a browser (--no-browser)");
-        return Ok(None);
-    }
-    try_in_browser(&pages, target)
+    browse(&std::mem::take(challenged), target)
 }
 
 /// Retries in headless Chromium the candidates that answered with a JavaScript
@@ -2562,6 +2569,94 @@ mod tests {
         assert!(heads[1].starts_with("GET /repo/2/paper.pdf "), "{heads:?}");
         let text = manifest(&dir, &url);
         assert_eq!(text.origin, Some(format!("{base}/repo/2/paper.pdf")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A URL's own copy comes first: when its PDF link answers with a
+    /// JavaScript check page, the browser retry runs before the DOI that the
+    /// landing page names is looked up.
+    #[test]
+    fn retries_a_urls_challenge_page_before_the_doi_it_names() {
+        use crate::http::{response, seed_cache};
+        use std::io::{Read, Write};
+        let dir = std::env::temp_dir().join(format!("papers-read-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let page = r#"<html><head><meta name="citation_doi" content="10.5555/synthetic.3">
+            <meta name="citation_pdf_url" content="/files/paper.pdf"></head></html>"#;
+        let html = ["Content-Type: text/html"];
+        let (base, server) = http::serve(vec![
+            response("200 OK", &html, page),
+            response(
+                "202 Accepted",
+                &html,
+                "<html><script src=x></script></html>",
+            ),
+            // Requested only if the DOI's copy is tried before the browser.
+            response(
+                "200 OK",
+                &["Content-Type: application/pdf"],
+                &tiny_pdf("Synthetic DOI Copy"),
+            ),
+        ]);
+        let cache = dir.join("cache");
+        seed_cache(
+            &cache,
+            "https://api.crossref.org/works/10.5555/synthetic.3",
+            404,
+            "",
+        );
+        let work = serde_json::json!({
+            "id": "https://openalex.org/W9000000003",
+            "doi": "https://doi.org/10.5555/synthetic.3",
+            "title": "Synthetic Challenged Paper",
+            "display_name": "Synthetic Challenged Paper",
+            "publication_year": 2026,
+            "type": "article",
+            "authorships": [],
+            "locations": [{
+                "is_oa": true,
+                "landing_page_url": format!("{base}/repo/3"),
+                "pdf_url": format!("{base}/repo/3/paper.pdf"),
+            }],
+        });
+        seed_cache(
+            &cache,
+            "https://api.openalex.org/works/doi:10.5555/synthetic.3",
+            200,
+            &work.to_string(),
+        );
+        let http = Http::new().with_cache(http::Cache {
+            dir: cache,
+            refresh: false,
+        });
+        let config = config::Config::load(None, &dir).unwrap();
+        let target = Target {
+            config: &config,
+            dir: dir.clone(),
+            name: "order".into(),
+            title: String::new(),
+        };
+        let mut retried = Vec::new();
+        let mut browse = |pages: &[String], _: &Target| {
+            retried.extend_from_slice(pages);
+            Ok(Some(Saved::PdfOnly))
+        };
+        let url = format!("{base}/item/3");
+        let saved = download(&http, &url, None, target, &mut browse);
+        // The server answers a fixed number of connections. Take its last
+        // canned response if nothing did, so it finishes either way; the read
+        // timeout covers a server that already has.
+        if let Ok(mut s) = std::net::TcpStream::connect(base.trim_start_matches("http://")) {
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let _ = s.write_all(b"GET /done HTTP/1.1\r\n\r\n");
+            let _ = s.read_to_end(&mut Vec::new());
+        }
+        let heads = server.join().unwrap();
+        assert!(heads[1].starts_with("GET /files/paper.pdf "), "{heads:?}");
+        assert!(heads[2].starts_with("GET /done "), "{heads:?}");
+        assert!(matches!(saved, Ok(Some(Saved::PdfOnly))), "{heads:?}");
+        assert_eq!(retried, [format!("{base}/files/paper.pdf")]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
