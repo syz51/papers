@@ -109,8 +109,9 @@ Optional fields that `papers` adds to the contract:
 | `authors_truncated` | `true` when the source lists only the first authors ("et al."). It is omitted when false. `verify` then skips the author count, and exports end the list with "and others" or "et al.". |
 | `author_variants` | Other spellings of the first author that an index uses when its metadata misspells the name; `verify` accepts any of them. Copied from a note's frontmatter. It is omitted when empty. |
 | `citekey` | A citation key that overrides the generated one in `bib` and `cite`. It is set by hand and kept when the registry is rebuilt. |
+| `texts[].retrieved` | When `read` downloaded the text, as a UTC RFC 3339 time. It is omitted for texts attached by hand and for texts recorded before `papers` added it. |
 
-Fields that `papers` does not know are kept when it rewrites the registry.
+Fields that `papers` does not know are kept when it rewrites the registry, in entries and in `texts` objects.
 
 `registry build` reads one of two sources:
 
@@ -168,9 +169,16 @@ When an index's metadata is wrong rather than the note, record why in the note's
 
 ## `read`
 
-`papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file.
+`papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin, retrieved}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file, and `retrieved` is the UTC time of the download (RFC 3339). Texts attached by hand have no `retrieved`.
 
-Running it again skips the download when the stored text still has the recorded hash; `--force` downloads anyway. `--record` (with `--key`) adds the manifest to the entry's `texts`. For a text obtained another way (by hand, or listed in an existing manifest), `papers registry attach --key <key> --text <path> [--origin <url>]` records it the same way: the file must be non-empty UTF-8 text inside the project root (symlinks are resolved first), and a text already recorded at that path is replaced, keeping its origin when `--origin` is not given.
+`<ref>` can also be the http(s) URL of a PDF or of a landing page, for open copies that have no arXiv id or DOI, such as a central bank's bulletin or a university repository's file:
+- A URL ending in `.pdf` is downloaded directly.
+- Any other URL is read as a landing page. Its `citation_pdf_url` meta tag and same-host PDF links are tried in order.
+- The files are named after the URL's host and last path segment, plus 8 hex digits of its hash, such as `bis.org_bisbull90_1a2b3c4d`.
+- When the landing page names a DOI in its metadata (`citation_doi`, `dc.identifier`, `prism.doi`), the DOI's own open-access locations are tried next, then other versions with the same title. This happens only when the page and its links yield no PDF, including after the browser retry described below.
+- The manifest's `origin` is the URL the PDF came from.
+
+Running it again skips the download when the stored text still has the recorded hash; `--force` downloads anyway. `--record` (with `--key`) adds the manifest to the entry's `texts`. For a text obtained another way (by hand, or listed in an existing manifest), `papers registry attach --key <key> --text <path> [--origin <url>]` records it the same way: the file must be non-empty UTF-8 text inside the project root (symlinks are resolved first), and a text already recorded at that path is replaced, keeping its origin when `--origin` is not given. When the file is unchanged, the replaced text's `retrieved` is kept too.
 
 Unless `--no-browser` is given, a candidate retries in headless Chromium only when its plain-HTTP reply was a JavaScript check page: a 202 HTML reply (how AWS WAF serves its challenge, as on figshare) or a small 200 HTML page with a challenge marker. A 403, a 429, any other refusal, and transport errors are reported and never retried in the browser. When a host blocks automated browsers, `papers` reports the block. It does no CAPTCHA solving or fingerprint spoofing.
 

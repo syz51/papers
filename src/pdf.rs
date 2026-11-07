@@ -76,9 +76,9 @@ pub fn page_pdf_links(html: &str, base: &str) -> Vec<String> {
         return Vec::new();
     };
     let mut links = Vec::new();
+    // `raw` is already entity-decoded.
     let mut push = |raw: &str, same_host_only: bool| {
-        let raw = raw.replace("&amp;", "&");
-        if let Some(url) = resolve(base, &raw)
+        if let Some(url) = resolve(base, raw)
             && (!same_host_only || host(&url).is_ok_and(|h| h == base_host))
             && !links.contains(&url)
             && links.len() < MAX_PAGE_LINKS
@@ -86,16 +86,12 @@ pub fn page_pdf_links(html: &str, base: &str) -> Vec<String> {
             links.push(url);
         }
     };
-    let lower = html.to_ascii_lowercase();
-    for (start, _) in lower.match_indices("<meta") {
-        let end = lower[start..].find('>').map_or(lower.len(), |e| start + e);
-        let tag = &html[start..end];
-        if attr(tag, "name").is_some_and(|n| n.eq_ignore_ascii_case("citation_pdf_url"))
-            && let Some(content) = attr(tag, "content")
-        {
-            push(content, false);
+    for (name, content) in meta_tags(html) {
+        if name.eq_ignore_ascii_case("citation_pdf_url") {
+            push(&content, false);
         }
     }
+    let lower = html.to_ascii_lowercase();
     for (start, _) in lower.match_indices("href=") {
         let Some(value) = quoted(&html[start + 5..]) else {
             continue;
@@ -103,10 +99,58 @@ pub fn page_pdf_links(html: &str, base: &str) -> Vec<String> {
         let path = value.split(['?', '#']).next().unwrap_or_default();
         let path = path.to_ascii_lowercase();
         if path.ends_with(".pdf") || DOWNLOAD_PATHS.iter().any(|p| path.contains(p)) {
-            push(value, true);
+            push(&unescape(value), true);
         }
     }
     links
+}
+
+/// Meta tags that publishers and repositories use for a page's DOI.
+const DOI_META: &[&str] = &[
+    "citation_doi",
+    "dc.identifier",
+    "dc.identifier.doi",
+    "prism.doi",
+    "bepress_citation_doi",
+];
+
+/// The DOI an HTML landing page names in its metadata (`citation_doi`,
+/// `dc.identifier` and similar), if any.
+pub fn page_doi(html: &str) -> Option<crate::refs::Doi> {
+    meta_tags(html).into_iter().find_map(|(name, content)| {
+        DOI_META
+            .iter()
+            .any(|m| name.eq_ignore_ascii_case(m))
+            .then(|| crate::refs::Doi::parse(&content))
+            .flatten()
+    })
+}
+
+/// The `<meta>` tags of a page that have a name (`name` or `property`) and a
+/// `content`, with the content entity-decoded.
+fn meta_tags(html: &str) -> Vec<(&str, String)> {
+    // ASCII lowercasing keeps byte offsets, so indices into `lower` slice `html`.
+    let lower = html.to_ascii_lowercase();
+    lower
+        .match_indices("<meta")
+        .filter_map(|(start, _)| {
+            let end = lower[start..].find('>').map_or(lower.len(), |e| start + e);
+            let tag = &html[start..end];
+            let name = attr(tag, "name").or_else(|| attr(tag, "property"))?;
+            Some((name, unescape(attr(tag, "content")?)))
+        })
+        .collect()
+}
+
+/// Decodes the HTML entities that occur in attribute values. `&amp;` goes
+/// last so that `&amp;lt;` stays the text `&lt;`.
+fn unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// Value of `name="..."` (or single-quoted) inside a tag.
@@ -209,5 +253,40 @@ mod tests {
             page_pdf_links(html, "https://figshare.com/articles/x/25886773"),
             ["https://figshare.com/ndownloader/files/52627142/1"]
         );
+    }
+
+    #[test]
+    fn finds_a_landing_page_doi() {
+        let doi = |html: &str| page_doi(html).map(|d| d.as_str().to_owned());
+        assert_eq!(
+            doi(
+                r#"<meta name="citation_title" content="X"><meta name="citation_doi" content="10.1016/J.X.2024.1">"#
+            ),
+            Some("10.1016/j.x.2024.1".into())
+        );
+        // A non-DOI identifier is skipped in favour of a later DOI one.
+        assert_eq!(
+            doi(
+                r#"<meta name="DC.identifier" content="ISSN 1234-5678"><meta name="dc.identifier" content="https://doi.org/10.5555/abc">"#
+            ),
+            Some("10.5555/abc".into())
+        );
+        assert_eq!(
+            doi(r#"<meta property="prism.doi" content="doi:10.1016/x.1">"#),
+            Some("10.1016/x.1".into())
+        );
+        assert_eq!(
+            doi(r#"<meta name="description" content="10.1016/x.1">"#),
+            None
+        );
+        // Entities in the attribute are decoded, as browsers do.
+        assert_eq!(
+            doi(
+                r#"<meta name="citation_doi" content="10.1002/(SICI)1097-4571(199806)49:8&lt;693::AID-ASI4&gt;3.0.CO;2-O">"#
+            ),
+            Some("10.1002/(sici)1097-4571(199806)49:8<693::aid-asi4>3.0.co;2-o".into())
+        );
+        assert_eq!(unescape("a&amp;lt;b&amp;c"), "a&lt;b&c");
+        assert_eq!(doi("<html>no metadata</html>"), None);
     }
 }

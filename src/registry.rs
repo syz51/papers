@@ -75,6 +75,13 @@ pub struct Text {
     pub path: String,
     pub sha256: String,
     pub origin: Option<String>,
+    /// When `read` downloaded the text, UTC RFC 3339. Absent for texts
+    /// attached by hand and for manifests written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieved: Option<String>,
+    /// Fields this version does not know, kept when the registry is rewritten.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -319,6 +326,8 @@ mod tests {
                 path: "sources/text/2.txt".into(),
                 sha256: "0".repeat(64),
                 origin: Some("https://example.org/2.pdf".into()),
+                retrieved: None,
+                extra: Default::default(),
             });
             Ok(())
         })
