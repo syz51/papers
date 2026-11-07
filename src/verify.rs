@@ -45,6 +45,8 @@ pub struct Subject {
     pub doi: Option<Doi>,
     /// Versionless arXiv id.
     pub arxiv: Option<String>,
+    /// Other spellings of the first author that a source may use.
+    pub author_variants: Vec<String>,
     /// A note's hand-check date.
     pub checked: Option<String>,
     pub duplicate_of: Option<String>,
@@ -72,6 +74,7 @@ impl Subject {
                 let doi = Doi::parse(r.ids.doi.as_deref()?)?;
                 Some(doi.arxiv()?.id)
             }),
+            author_variants: vec![],
             checked: None,
             duplicate_of: r.duplicate_of.clone(),
             invalid: None,
@@ -94,6 +97,7 @@ impl Subject {
             kind: Some("paper".to_owned()),
             doi: None,
             arxiv: None,
+            author_variants: vec![],
             checked: None,
             duplicate_of: None,
             invalid: None,
@@ -116,6 +120,7 @@ impl Subject {
         s.authors = Some(meta.authors.clone());
         s.year = meta.year;
         s.venue = meta.venue.clone();
+        s.author_variants = meta.author_variants.clone();
         s.checked = meta.checked.clone();
         match note.reference() {
             Some(Ref::Arxiv(id)) => s.arxiv = Some(id.id),
@@ -175,7 +180,9 @@ fn compare_people(
     };
     let first = ours.first().map_or("", String::as_str);
     if let Some(family) = family
-        && !text::has_surname(first, family)
+        && !std::iter::once(first)
+            .chain(s.author_variants.iter().map(String::as_str))
+            .any(|name| text::has_surname(name, family))
     {
         diffs.push(diff(
             "verify-first-author",
@@ -599,6 +606,7 @@ mod tests {
             kind: Some("paper".into()),
             doi: None,
             arxiv: None,
+            author_variants: vec![],
             checked: None,
             duplicate_of: None,
             invalid: None,
@@ -743,6 +751,17 @@ mod tests {
         s.titles
             .push("Funding Payments Steadied: Toy Perpetual Futures".into());
         assert!(compare_paper(&s, &p).is_empty());
+    }
+
+    #[test]
+    fn author_variants_accept_a_misspelt_index_name() {
+        let p = paper("Synthetic Widgets", &["Ann Leeb", "Bo Chan"]);
+        let mut s = subject("Synthetic Widgets", &["Ann Leebo", "Bo Chan"], 2022, true);
+        assert_eq!(rules(&compare_paper(&s, &p)), ["verify-first-author"]);
+        s.author_variants.push("Ann Leeb".into());
+        assert!(compare_paper(&s, &p).is_empty());
+        s.author_variants = vec!["Ann Lee".into()];
+        assert_eq!(rules(&compare_paper(&s, &p)), ["verify-first-author"]);
     }
 
     fn record(journal: Option<&str>, years: Option<(i64, i64)>) -> Record {

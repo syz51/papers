@@ -861,10 +861,15 @@ fn show_config(c: &config::Config, json: bool) {
 }
 
 /// Note paths keyed by [`Ref::key`]; empty when the directory is absent.
-fn note_index(papers: &Path) -> Result<HashMap<String, PathBuf>, String> {
-    Ok(notes::load(papers)?
+/// Notes by identifier key, with paths relative to the project root.
+fn note_index(config: &config::Config) -> Result<HashMap<String, PathBuf>, String> {
+    let mut index = notes::load(&config.notes)?
         .map(|n| notes::index(&n))
-        .unwrap_or_default())
+        .unwrap_or_default();
+    for path in index.values_mut() {
+        *path = PathBuf::from(config.display(path));
+    }
+    Ok(index)
 }
 
 /// The note citing an arXiv paper, by its id or its journal DOI.
@@ -1125,7 +1130,7 @@ fn fetch(
     inputs: &[String],
     out: Output,
 ) -> Result<bool, String> {
-    let (papers, with_abstract, json) = (config.notes.as_path(), out.with_abstract, out.json);
+    let (with_abstract, json) = (out.with_abstract, out.json);
     let mut logged: Vec<(String, &'static str, Vec<searchlog::Found>)> = Vec::new();
     let parsed: Vec<Result<Ref, String>> = inputs.iter().map(|s| Ref::parse(s)).collect();
     let arxiv_ids: Vec<ArxivId> = parsed
@@ -1141,7 +1146,7 @@ fn fetch(
         Client::new(http).fetch(&arxiv_ids)
     }
     .into_iter();
-    let index = note_index(papers)?;
+    let index = note_index(config)?;
     let mut all_ok = true;
     for (input, reference) in inputs.iter().zip(parsed) {
         let result = match reference {
@@ -1218,7 +1223,7 @@ fn fetch_title(
     title: &str,
     out: Output,
 ) -> Result<bool, String> {
-    let (papers, with_abstract, json) = (config.notes.as_path(), out.with_abstract, out.json);
+    let (with_abstract, json) = (out.with_abstract, out.json);
     let results = openalex::Client::new(http).search_title(title, TITLE_RESULTS)?;
     log_searches(config, out, |index| {
         let found: Vec<searchlog::Found> = results.iter().map(work_found).collect();
@@ -1234,7 +1239,7 @@ fn fetch_title(
         eprintln!("papers: OpenAlex found no works for title {title:?}");
         return Ok(false);
     }
-    let index = note_index(papers)?;
+    let index = note_index(config)?;
     for w in &results {
         let score = text::similarity(title, &w.title);
         let note = w
@@ -1300,7 +1305,7 @@ fn search(
     params: serde_json::Value,
     out: Output,
 ) -> Result<bool, String> {
-    let (papers, with_abstract, json) = (config.notes.as_path(), out.with_abstract, out.json);
+    let (with_abstract, json) = (out.with_abstract, out.json);
     if query.is_empty() {
         return Err("empty search query".to_owned());
     }
@@ -1315,7 +1320,7 @@ fn search(
         "papers: {total} results for {query} (showing {})",
         results.len()
     );
-    let index = note_index(papers)?;
+    let index = note_index(config)?;
     for paper in &results {
         print_paper(paper, paper_note(&index, paper), with_abstract, json);
     }
@@ -2166,6 +2171,26 @@ fn stub(http: &Http, config: &config::Config, input: &str, write: bool) -> Resul
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn note_index_paths_are_relative_to_the_project_root() {
+        let dir = std::env::temp_dir().join(format!("papers-note-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("research/papers")).unwrap();
+        std::fs::write(
+            dir.join("research/papers/2026-lee-synthetic.md"),
+            "---\nid: 2026-lee-synthetic\ntitle: A Synthetic Title\nauthors: [Ann Lee]\nyear: 2026\nurl: https://doi.org/10.1234/synthetic\n---\n",
+        )
+        .unwrap();
+        let config = config::Config::load(None, &dir).unwrap();
+        let index = note_index(&config).unwrap();
+        let doi = Doi::parse("10.1234/synthetic").unwrap();
+        assert_eq!(
+            doi_note(&index, &doi),
+            Some(Path::new("research/papers/2026-lee-synthetic.md"))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn only_javascript_check_pages_are_queued_for_the_browser() {

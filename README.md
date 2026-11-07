@@ -159,6 +159,8 @@ These parse issues are also reported:
 | `verify-manual` | info | No index lists the work, and a note's `checked` date records a hand check. |
 | `verify-skipped` | info | There is nothing to look up or compare: a duplicate, a non-paper without a DOI or arXiv id, or an entry with neither title nor authors. |
 
+When an index's metadata is wrong rather than the note, record why in the note's frontmatter instead of copying the error: `former_titles` lists earlier titles an index may still show, `author_variants` lists other spellings of the first author that an index uses (for example a name arXiv lists with a letter missing), and `checked: <date>` marks a work no index lists whose metadata was confirmed by hand.
+
 ## `read`
 
 `papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file.

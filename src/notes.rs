@@ -26,6 +26,10 @@ pub struct Meta {
     /// Earlier titles of the same paper (indexes often keep the first posting's).
     #[serde(default)]
     pub former_titles: Vec<String>,
+    /// Spellings an index uses for the first author when it differs from the
+    /// paper itself (a misspelt name in arXiv's or Crossref's metadata).
+    #[serde(default)]
+    pub author_variants: Vec<String>,
     /// Reading status, mapped to a registry depth by `[papers] status_depth`.
     pub status: Option<String>,
 }
@@ -464,6 +468,7 @@ mod tests {
             doi: doi.map(str::to_owned),
             checked: None,
             former_titles: vec![],
+            author_variants: vec![],
             id: None,
             status: None,
         }
