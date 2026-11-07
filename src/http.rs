@@ -619,6 +619,19 @@ pub(crate) fn response(status: &str, headers: &[&str], body: &str) -> String {
     out + "\r\n" + body
 }
 
+/// Stores a JSON reply for `url` in the cache at `dir`, so a test can answer
+/// an API on a fixed host without the network.
+#[cfg(test)]
+pub(crate) fn seed_cache(dir: &Path, url: &str, status: u16, body: &str) {
+    let reply = Reply {
+        status,
+        body: body.as_bytes().to_vec(),
+        content_type: "application/json".into(),
+        url: url.into(),
+    };
+    write_cache(&cache_path(dir, url).unwrap(), url, &reply);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

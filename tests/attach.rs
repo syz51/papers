@@ -203,6 +203,37 @@ fn attach_keeps_the_origin_when_reattaching_without_one() {
 }
 
 #[test]
+fn attach_keeps_the_download_time_and_unknown_fields_of_an_unchanged_text() {
+    let dir = project("retrieved");
+    let sha = "8d6b0fa5ca0a1a6cbc3b2d5ad21da1e2b0b9d8f43cbd1c9ac1e0d8d9bf9bd8c1";
+    let text = format!(
+        r#"{{"path":"texts/a.txt","sha256":"{sha}","origin":"https://example.org/a.pdf","retrieved":"2026-11-07T10:00:00Z","future":1}}"#
+    );
+    // The registry as `read --record` and a later papers version would leave it.
+    let entry = ENTRY.replace(r#""texts":[]"#, &format!(r#""texts":[{text}]"#));
+    std::fs::write(dir.join("refs.jsonl"), format!("{entry}\n")).unwrap();
+    // `attach` hashes the file, so give the entry the file's real hash.
+    assert!(attach(&dir, &["--text", "texts/a.txt"]).status.success());
+    let real = texts(&dir)[0]["sha256"].as_str().unwrap().to_owned();
+    let entry = entry.replace(sha, &real);
+    std::fs::write(dir.join("refs.jsonl"), format!("{entry}\n")).unwrap();
+
+    assert!(attach(&dir, &["--text", "texts/a.txt"]).status.success());
+    let t = texts(&dir);
+    assert_eq!(t[0]["retrieved"], "2026-11-07T10:00:00Z");
+    assert_eq!(t[0]["future"], 1);
+    assert_eq!(t[0]["origin"], "https://example.org/a.pdf");
+
+    // A changed file is a new download: its time is not known.
+    std::fs::write(dir.join("texts/a.txt"), "edited text").unwrap();
+    assert!(attach(&dir, &["--text", "texts/a.txt"]).status.success());
+    let t = texts(&dir);
+    assert!(t[0].get("retrieved").is_none(), "{t}");
+    assert!(t[0].get("future").is_none(), "{t}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn attach_refuses_links_out_binary_empty_directories_and_a_missing_registry() {
     let dir = project("refuse-more");
     let outside = dir
