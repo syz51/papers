@@ -100,7 +100,7 @@ cite_replace = "[{n}]"              # default
 
 The registry has one JSON object per line, ordered by key. `papers` owns the file; other tools only read it. Unknown values are `null`, never guessed.
 
-The fields are `schema`, `key`, `type`, `title`, `authors`, `year`, `venue`, `ids{doi, arxiv, dblp, openalex, url}`, `version`, `accessed`, `depth`, `texts[{path, sha256, origin}]`, `duplicate_of`, `source{path, line}` and `verified{at, against, status}`.
+The fields are `schema`, `key`, `type`, `title`, `authors`, `year`, `venue`, `ids{doi, arxiv, dblp, openalex, url}`, `version`, `accessed`, `depth`, `texts[{path, sha256, origin, retrieved}]`, `duplicate_of`, `source{path, line}` and `verified{at, against, status}`.
 
 Optional fields that `papers` adds to the contract:
 
@@ -168,7 +168,7 @@ When an index's metadata is wrong rather than the note, record why in the note's
 
 ## `read`
 
-`papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file.
+`papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin, retrieved}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file, and `retrieved` is the UTC time of the download (RFC 3339). Texts attached by hand have no `retrieved`.
 
 `<ref>` can also be the http(s) URL of a PDF or of a landing page, for open copies that have no arXiv id or DOI, such as a central bank's bulletin or a university repository's file:
 - A URL ending in `.pdf` is downloaded directly.

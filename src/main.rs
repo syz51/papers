@@ -376,6 +376,7 @@ fn local_text(
         path: rel,
         sha256: http::sha256_hex(&bytes),
         origin,
+        retrieved: None,
     })
 }
 
@@ -2093,6 +2094,7 @@ fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String>
         path: target.config.display(&txt_path),
         sha256: http::sha256_hex(text.as_bytes()),
         origin: Some(source.to_owned()),
+        retrieved: Some(finding::now()),
     }))
 }
 
@@ -2423,6 +2425,8 @@ mod tests {
         server.join().unwrap();
         let text = manifest(&dir, &url);
         assert_eq!(text.origin.as_deref(), Some(url.as_str()));
+        let retrieved: jiff::Timestamp = text.retrieved.as_deref().unwrap().parse().unwrap();
+        assert!(jiff::Timestamp::now().duration_since(retrieved).as_secs() < 600);
         let saved =
             std::fs::read_to_string(dir.join(text.path.rsplit('/').next().unwrap())).unwrap();
         assert!(saved.contains("Synthetic Working Paper"), "{saved}");
@@ -2522,6 +2526,7 @@ mod tests {
             path: "sources/text/7.txt".into(),
             sha256: sha,
             origin: Some("https://example.org/7.pdf".into()),
+            retrieved: None,
         };
         let good = text(http::sha256_hex(b"synthetic text"));
         assert_eq!(
