@@ -14,7 +14,7 @@ use regex::Regex;
 use crate::finding::Severity;
 use crate::id::ArxivId;
 use crate::refs::Doi;
-use crate::registry::{Reference, Source};
+use crate::registry::{DEPTHS, Reference, Source};
 use crate::text::squash;
 
 /// A problem found while parsing, reported by `registry check`.
@@ -405,7 +405,7 @@ fn parse_section(section: &Section, source_path: &str) -> SectionResult {
         break;
     }
 
-    record.depth = depth(section);
+    record.depth = depth(section, &mut issue);
     record.kind = kind(&parts, &record);
 
     // Duplicate annotations in this section.
@@ -837,12 +837,53 @@ static DEPTH_PHRASES: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
 });
 re!(NEGATION, r"(?i)\b(?:not|no|without|never)\b[^.;]{0,20}$");
 
-/// The inspection depth when the section's `Inspection:` lines name exactly one
-/// level in plain words (negated mentions such as "not full read" are ignored).
-fn depth(section: &Section) -> Option<String> {
+/// An explicit depth line: `Inspection depth: <level>`, in any letter case,
+/// optionally a list item and with the label in bold or italics.
+static EXPLICIT_DEPTH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:[-*+]\s+)?[*_]{0,2}inspection depth[*_]{0,2}:[*_]{0,2}\s*(.*?)\s*$")
+        .expect("valid built-in pattern")
+});
+
+/// The inspection depth. A line `Inspection depth: <level>` naming one
+/// `rf.reference/1` level states it outright and wins over prose; a one-word
+/// value outside the vocabulary, or two different explicit levels, is reported
+/// and leaves the depth unknown. A longer value is read as prose. Without an explicit line, it is the level when the
+/// section's `Inspection:` lines name exactly one in plain words (negated
+/// mentions such as "not read in full" are ignored).
+fn depth(
+    section: &Section,
+    issue: &mut impl FnMut(&'static str, Severity, usize, String),
+) -> Option<String> {
+    let mut explicit = BTreeMap::new();
     let mut levels = BTreeSet::new();
-    for &(_, line) in &section.body {
-        let Some(c) = INSPECTION.captures(line.trim()) else {
+    for &(n, line) in &section.body {
+        let line = line.trim();
+        // A one-word value is a stated level; longer text is prose, read below.
+        if let Some(c) = EXPLICIT_DEPTH.captures(line)
+            && let stated = c[1]
+                .trim_matches(|ch: char| "*_`.;,".contains(ch) || ch.is_whitespace())
+                .to_ascii_lowercase()
+            && !stated.is_empty()
+            && !stated.contains(char::is_whitespace)
+        {
+            match DEPTHS.iter().find(|d| **d == stated) {
+                Some(level) => {
+                    explicit.entry(*level).or_insert(n);
+                }
+                None => issue(
+                    "depth-unparsed",
+                    Severity::Warn,
+                    n,
+                    format!(
+                        "inspection depth {:?} is not one of {}",
+                        clip(&c[1]),
+                        DEPTHS.join(", ")
+                    ),
+                ),
+            }
+            continue;
+        }
+        let Some(c) = INSPECTION.captures(line) else {
             continue;
         };
         let mut text = c[1].to_owned();
@@ -858,6 +899,23 @@ fn depth(section: &Section) -> Option<String> {
             }
             text = re.replace_all(&text, " ").into_owned();
         }
+    }
+    if !explicit.is_empty() {
+        if explicit.len() > 1 {
+            let line = explicit.values().copied().max().unwrap_or_default();
+            let named: Vec<&str> = explicit.keys().copied().collect();
+            issue(
+                "depth-unparsed",
+                Severity::Warn,
+                line,
+                format!(
+                    "inspection depth lines name different levels: {}",
+                    named.join(", ")
+                ),
+            );
+            return None;
+        }
+        return explicit.keys().next().map(|l| (*l).to_owned());
     }
     (levels.len() == 1)
         .then(|| levels.first().map(|l| (*l).to_owned()))
@@ -996,6 +1054,88 @@ Example Corp. **Pricing Notes.** Official web page, date not stated. https://exa
         assert_eq!(r.year, Some(2025));
         assert_eq!(r.duplicate_of.as_deref(), Some("1"));
         assert_eq!(r.depth, None);
+    }
+
+    #[test]
+    fn an_explicit_depth_line_wins_over_prose_and_conflicts_stay_unknown() {
+        let catalogue = "\
+## Reference 1
+
+[1] Doe, Jane. **Explicit Over Prose**. Example Venue, 2025. [Original](https://example.org/1). Accessed 2026-01-05.
+
+Inspection: selected original methods read.
+Inspection depth: Artifact.
+
+## Reference 2
+
+[2] Doe, Jane. **Only The Explicit Line**. Example Venue, 2025. [Original](https://example.org/2). Accessed 2026-01-05.
+
+**Inspection depth:** reproduced
+
+## Reference 3
+
+[3] Doe, Jane. **Two Explicit Levels**. Example Venue, 2025. [Original](https://example.org/3). Accessed 2026-01-05.
+
+Inspection depth: abstract.
+Inspection depth: full.
+
+## Reference 4
+
+[4] Doe, Jane. **Not A Level**. Example Venue, 2025. [Original](https://example.org/4). Accessed 2026-01-05.
+
+Inspection depth: skimmed.
+";
+        let p = parse(catalogue, "docs/references.md");
+        assert_eq!(get(&p, "1").depth.as_deref(), Some("artifact"));
+        assert_eq!(get(&p, "2").depth.as_deref(), Some("reproduced"));
+        assert_eq!(get(&p, "3").depth, None, "conflicting explicit levels");
+        assert_eq!(get(&p, "4").depth, None, "unknown word is not a level");
+        let reported: Vec<(&str, &str, usize)> = p
+            .issues
+            .iter()
+            .map(|i| (i.rule, i.key.as_str(), i.line))
+            .collect();
+        assert_eq!(
+            reported,
+            [("depth-unparsed", "3", 19), ("depth-unparsed", "4", 25)],
+            "both are reported where they are written"
+        );
+    }
+
+    #[test]
+    fn only_a_depth_label_is_explicit_and_its_markup_is_tolerated() {
+        let catalogue = "\
+## Reference 1
+
+[1] Doe, Jane. **Plain Inspection Lines Stay Prose**. Example Venue, 2025. [Original](https://example.org/1). Accessed 2026-01-05.
+
+Inspection: full
+Inspection: abstract only.
+
+## Reference 2
+
+[2] Doe, Jane. **Bold Label, Code Value**. Example Venue, 2025. [Original](https://example.org/2). Accessed 2026-01-05.
+
+**Inspection depth**: `full`
+
+## Reference 3
+
+[3] Doe, Jane. **List Item, Other Case**. Example Venue, 2025. [Original](https://example.org/3). Accessed 2026-01-05.
+
+- Inspection Depth: Method;
+
+## Reference 4
+
+[4] Doe, Jane. **Prose After The Depth Label**. Example Venue, 2025. [Original](https://example.org/4). Accessed 2026-01-05.
+
+Inspection depth: original page fetched; abstract only.
+";
+        let p = parse(catalogue, "docs/references.md");
+        assert_eq!(get(&p, "1").depth.as_deref(), Some("abstract"));
+        assert_eq!(get(&p, "2").depth.as_deref(), Some("full"));
+        assert_eq!(get(&p, "3").depth.as_deref(), Some("method"));
+        assert_eq!(get(&p, "4").depth.as_deref(), Some("abstract"), "prose");
+        assert!(p.issues.is_empty(), "{:?}", p.issues);
     }
 
     #[test]
