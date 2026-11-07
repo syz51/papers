@@ -138,6 +138,8 @@ enum Command {
             conflicts_with = "key",
             value_name = "REF"
         )]
+        /// An arXiv id, DOI, SSRN or NBER URL, or the http(s) URL of an open PDF
+        /// or landing page.
         reference: Option<String>,
         /// Read the registry entry with this key (its arXiv version, DOI, or URL);
         /// files are named after the key.
@@ -1588,6 +1590,29 @@ enum Saved {
     PdfOnly,
 }
 
+/// A file-name stem for a URL without a paper id: its host and last path
+/// segment, plus a short hash of the whole URL so that different URLs never
+/// share files. `None` for anything that is not an http(s) URL.
+fn url_file_name(url: &str) -> Option<String> {
+    let normal = text::normalize_url(url)?;
+    let host_path = normal.split('?').next().unwrap_or_default();
+    let (host, path) = host_path.split_once('/').unwrap_or((host_path, ""));
+    let last = path.rsplit('/').find(|p| !p.is_empty()).unwrap_or_default();
+    let stem = match last.rsplit_once('.') {
+        Some((stem, ext))
+            if ["pdf", "html", "htm", "php", "aspx"]
+                .contains(&ext.to_ascii_lowercase().as_str()) =>
+        {
+            stem
+        }
+        _ => last,
+    };
+    let stem: String = stem.chars().take(60).collect();
+    let stem = stem.trim_end_matches(['-', '_', '.']);
+    let hash = &http::sha256_hex(normal.as_bytes())[..8];
+    Some(file_name_key(&format!("{host}_{stem}_{hash}")))
+}
+
 /// A file-name-safe form of a registry key.
 fn file_name_key(key: &str) -> String {
     let safe: String = key
@@ -1672,9 +1697,12 @@ fn read(http: &Http, config: &config::Config, o: &ReadOptions) -> Result<bool, S
     };
     let name = match &entry {
         Some(r) => file_name_key(&r.key),
-        None => match Ref::parse(&input)? {
-            Ref::Arxiv(id) => id.to_string().replace('/', "_"),
-            Ref::Doi(doi) => doi.file_key(),
+        None => match Ref::parse(&input) {
+            Ok(Ref::Arxiv(id)) => id.to_string().replace('/', "_"),
+            Ok(Ref::Doi(doi)) => doi.file_key(),
+            Err(e) => url_file_name(&input).ok_or_else(|| {
+                format!("{e}; read also takes the http(s) URL of a PDF or a landing page")
+            })?,
         },
     };
     let sidecar = out_dir.join(format!("{name}.json"));
@@ -1753,7 +1781,7 @@ fn download(
 ) -> Result<Option<Saved>, String> {
     let reference = match Ref::parse(input) {
         Ok(r) => Some(r),
-        Err(_) if entry.is_some() && text::normalize_url(input).is_some() => None,
+        Err(_) if text::normalize_url(input).is_some() => None,
         Err(e) => return Err(e),
     };
     let (title, candidates) = match &reference {
@@ -1786,26 +1814,74 @@ fn download(
             (title, vec![c])
         }
     };
-    let target = Target {
+    let mut target = Target {
         config,
         dir: out_dir,
         name,
         title,
     };
-    let title = target.title.clone();
     let mut tried = Vec::new();
     // Candidates whose plain-HTTP reply was a JavaScript check page.
     let mut challenged = Vec::new();
+    // DOIs named in the metadata of landing pages fetched along the way.
+    let mut page_dois = Vec::new();
     if candidates.is_empty() {
         println!("no open-access full-text locations known for {input}");
-    } else if let Some(saved) =
-        try_candidates(http, candidates, &mut tried, &mut challenged, &target)?
-    {
+    } else if let Some(saved) = try_candidates(
+        http,
+        candidates,
+        &mut tried,
+        &mut challenged,
+        &mut page_dois,
+        &target,
+    )? {
         return Ok(Some(saved));
     }
+    let mut doi = match &reference {
+        Some(Ref::Doi(doi)) => Some(doi.clone()),
+        _ => None,
+    };
+    // A URL without a paper id whose landing page names a DOI: try the DOI's
+    // open-access locations, and its other versions below.
+    if reference.is_none()
+        && let Some(page_doi) = page_dois.first().cloned()
+    {
+        println!("the landing page names doi:{page_doi}");
+        match Resolved::fetch(http, &page_doi) {
+            Ok(Some(r)) => {
+                print_resolved(&r, None, true, false);
+                if target.title.is_empty() {
+                    target.title = r.record().titles[0].clone();
+                }
+                let locations = r.openalex.as_ref().map_or(&[][..], |o| &o.oa_locations);
+                let more: Vec<Candidate> = oa_candidates(locations)
+                    .into_iter()
+                    .filter(|c| !tried.contains(c))
+                    .collect();
+                if !more.is_empty()
+                    && let Some(saved) = try_candidates(
+                        http,
+                        more,
+                        &mut tried,
+                        &mut challenged,
+                        &mut page_dois,
+                        &target,
+                    )?
+                {
+                    return Ok(Some(saved));
+                }
+                doi = Some(page_doi);
+            }
+            Ok(None) => println!("neither Crossref nor OpenAlex knows doi:{page_doi}"),
+            Err(e) => println!("doi:{page_doi}: {e}"),
+        }
+    }
+    let title = target.title.clone();
     // A closed journal version often has an open working-paper or preprint
     // version under the same title, indexed as a separate work.
-    if let Some(Ref::Doi(doi)) = &reference {
+    if let Some(doi) = &doi
+        && !title.is_empty()
+    {
         let others: Vec<openalex::Work> = openalex::Client::new(http)
             .search_title(&title, OTHER_VERSIONS)?
             .into_iter()
@@ -1828,9 +1904,14 @@ fn download(
                     .unwrap_or_default();
                 println!("  {}{doi}", w.id);
             }
-            if let Some(saved) =
-                try_candidates(http, alternates, &mut tried, &mut challenged, &target)?
-            {
+            if let Some(saved) = try_candidates(
+                http,
+                alternates,
+                &mut tried,
+                &mut challenged,
+                &mut page_dois,
+                &target,
+            )? {
                 return Ok(Some(saved));
             }
         }
@@ -1896,12 +1977,14 @@ fn try_in_browser(challenged: &[String], target: &Target) -> Result<Option<Saved
 /// Tries `candidates` in order, expanding a landing page into the PDF links it
 /// carries, until one is a PDF. Saves it and returns whether text was extracted;
 /// `None` when no candidate was a PDF. Every URL attempted is added to `tried`,
-/// and those that answered with a JavaScript check page to `challenged`.
+/// those that answered with a JavaScript check page to `challenged`, and the
+/// DOI a landing page names in its metadata to `page_dois`.
 fn try_candidates(
     http: &Http,
     mut candidates: Vec<Candidate>,
     tried: &mut Vec<Candidate>,
     challenged: &mut Vec<String>,
+    page_dois: &mut Vec<Doi>,
     target: &Target,
 ) -> Result<Option<Saved>, String> {
     println!("full-text candidates:");
@@ -1936,7 +2019,13 @@ fn try_candidates(
         }
         let html = reply.content_type.contains("html");
         let found: Vec<Candidate> = if matches!(candidate, Candidate::Landing(_)) && html {
-            pdf::page_pdf_links(&reply.text(), &reply.url)
+            let page = reply.text();
+            if let Some(doi) = pdf::page_doi(&page)
+                && !page_dois.contains(&doi)
+            {
+                page_dois.push(doi);
+            }
+            pdf::page_pdf_links(&page, &reply.url)
                 .into_iter()
                 .map(Candidate::Pdf)
                 .filter(|c| !candidates.contains(c) && !tried.contains(c))
@@ -2258,6 +2347,7 @@ mod tests {
             candidates,
             &mut tried,
             &mut challenged,
+            &mut Vec::new(),
             &target,
         );
         server.join().unwrap();
@@ -2265,6 +2355,152 @@ mod tests {
         assert_eq!(tried.len(), 4);
         assert_eq!(challenged, [format!("{base}/challenge")]);
         assert!(!dir.exists(), "nothing was saved");
+    }
+
+    /// A one-page PDF whose text is `text` (ASCII, no parentheses).
+    fn tiny_pdf(text: &str) -> String {
+        let stream = format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ];
+        let mut out = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out += &format!("{} 0 obj\n{body}\nendobj\n", i + 1);
+        }
+        let xref = out.len();
+        out += &format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+        for o in offsets {
+            out += &format!("{o:010} 00000 n \n");
+        }
+        out + &format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+    }
+
+    fn read_url(url: String, out: &Path) -> Result<bool, String> {
+        let config = config::Config::load(None, out).unwrap();
+        read(
+            &Http::new(),
+            &config,
+            &ReadOptions {
+                reference: Some(url),
+                key: None,
+                out: Some(out.to_path_buf()),
+                record: false,
+                force: false,
+                browser: false,
+            },
+        )
+    }
+
+    /// The manifest sidecar `read` wrote for `url` in `dir`.
+    fn manifest(dir: &Path, url: &str) -> registry::Text {
+        let name = url_file_name(url).unwrap();
+        let json = std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn reads_a_pdf_url_without_a_paper_id() {
+        use crate::http::response;
+        let pdf = tiny_pdf("Synthetic Working Paper");
+        let (base, server) = http::serve(vec![response(
+            "200 OK",
+            &["Content-Type: application/pdf"],
+            &pdf,
+        )]);
+        let dir = std::env::temp_dir().join(format!("papers-read-pdf-url-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let url = format!("{base}/files/working-paper.pdf");
+        assert_eq!(read_url(url.clone(), &dir), Ok(true));
+        server.join().unwrap();
+        let text = manifest(&dir, &url);
+        assert_eq!(text.origin.as_deref(), Some(url.as_str()));
+        let saved =
+            std::fs::read_to_string(dir.join(text.path.rsplit('/').next().unwrap())).unwrap();
+        assert!(saved.contains("Synthetic Working Paper"), "{saved}");
+        assert_eq!(text.sha256, http::sha256_hex(saved.as_bytes()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reads_a_landing_page_through_its_pdf_link_and_notes_its_doi() {
+        use crate::http::response;
+        let html = ["Content-Type: text/html"];
+        let pdf = tiny_pdf("Synthetic Bulletin");
+        // The server's address is only known once it runs, so the meta tag
+        // links the PDF relative to the page.
+        let page = r#"<html><head><meta name="citation_doi" content="10.5555/synthetic.1">
+            <meta name="citation_pdf_url" content="/bulletin/b90.pdf"></head></html>"#;
+        let (base, server) = http::serve(vec![
+            response("200 OK", &html, page),
+            response("200 OK", &["Content-Type: application/pdf"], &pdf),
+        ]);
+        let dir = std::env::temp_dir().join(format!("papers-read-landing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let url = format!("{base}/publications/bulletin90");
+        assert_eq!(read_url(url.clone(), &dir), Ok(true));
+        let heads = server.join().unwrap();
+        assert!(heads[1].starts_with("GET /bulletin/b90.pdf "), "{heads:?}");
+        assert_eq!(
+            manifest(&dir, &url).origin,
+            Some(format!("{base}/bulletin/b90.pdf"))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // Without a PDF link, the page's DOI is what is left to try.
+        let (base, server) = http::serve(vec![response(
+            "200 OK",
+            &html,
+            page.replace("citation_pdf_url", "x").as_str(),
+        )]);
+        let config = config::Config::load(None, &dir).unwrap();
+        let target = Target {
+            config: &config,
+            dir: dir.clone(),
+            name: "x".into(),
+            title: String::new(),
+        };
+        let mut dois = Vec::new();
+        let saved = try_candidates(
+            &Http::new(),
+            vec![Candidate::Landing(format!("{base}/page"))],
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut dois,
+            &target,
+        );
+        server.join().unwrap();
+        assert!(saved.unwrap().is_none());
+        assert_eq!(dois, [Doi::parse("10.5555/synthetic.1").unwrap()]);
+    }
+
+    #[test]
+    fn urls_without_a_paper_id_get_distinct_file_names() {
+        let a = url_file_name("https://www.bis.org/publ/bisbull90.pdf").unwrap();
+        assert!(a.starts_with("bis.org_bisbull90_"), "{a}");
+        assert_eq!(a.len(), "bis.org_bisbull90_".len() + 8);
+        // The same URL, written differently, keeps its name; another URL does not.
+        assert_eq!(
+            url_file_name("https://bis.org/publ/bisbull90.pdf#page=2").unwrap(),
+            a
+        );
+        assert_ne!(
+            url_file_name("https://www.bis.org/other/bisbull90.pdf").unwrap(),
+            a
+        );
+        let landing = url_file_name("https://figshare.com/articles/x/25886773/").unwrap();
+        assert!(landing.starts_with("figshare.com_25886773_"), "{landing}");
+        let bare = url_file_name("https://example.org").unwrap();
+        assert!(bare.starts_with("example.org__"), "{bare}");
+        assert_eq!(url_file_name("10.1234/abc"), None);
     }
 
     #[test]

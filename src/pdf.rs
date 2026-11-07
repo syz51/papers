@@ -109,6 +109,30 @@ pub fn page_pdf_links(html: &str, base: &str) -> Vec<String> {
     links
 }
 
+/// Meta tags that publishers and repositories use for a page's DOI.
+const DOI_META: &[&str] = &[
+    "citation_doi",
+    "dc.identifier",
+    "dc.identifier.doi",
+    "prism.doi",
+    "bepress_citation_doi",
+];
+
+/// The DOI an HTML landing page names in its metadata (`citation_doi`,
+/// `dc.identifier` and similar), if any.
+pub fn page_doi(html: &str) -> Option<crate::refs::Doi> {
+    let lower = html.to_ascii_lowercase();
+    lower.match_indices("<meta").find_map(|(start, _)| {
+        let end = lower[start..].find('>').map_or(lower.len(), |e| start + e);
+        let tag = &html[start..end];
+        let name = attr(tag, "name").or_else(|| attr(tag, "property"))?;
+        if !DOI_META.iter().any(|m| name.eq_ignore_ascii_case(m)) {
+            return None;
+        }
+        crate::refs::Doi::parse(attr(tag, "content")?)
+    })
+}
+
 /// Value of `name="..."` (or single-quoted) inside a tag.
 fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let lower = tag.to_ascii_lowercase();
@@ -209,5 +233,32 @@ mod tests {
             page_pdf_links(html, "https://figshare.com/articles/x/25886773"),
             ["https://figshare.com/ndownloader/files/52627142/1"]
         );
+    }
+
+    #[test]
+    fn finds_a_landing_page_doi() {
+        let doi = |html: &str| page_doi(html).map(|d| d.as_str().to_owned());
+        assert_eq!(
+            doi(
+                r#"<meta name="citation_title" content="X"><meta name="citation_doi" content="10.1016/J.X.2024.1">"#
+            ),
+            Some("10.1016/j.x.2024.1".into())
+        );
+        // A non-DOI identifier is skipped in favour of a later DOI one.
+        assert_eq!(
+            doi(
+                r#"<meta name="DC.identifier" content="ISSN 1234-5678"><meta name="dc.identifier" content="https://doi.org/10.5555/abc">"#
+            ),
+            Some("10.5555/abc".into())
+        );
+        assert_eq!(
+            doi(r#"<meta property="prism.doi" content="doi:10.1016/x.1">"#),
+            Some("10.1016/x.1".into())
+        );
+        assert_eq!(
+            doi(r#"<meta name="description" content="10.1016/x.1">"#),
+            None
+        );
+        assert_eq!(doi("<html>no metadata</html>"), None);
     }
 }
