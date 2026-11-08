@@ -187,6 +187,48 @@ fn a_catalogue_section_without_an_entry_line_keeps_its_previous_entry() {
         stderr.contains("papers: error: refs.md:1: entry-missing 1: Reference 1 has no entry line"),
         "{stderr}"
     );
-    assert_eq!(entry(&dir, "1"), before);
+    // The metadata stays; the source line follows the section.
+    let mut after: serde_json::Value = serde_json::from_str(&entry(&dir, "1")).unwrap();
+    let mut before: serde_json::Value = serde_json::from_str(&before).unwrap();
+    assert_eq!(after["source"]["line"], 1);
+    assert_eq!(before["source"]["line"], 3);
+    after["source"] = serde_json::Value::Null;
+    before["source"] = serde_json::Value::Null;
+    assert_eq!(after, before);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_section_without_an_entry_line_still_updates_its_labelled_values() {
+    let dir = project("labels", "catalogue = \"refs.md\"\n");
+    std::fs::write(
+        dir.join("refs.md"),
+        "## Reference 1\n\n[1] Ann Lee. **First**. https://example.org/a\n\n\
+         Authors in source metadata: Ann Lee.\n",
+    )
+    .unwrap();
+    let first = papers(&dir, &["registry", "build"]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    std::fs::write(
+        dir.join("refs.md"),
+        "# Catalogue\n\nIntro.\n\n## Reference 1\n\n\
+         Authors in source metadata: Ann Lee; Bo Chen.\n",
+    )
+    .unwrap();
+
+    let build = papers(&dir, &["registry", "build"]);
+    assert_eq!(build.status.code(), Some(1));
+    let entry: serde_json::Value = serde_json::from_str(&entry(&dir, "1")).unwrap();
+    assert_eq!(entry["title"], "First");
+    assert_eq!(entry["ids"]["url"], "https://example.org/a");
+    assert_eq!(entry["authors"], serde_json::json!(["Ann Lee", "Bo Chen"]));
+    assert_eq!(
+        entry["source"],
+        serde_json::json!({"path": "refs.md", "line": 5})
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
