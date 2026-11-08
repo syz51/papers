@@ -583,17 +583,54 @@ pub fn encode(s: &str, keep: &[u8]) -> String {
     out
 }
 
+/// How long the test server waits for each request before it panics.
+#[cfg(test)]
+const SERVE_DEADLINE: Duration = Duration::from_secs(30);
+
 /// A local HTTP/1.1 server for tests: answers each connection, in order, with
-/// the next canned response and returns the request heads it received.
+/// the next canned response and returns the request heads it received. If a
+/// request does not arrive within 30 seconds, the server thread panics and
+/// says how many requests it got, so `join` fails instead of hanging.
 #[cfg(test)]
 pub(crate) fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
-    use std::io::{BufRead, BufReader};
+    serve_within(responses, SERVE_DEADLINE)
+}
+
+/// `serve` with a custom wait for each request.
+#[cfg(test)]
+fn serve_within(
+    responses: Vec<String>,
+    deadline: Duration,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::{BufRead, BufReader, ErrorKind};
+    use std::time::Instant;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
+    let expected = responses.len();
     let handle = std::thread::spawn(move || {
         let mut heads = Vec::new();
         for response in responses {
-            let (mut stream, _) = listener.accept().unwrap();
+            let start = Instant::now();
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                        assert!(
+                            start.elapsed() < deadline,
+                            "test server got {} of {expected} requests: \
+                             request {} did not arrive within {deadline:?}",
+                            heads.len(),
+                            heads.len() + 1,
+                        );
+                        sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("test server accept failed: {e}"),
+                }
+            };
+            // Accepted sockets may inherit the listener's non-blocking mode.
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(deadline)).unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut head = String::new();
             while reader.read_line(&mut head).unwrap() > 2 && !head.ends_with("\r\n\r\n") {}
@@ -658,6 +695,27 @@ mod tests {
                 "https://h.example/a?API_KEY=k1k1&q=k&token="
             ),
             "from https://h.example/a?API_KEY=<redacted>&q=k&token="
+        );
+    }
+
+    #[test]
+    fn test_server_fails_when_a_request_never_comes() {
+        let ok = || response("200 OK", &[], "ok");
+        let (base, server) = serve_within(vec![ok(), ok()], Duration::from_millis(200));
+        let start = std::time::Instant::now();
+        let reply = Http::new()
+            .get(&Get {
+                cache: false,
+                ..Get::api(&format!("{base}/one"), &[200])
+            })
+            .unwrap();
+        assert_eq!(reply.text(), "ok");
+        let panic = server.join().unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(10));
+        let message = panic.downcast_ref::<String>().unwrap();
+        assert!(
+            message.contains("got 1 of 2 requests: request 2 did not arrive"),
+            "{message}"
         );
     }
 
