@@ -1,7 +1,12 @@
 //! Downloaded PDFs (untrusted data): detection, text extraction, and PDF links
 //! on open-access landing pages.
 
+use std::io::{ErrorKind, Read};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::http::{host, resolve};
 
@@ -62,6 +67,105 @@ pub fn extract_text(bytes: &[u8]) -> Result<String, String> {
         Ok(Ok(text)) => Ok(text),
         Ok(Err(e)) => Err(format!("PDF text extraction failed: {e}")),
         Err(_) => Err("PDF text extraction failed: the parser panicked on this file".to_owned()),
+    }
+}
+
+/// Poppler's text extractor, run when pdf-extract cannot read a PDF.
+pub const PDFTOTEXT: &str = "pdftotext";
+
+/// How long `pdftotext` may run: a crafted PDF can keep it busy forever.
+pub const PDFTOTEXT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The most text `pdftotext` may print: a crafted PDF can make it print
+/// without end.
+pub const PDFTOTEXT_MAX_OUTPUT: u64 = 64 << 20;
+
+/// Error output kept from `pdftotext`, for the reason of a failure.
+const STDERR_LIMIT: u64 = 16 << 10;
+
+/// Extracts the text of the PDF at `path` with `pdftotext` (`program`), as
+/// UTF-8. A run longer than `timeout` is stopped, and more output than
+/// `max_output` bytes is refused; both are reported as errors.
+pub fn pdftotext(
+    program: &str,
+    path: &Path,
+    timeout: Duration,
+    max_output: u64,
+) -> Result<String, String> {
+    let mut child = Command::new(program)
+        .args(["-enc", "UTF-8"])
+        .arg(path)
+        .arg("-")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| match e.kind() {
+            ErrorKind::NotFound => format!("{program} is not on PATH"),
+            _ => format!("{program} could not start: {e}"),
+        })?;
+    // Read on other threads so a full pipe cannot block the child. A reader
+    // stops at its limit and closes its pipe, which ends a runaway child.
+    let stdout = read_limited(child.stdout.take(), max_output + 1);
+    let stderr = read_limited(child.stderr.take(), STDERR_LIMIT);
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                return Err(format!(
+                    "{program} timed out after {timeout:?}{}",
+                    stop(&mut child)
+                ));
+            }
+            Err(e) => return Err(format!("{program}: {e}{}", stop(&mut child))),
+        }
+    };
+    let joined = |reader: JoinHandle<std::io::Result<Vec<u8>>>| {
+        reader
+            .join()
+            .expect("a reader thread does not panic")
+            .map_err(|e| format!("{program} output: {e}"))
+    };
+    let (out, err) = (joined(stdout)?, joined(stderr)?);
+    if out.len() as u64 > max_output {
+        return Err(format!("{program} printed more than {max_output} bytes"));
+    }
+    if !status.success() {
+        let err = String::from_utf8_lossy(&err);
+        return Err(match err.lines().rev().find(|l| !l.trim().is_empty()) {
+            Some(reason) => format!("{program} failed ({status}): {}", reason.trim()),
+            None => format!("{program} failed ({status})"),
+        });
+    }
+    let text = String::from_utf8(out)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    if text.trim().is_empty() {
+        return Err(format!("{program} found no text"));
+    }
+    Ok(text)
+}
+
+/// Reads at most `limit` bytes of a child's piped output on a new thread.
+fn read_limited(
+    pipe: Option<impl Read + Send + 'static>,
+    limit: u64,
+) -> JoinHandle<std::io::Result<Vec<u8>>> {
+    let pipe = pipe.expect("the pipe is set up when the child is spawned");
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        pipe.take(limit).read_to_end(&mut out).map(|_| out)
+    })
+}
+
+/// Kills and reaps `child`; says how that went, as the end of a message.
+fn stop(child: &mut Child) -> String {
+    match child.kill().and_then(|()| child.wait()) {
+        Ok(_) => " and was stopped".to_owned(),
+        Err(e) => format!("; stopping it failed: {e}"),
     }
 }
 
@@ -215,6 +319,95 @@ mod tests {
     #[test]
     fn rejects_non_pdf_bytes() {
         assert!(extract_text(b"not a pdf").is_err());
+    }
+
+    /// Shell scripts standing in for `pdftotext`, by name. All are written
+    /// before any runs: on Linux, writing one while another test spawns a
+    /// process can fail the spawn with "text file busy".
+    const FAKE_PROGRAMS: [(&str, &str); 6] = [
+        // Echoes its arguments, so the call's arguments are checked too.
+        ("prints", r#"echo "text of $3 with $1 $2 $4""#),
+        (
+            "fails",
+            "echo 'Syntax Error: Couldn'\\''t read xref table' >&2; exit 1",
+        ),
+        ("blank", "echo '  '"),
+        ("hangs", "exec sleep 30"),
+        ("floods", "exec yes"),
+        ("invalid", r"printf 'caf\351 text\n'"),
+    ];
+
+    /// The path of a fake program. Every test that runs one gets its path
+    /// here first. A name not in `FAKE_PROGRAMS` is a path that does not exist.
+    fn fake_program(name: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let dir = DIR.get_or_init(|| {
+            // Next to the test binary, inside the target directory.
+            let exe = std::env::current_exe().unwrap();
+            let dir = exe.with_file_name("papers-fake-pdftotext");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, body) in FAKE_PROGRAMS {
+                let path = dir.join(name);
+                std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            dir
+        });
+        dir.join(name).to_str().unwrap().to_owned()
+    }
+
+    fn run_fake(name: &str, timeout: Duration) -> Result<String, String> {
+        pdftotext(&fake_program(name), Path::new("/x/a.pdf"), timeout, 1 << 20)
+    }
+
+    #[test]
+    fn pdftotext_returns_the_text_it_prints() {
+        let timeout = Duration::from_secs(10);
+        assert_eq!(
+            run_fake("prints", timeout),
+            Ok("text of /x/a.pdf with -enc UTF-8 -\n".to_owned())
+        );
+        assert_eq!(
+            run_fake("invalid", timeout),
+            Ok("caf\u{fffd} text\n".to_owned())
+        );
+    }
+
+    #[test]
+    fn pdftotext_reports_failure_and_empty_output() {
+        let timeout = Duration::from_secs(10);
+        let failed = run_fake("fails", timeout).unwrap_err();
+        assert!(
+            failed.ends_with("failed (exit status: 1): Syntax Error: Couldn't read xref table"),
+            "{failed}"
+        );
+        let empty = run_fake("blank", timeout).unwrap_err();
+        assert!(empty.ends_with("found no text"), "{empty}");
+    }
+
+    #[test]
+    fn pdftotext_that_is_not_installed_is_reported() {
+        let err = run_fake("absent", Duration::from_secs(1)).unwrap_err();
+        assert!(err.ends_with("absent is not on PATH"), "{err}");
+    }
+
+    #[test]
+    fn pdftotext_that_hangs_is_stopped() {
+        let start = Instant::now();
+        let err = run_fake("hangs", Duration::from_millis(200)).unwrap_err();
+        assert!(
+            err.ends_with("timed out after 200ms and was stopped"),
+            "{err}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn pdftotext_that_prints_too_much_is_refused() {
+        let err = run_fake("floods", Duration::from_secs(10)).unwrap_err();
+        assert!(err.ends_with("printed more than 1048576 bytes"), "{err}");
     }
 
     #[test]
