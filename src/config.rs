@@ -37,7 +37,8 @@ struct RawPapers {
     catalogue: Option<PathBuf>,
     search_log: Option<PathBuf>,
     cache_dir: Option<PathBuf>,
-    /// Note `status` value → registry `depth`, e.g. `{ read = "full" }`.
+    /// Note `status` value → registry `depth`, e.g. `{ read = "full" }`; each
+    /// entry replaces the default for that status.
     #[serde(default)]
     status_depth: BTreeMap<String, String>,
     /// Citation patterns for `papers cite`; each has a `key` group.
@@ -60,7 +61,8 @@ pub struct Config {
     pub catalogue: Option<PathBuf>,
     pub search_log: PathBuf,
     pub cache_dir: PathBuf,
-    /// Note `status` value → registry `depth` when building from notes.
+    /// Note `status` value → registry `depth` when building from notes:
+    /// [`DEFAULT_STATUS_DEPTH`] with `[papers] status_depth` on top.
     pub status_depth: BTreeMap<String, String>,
     /// True when `research.toml` sets `[papers] template`.
     pub template_configured: bool,
@@ -75,6 +77,9 @@ pub const DEFAULT_NOTES: &str = "research/papers";
 pub const DEFAULT_TEMPLATE: &str = "../_templates/paper.md";
 pub const DEFAULT_REGISTRY: &str = "references.jsonl";
 pub const DEFAULT_STATE_DIR: &str = ".research";
+/// Note status → registry depth unless `[papers] status_depth` says otherwise.
+/// `read` is `method`, not `full`: the status does not prove a full-text read.
+pub const DEFAULT_STATUS_DEPTH: [(&str, &str); 2] = [("read", "method"), ("skimmed", "abstract")];
 
 impl Config {
     /// Loads `explicit`, else the first `research.toml` found walking up from
@@ -130,7 +135,11 @@ impl Config {
                 .map(at)
                 .unwrap_or_else(|| state_dir.join("papers/cache")),
             template_configured: p.template.is_some(),
-            status_depth: p.status_depth,
+            status_depth: DEFAULT_STATUS_DEPTH
+                .iter()
+                .map(|&(status, depth)| (status.to_owned(), depth.to_owned()))
+                .chain(p.status_depth)
+                .collect(),
             cite_patterns: p.cite_patterns,
             cite_replace: p.cite_replace,
             file,

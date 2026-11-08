@@ -252,6 +252,18 @@ pub fn update<T>(
     Ok(out)
 }
 
+/// Keeps each recorded depth for a fresh record whose source gives none. Notes
+/// use this: a status without a mapped depth leaves the recorded depth alone.
+pub fn keep_recorded_depth(fresh: &mut [Reference], previous: &[Reference]) {
+    let recorded: BTreeMap<&str, &str> = previous
+        .iter()
+        .filter_map(|r| Some((r.key.as_str(), r.depth.as_deref()?)))
+        .collect();
+    for r in fresh.iter_mut().filter(|r| r.depth.is_none()) {
+        r.depth = recorded.get(r.key.as_str()).map(|d| (*d).to_owned());
+    }
+}
+
 /// Combines freshly parsed records with the previous registry. Tool-owned state
 /// carries over by key: `texts`, unknown fields, ids other tools added
 /// (`openalex`, `dblp`), and `verified` while the checked metadata is unchanged.

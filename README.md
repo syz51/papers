@@ -81,7 +81,7 @@ registry = "references.jsonl"       # default
 catalogue = "docs/references.md"    # numbered Markdown catalogue; none by default
 search_log = ".research/papers/search.jsonl"  # default: <state_dir>/papers/search.jsonl
 cache_dir = ".research/papers/cache"          # default: <state_dir>/papers/cache
-status_depth = { read = "full", skimmed = "abstract" }  # note status -> registry depth
+status_depth = { read = "full" }    # note status -> registry depth; default read = "method", skimmed = "abstract"
 cite_patterns = ['\[@(?P<key>[\w.-]+)\]']    # default: the two patterns under "cite"
 cite_replace = "[{n}]"              # default
 ```
@@ -118,6 +118,7 @@ Fields that `papers` does not know are kept when it rewrites the registry, in en
 - **A catalogue.** A numbered Markdown file with one `## Reference N` section per work. The entry line reads `[N] Authors. **Title**. Venue … [Original](url). Accessed <date>.`
   An entry's reading depth comes from a line `Inspection depth: <level>`, where the level is one of `metadata`, `abstract`, `method`, `full`, `artifact` or `reproduced`. That line wins over any prose in the entry. Without one, the depth comes from `Inspection:` lines that name exactly one level in plain words, such as "abstract only" or "read in full"; when they name none or several, it stays `null`.
 - **Notes.** One Markdown file per paper, with YAML frontmatter.
+  An entry's reading depth comes from the note's `status`: `read` gives `method` and `skimmed` gives `abstract`. `read` does not give `full`, because the status does not show that the whole text was read. `[papers] status_depth` replaces these values or maps other statuses. A `depth` field in the frontmatter wins over the status. It must be one of `metadata`, `abstract`, `method`, `full`, `artifact` or `reproduced`; otherwise `registry build` writes nothing and exits 1, and `registry check` reports `depth-invalid`. A note with another status or no status keeps the depth already in the registry, or `null`.
 
 Every value comes from the text. When the text does not settle a value, it stays `null` and is reported as a parse issue. A rebuild keeps tool-added state (`texts`, `verified`, and fields `papers` does not know) and warns about keys that have disappeared. Keys are never renumbered.
 
@@ -148,6 +149,7 @@ These parse issues are also reported:
 | `authors-unparsed` | info | The author text does not split into names unambiguously. |
 | `depth-unparsed` | warn | An `Inspection depth:` line names a single word outside the vocabulary, or two such lines name different levels; the depth stays `null`. A longer value is read as prose. |
 | `frontmatter-invalid` | error | A note's frontmatter does not parse. |
+| `depth-invalid` | error | A note's `depth` field is outside the vocabulary. `registry build` refuses to write until it is fixed. |
 
 ### `verify` rules
 

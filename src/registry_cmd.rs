@@ -68,6 +68,15 @@ pub fn parse_source(config: &Config, from: From) -> Result<Parsed, String> {
                         message: format!("{path}: {e}"),
                     }),
                     Ok(meta) => {
+                        if let Err(e) = meta.explicit_depth() {
+                            issues.push(Issue {
+                                rule: "depth-invalid",
+                                severity: Severity::Error,
+                                key: record.key.clone(),
+                                line: 1,
+                                message: format!("{path}: {e}"),
+                            });
+                        }
                         if let Some(id) = meta.id.as_deref().filter(|id| *id != record.key) {
                             issues.push(Issue {
                                 rule: "key-mismatch",
@@ -137,10 +146,37 @@ fn print_stats(records: &[Reference], issues: &[Issue]) {
     }
 }
 
+/// Merges `fresh` into `previous`; for notes, a recorded depth stays when the
+/// note gives none.
+fn merge(
+    from: From,
+    mut fresh: Vec<Reference>,
+    previous: Vec<Reference>,
+) -> (Vec<Reference>, Vec<String>) {
+    if from == From::Notes {
+        registry::keep_recorded_depth(&mut fresh, &previous);
+    }
+    registry::merge(fresh, previous)
+}
+
 pub fn build(config: &Config, from: From, dry_run: bool) -> Result<bool, String> {
     let parsed = parse_source(config, from)?;
+    let invalid: Vec<&Issue> = parsed
+        .issues
+        .iter()
+        .filter(|i| i.rule == "depth-invalid")
+        .collect();
+    if !invalid.is_empty() {
+        for issue in invalid {
+            eprintln!("papers: error: {}", issue.message);
+        }
+        eprintln!(
+            "papers: nothing written: fix or remove each invalid depth, then run papers registry build again"
+        );
+        return Ok(false);
+    }
     let merge = |records: &mut Vec<Reference>| {
-        let (merged, vanished) = registry::merge(parsed.records.clone(), std::mem::take(records));
+        let (merged, vanished) = merge(from, parsed.records.clone(), std::mem::take(records));
         *records = merged;
         vanished
     };
@@ -192,7 +228,7 @@ pub fn check(config: &Config, from: Option<From>, format: Format) -> Result<bool
             let parsed = parse_source(config, from)?;
             findings.extend(check::issue_findings(&parsed.issues, &parsed.source));
             let (merged, vanished) =
-                registry::merge(parsed.records, existing.clone().unwrap_or_default());
+                merge(from, parsed.records, existing.clone().unwrap_or_default());
             for key in vanished {
                 findings.push(Finding::new(
                     "key-missing-from-source",
