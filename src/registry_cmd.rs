@@ -1,6 +1,6 @@
 //! `papers registry build` and `papers registry check`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::catalogue::{self, Issue};
 use crate::check;
@@ -149,13 +149,28 @@ fn print_stats(records: &[Reference], issues: &[Issue]) {
     }
 }
 
-/// Merges `fresh` into `previous`; for notes, a recorded depth stays when the
-/// note gives none.
-fn merge(
-    from: From,
-    mut fresh: Vec<Reference>,
-    previous: Vec<Reference>,
-) -> (Vec<Reference>, Vec<String>) {
+/// Parse issues after which an entry's text gave nothing to record.
+const UNREADABLE: &[&str] = &["frontmatter-invalid", "entry-missing"];
+
+/// Merges the parsed records into `previous`. An entry whose text could not
+/// be read keeps its previous record; for notes, a recorded depth stays when
+/// the note gives none.
+fn merge(from: From, parsed: &Parsed, previous: Vec<Reference>) -> (Vec<Reference>, Vec<String>) {
+    let unreadable: BTreeSet<&str> = parsed
+        .issues
+        .iter()
+        .filter(|i| UNREADABLE.contains(&i.rule))
+        .map(|i| i.key.as_str())
+        .collect();
+    let mut fresh = parsed.records.clone();
+    for r in fresh
+        .iter_mut()
+        .filter(|r| unreadable.contains(r.key.as_str()))
+    {
+        if let Some(prev) = previous.iter().find(|p| p.key == r.key) {
+            *r = prev.clone();
+        }
+    }
     if from == From::Notes {
         registry::keep_recorded_depth(&mut fresh, &previous);
     }
@@ -168,7 +183,7 @@ fn merge(
 pub fn build(config: &Config, from: From, dry_run: bool) -> Result<bool, String> {
     let parsed = parse_source(config, from)?;
     let merge = |records: &mut Vec<Reference>| {
-        let (merged, vanished) = merge(from, parsed.records.clone(), std::mem::take(records));
+        let (merged, vanished) = merge(from, &parsed, std::mem::take(records));
         *records = merged;
         vanished
     };
@@ -231,7 +246,7 @@ pub fn check(config: &Config, from: Option<From>, format: Format) -> Result<bool
             let parsed = parse_source(config, from)?;
             findings.extend(check::issue_findings(&parsed.issues));
             let (merged, vanished) =
-                merge(from, parsed.records, existing.clone().unwrap_or_default());
+                merge(from, &parsed, existing.clone().unwrap_or_default());
             for key in vanished {
                 findings.push(Finding::new(
                     "key-missing-from-source",

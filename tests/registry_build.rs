@@ -96,3 +96,97 @@ fn warnings_alone_exit_0() {
     assert_eq!(titles(&dir), [("1".to_owned(), Some("A title".to_owned()))]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The registry line for `key`.
+fn entry(dir: &Path, key: &str) -> String {
+    std::fs::read_to_string(dir.join("refs.jsonl"))
+        .unwrap()
+        .lines()
+        .find(|line| line.contains(&format!("\"key\":\"{key}\"")))
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn a_note_with_invalid_frontmatter_keeps_its_previous_entry() {
+    let dir = project("frontmatter", "notes = \"notes\"\n");
+    let note = |key: &str, title: &str| {
+        std::fs::write(
+            dir.join(format!("notes/{key}.md")),
+            format!(
+                "---\nid: {key}\ntitle: {title}\nauthors: [Ann Lee]\nyear: 2026\n\
+                 url: https://example.org/{key}\nstatus: read\n---\n"
+            ),
+        )
+        .unwrap()
+    };
+    note("a", "First");
+    note("b", "Second");
+    let first = papers(&dir, &["registry", "build"]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let before = entry(&dir, "a");
+    std::fs::write(
+        dir.join("notes/a.md"),
+        "---\nid: a\ntitle: [unclosed\n---\n",
+    )
+    .unwrap();
+    note("b", "Second, revised");
+
+    let build = papers(&dir, &["registry", "build"]);
+    assert_eq!(build.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("papers: error: notes/a.md:1: frontmatter-invalid a: "),
+        "{stderr}"
+    );
+    assert_eq!(entry(&dir, "a"), before);
+    assert_eq!(
+        titles(&dir),
+        [
+            ("a".to_owned(), Some("First".to_owned())),
+            ("b".to_owned(), Some("Second, revised".to_owned())),
+        ]
+    );
+
+    // check agrees: the kept entry is not reported as stale.
+    let check = papers(&dir, &["registry", "check", "--format", "jsonl"]);
+    let rules: Vec<String> = String::from_utf8_lossy(&check.stdout)
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["rule"].to_string())
+        .collect();
+    assert_eq!(rules, ["\"frontmatter-invalid\""]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_catalogue_section_without_an_entry_line_keeps_its_previous_entry() {
+    let dir = project("entry-missing", "catalogue = \"refs.md\"\n");
+    let second = "## Reference 2\n\n[2] Bo Chen. **Second**. https://example.org/b\n";
+    std::fs::write(
+        dir.join("refs.md"),
+        format!("## Reference 1\n\n[1] Ann Lee. **First**. https://example.org/a\n\n{second}"),
+    )
+    .unwrap();
+    let first = papers(&dir, &["registry", "build"]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let before = entry(&dir, "1");
+    std::fs::write(dir.join("refs.md"), format!("## Reference 1\n\n{second}")).unwrap();
+
+    let build = papers(&dir, &["registry", "build"]);
+    assert_eq!(build.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("papers: error: refs.md:1: entry-missing 1: Reference 1 has no entry line"),
+        "{stderr}"
+    );
+    assert_eq!(entry(&dir, "1"), before);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
