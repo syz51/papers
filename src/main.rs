@@ -298,7 +298,8 @@ struct RegistrySource {
 
 #[derive(Subcommand)]
 enum RegistryAction {
-    /// Parse the catalogue or notes and write the registry, keeping tool-added state.
+    /// Parse the catalogue or notes and write the registry, keeping tool-added state
+    /// (exit 1 when any parse issue is an error; the registry is still written).
     Build {
         #[command(flatten)]
         source: RegistrySource,
