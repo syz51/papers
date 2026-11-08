@@ -21,13 +21,13 @@ use crate::refs::{Doi, Ref};
 use crate::registry::{DEPTHS, Reference, TYPES, key_order};
 use crate::text::{normalize_url, title_author_key};
 
-/// Turns parse issues into findings located in `source`.
-pub fn issue_findings(issues: &[Issue], source: &str) -> Vec<Finding> {
+/// Turns parse issues into findings located in their files.
+pub fn issue_findings(issues: &[Issue]) -> Vec<Finding> {
     issues
         .iter()
         .map(|i| {
             Finding::new(i.rule, i.severity, i.key.clone(), i.message.clone())
-                .evidence(source, format!("line {}", i.line))
+                .evidence(&i.path, format!("line {}", i.line))
         })
         .collect()
 }

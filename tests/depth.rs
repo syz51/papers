@@ -128,26 +128,27 @@ fn configured_status_depth_replaces_the_default_for_its_status() {
 }
 
 #[test]
-fn an_invalid_explicit_depth_is_refused() {
+fn an_invalid_explicit_depth_exits_1_and_keeps_the_recorded_depth() {
     let dir = project("invalid", "");
     note(&dir, "a", "status: read\n");
+    note(&dir, "b", "status: skimmed\n");
     assert_success(&papers(&dir, &["registry", "build"]));
-    let before = std::fs::read_to_string(dir.join("refs.jsonl")).unwrap();
-    note(&dir, "a", "status: read\ndepth: deep\n");
+    note(&dir, "a", "status: skimmed\ndepth: deep\n");
+    note(&dir, "b", "status: read\n");
 
     let build = papers(&dir, &["registry", "build"]);
     assert_eq!(build.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
         stderr.contains(
-            "notes/a.md: depth \"deep\" is not one of metadata, abstract, method, full, artifact, reproduced"
+            "papers: error: notes/a.md:1: depth-invalid a: depth \"deep\" is not one of metadata, abstract, method, full, artifact, reproduced"
         ),
         "{stderr}"
     );
-    assert!(stderr.contains("nothing written"), "{stderr}");
+    // The registry is written: b takes its new depth, a keeps its recorded one.
     assert_eq!(
-        std::fs::read_to_string(dir.join("refs.jsonl")).unwrap(),
-        before
+        depths(&dir),
+        [pair("a", Some("method")), pair("b", Some("method"))]
     );
 
     let check = papers(&dir, &["registry", "check", "--format", "jsonl"]);
@@ -160,5 +161,6 @@ fn an_invalid_explicit_depth_is_refused() {
     assert_eq!(findings[0]["rule"], "depth-invalid");
     assert_eq!(findings[0]["severity"], "error");
     assert_eq!(findings[0]["subject"], "a");
+    assert_eq!(findings[0]["evidence"][0]["path"], "notes/a.md");
     std::fs::remove_dir_all(&dir).unwrap();
 }

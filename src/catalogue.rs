@@ -23,6 +23,8 @@ pub struct Issue {
     pub rule: &'static str,
     pub severity: Severity,
     pub key: String,
+    /// The file the issue is in, as shown to the user.
+    pub path: String,
     pub line: usize,
     pub message: String,
 }
@@ -149,6 +151,7 @@ pub fn parse(text: &str, source_path: &str) -> Parsed {
                 rule: "duplicate-key",
                 severity: Severity::Error,
                 key: section.key.clone(),
+                path: source_path.to_owned(),
                 line: section.heading_line,
                 message: format!(
                     "heading Reference {} repeats the heading on line {first}; only the first is kept",
@@ -163,13 +166,13 @@ pub fn parse(text: &str, source_path: &str) -> Parsed {
         parsed.issues.append(&mut issues);
         aliases.append(&mut found);
     }
-    apply_duplicates(&mut parsed, aliases);
+    apply_duplicates(&mut parsed, aliases, source_path);
     parsed
 }
 
 /// Records duplicate annotations `(duplicate, survivor, line)`; conflicting
 /// annotations leave `duplicate_of` unset and are reported.
-fn apply_duplicates(parsed: &mut Parsed, aliases: Vec<(String, String, usize)>) {
+fn apply_duplicates(parsed: &mut Parsed, aliases: Vec<(String, String, usize)>, source_path: &str) {
     let mut targets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut lines: BTreeMap<String, usize> = BTreeMap::new();
     for (dup, survivor, line) in aliases {
@@ -189,6 +192,7 @@ fn apply_duplicates(parsed: &mut Parsed, aliases: Vec<(String, String, usize)>) 
                 rule: "duplicate-annotation-conflict",
                 severity: Severity::Error,
                 key: record.key.clone(),
+                path: source_path.to_owned(),
                 line: lines[&record.key],
                 message: format!(
                     "annotated as a duplicate of several keys ({}); duplicate_of left unset",
@@ -209,6 +213,7 @@ fn parse_section(section: &Section, source_path: &str) -> SectionResult {
             rule,
             severity,
             key: key.clone(),
+            path: source_path.to_owned(),
             line,
             message,
         })

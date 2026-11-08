@@ -1,6 +1,6 @@
 //! `papers registry build` and `papers registry check`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::catalogue::{self, Issue};
 use crate::check;
@@ -64,8 +64,9 @@ pub fn parse_source(config: &Config, from: From) -> Result<Parsed, String> {
                         rule: "frontmatter-invalid",
                         severity: Severity::Error,
                         key: record.key.clone(),
+                        path: path.clone(),
                         line: 1,
-                        message: format!("{path}: {e}"),
+                        message: e.clone(),
                     }),
                     Ok(meta) => {
                         if let Err(e) = meta.explicit_depth() {
@@ -73,8 +74,9 @@ pub fn parse_source(config: &Config, from: From) -> Result<Parsed, String> {
                                 rule: "depth-invalid",
                                 severity: Severity::Error,
                                 key: record.key.clone(),
+                                path: path.clone(),
                                 line: 1,
-                                message: format!("{path}: {e}"),
+                                message: e,
                             });
                         }
                         if let Some(id) = meta.id.as_deref().filter(|id| *id != record.key) {
@@ -82,6 +84,7 @@ pub fn parse_source(config: &Config, from: From) -> Result<Parsed, String> {
                                 rule: "key-mismatch",
                                 severity: Severity::Error,
                                 key: record.key.clone(),
+                                path: path.clone(),
                                 line: 1,
                                 message: format!(
                                     "the file is named {}.md but its id is {id:?}",
@@ -146,37 +149,41 @@ fn print_stats(records: &[Reference], issues: &[Issue]) {
     }
 }
 
-/// Merges `fresh` into `previous`; for notes, a recorded depth stays when the
-/// note gives none.
-fn merge(
-    from: From,
-    mut fresh: Vec<Reference>,
-    previous: Vec<Reference>,
-) -> (Vec<Reference>, Vec<String>) {
+/// Parse issues after which an entry's text gave nothing to record.
+const UNREADABLE: &[&str] = &["frontmatter-invalid", "entry-missing"];
+
+/// Merges the parsed records into `previous`. An entry whose text could not
+/// be read keeps its previous record; for notes, a recorded depth stays when
+/// the note gives none.
+fn merge(from: From, parsed: &Parsed, previous: Vec<Reference>) -> (Vec<Reference>, Vec<String>) {
+    let unreadable: BTreeSet<&str> = parsed
+        .issues
+        .iter()
+        .filter(|i| UNREADABLE.contains(&i.rule))
+        .map(|i| i.key.as_str())
+        .collect();
+    let mut fresh = parsed.records.clone();
+    for r in fresh
+        .iter_mut()
+        .filter(|r| unreadable.contains(r.key.as_str()))
+    {
+        if let Some(prev) = previous.iter().find(|p| p.key == r.key) {
+            *r = prev.clone();
+        }
+    }
     if from == From::Notes {
         registry::keep_recorded_depth(&mut fresh, &previous);
     }
     registry::merge(fresh, previous)
 }
 
+/// Writes the registry even when parsing finds errors, so one bad entry does
+/// not hold back the others; returns false when any error-severity issue was
+/// found. An entry whose note has an invalid depth keeps its recorded depth.
 pub fn build(config: &Config, from: From, dry_run: bool) -> Result<bool, String> {
     let parsed = parse_source(config, from)?;
-    let invalid: Vec<&Issue> = parsed
-        .issues
-        .iter()
-        .filter(|i| i.rule == "depth-invalid")
-        .collect();
-    if !invalid.is_empty() {
-        for issue in invalid {
-            eprintln!("papers: error: {}", issue.message);
-        }
-        eprintln!(
-            "papers: nothing written: fix or remove each invalid depth, then run papers registry build again"
-        );
-        return Ok(false);
-    }
     let merge = |records: &mut Vec<Reference>| {
-        let (merged, vanished) = merge(from, parsed.records.clone(), std::mem::take(records));
+        let (merged, vanished) = merge(from, &parsed, std::mem::take(records));
         *records = merged;
         vanished
     };
@@ -210,7 +217,18 @@ pub fn build(config: &Config, from: From, dry_run: bool) -> Result<bool, String>
         config.display(&config.registry)
     );
     print_stats(&merged, &parsed.issues);
-    Ok(true)
+    let errors: Vec<&Issue> = parsed
+        .issues
+        .iter()
+        .filter(|i| i.severity == Severity::Error)
+        .collect();
+    for i in &errors {
+        eprintln!(
+            "papers: error: {}:{}: {} {}: {}",
+            i.path, i.line, i.rule, i.key, i.message
+        );
+    }
+    Ok(errors.is_empty())
 }
 
 pub fn check(config: &Config, from: Option<From>, format: Format) -> Result<bool, String> {
@@ -226,9 +244,9 @@ pub fn check(config: &Config, from: Option<From>, format: Format) -> Result<bool
     let records = match from {
         Some(from) => {
             let parsed = parse_source(config, from)?;
-            findings.extend(check::issue_findings(&parsed.issues, &parsed.source));
+            findings.extend(check::issue_findings(&parsed.issues));
             let (merged, vanished) =
-                merge(from, parsed.records, existing.clone().unwrap_or_default());
+                merge(from, &parsed, existing.clone().unwrap_or_default());
             for key in vanished {
                 findings.push(Finding::new(
                     "key-missing-from-source",
