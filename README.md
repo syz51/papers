@@ -111,6 +111,7 @@ Optional fields that `papers` adds to the contract:
 | `citekey` | A citation key that overrides the generated one in `bib` and `cite`. It is set by hand and kept when the registry is rebuilt. |
 | `texts[].retrieved` | When `read` downloaded the text, as a UTC RFC 3339 time. It is omitted for texts attached by hand without `--retrieved` and for texts recorded before `papers` added it. |
 | `texts[].extraction` | How the text was extracted from its PDF: `plain` or `layout` (`pdftotext -layout`). It is omitted for texts attached by hand without `--extraction` and for texts recorded before `papers` added it; `read` treats those as `plain`. Another value, such as one a later version writes, is kept as it is; `read` does not re-extract such a text without `--extraction`. |
+| `texts[].pdf_sha256` | The sha256 of the PDF that `read` extracted the text from, saved beside the text as `<name>.pdf`. It is omitted for texts attached by hand and for texts recorded before `papers` added it. |
 
 Fields that `papers` does not know are kept when it rewrites the registry, in entries and in `texts` objects.
 
@@ -172,7 +173,7 @@ When an index's metadata is wrong rather than the note, record why in the note's
 
 ## `read`
 
-`papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin, retrieved, extraction}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file, `retrieved` is the UTC time of the download (RFC 3339), and `extraction` is the extraction mode. Texts attached by hand have no `retrieved` unless `--retrieved` gives one.
+`papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin, retrieved, extraction, pdf_sha256}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file, `retrieved` is the UTC time of the download (RFC 3339), `extraction` is the extraction mode, and `pdf_sha256` is the sha256 of the PDF, which is saved as `<name>.pdf` beside the text. Texts attached by hand have no `retrieved` unless `--retrieved` gives one.
 
 `--extraction` chooses how the text is extracted:
 
@@ -188,7 +189,7 @@ Without `--extraction`, `read` uses the mode recorded for the text it would repl
 - When the landing page names a DOI in its metadata (`citation_doi`, `dc.identifier`, `prism.doi`), the DOI's own open-access locations are tried next, then other versions with the same title. This happens only when the page and its links yield no PDF, including after the browser retry described below.
 - The manifest's `origin` is the URL the PDF came from.
 
-Running it again skips the download when the stored text still has the recorded hash. `--force` downloads anyway, and extracts in the recorded mode. An explicit `--extraction` that differs from the stored text's mode downloads again and says so; this is the only way `read` replaces a layout text with plain text. An explicit mode that matches a stored text without a recorded mode (plain) is recorded for it. `--record` (with `--key`) adds the manifest to the entry's `texts`.
+Running it again skips the download when the stored text still has the recorded hash. `--force` downloads anyway, and extracts in the recorded mode. An explicit `--extraction` that differs from the stored text's mode extracts the text again; this is the only way `read` replaces a layout text with plain text. When the stored text's record, in its sidecar or the registry entry, has a `pdf_sha256` and `<name>.pdf` in `--out` still has it, `read` extracts from that PDF and makes no network request; the manifest keeps the PDF's `origin` and `retrieved`. Without `--key`, there is then no title for plain mode's title check. Otherwise, as for manifests written before `papers` recorded `pdf_sha256`, it downloads the PDF again. Either way it says which. An explicit mode that matches a stored text without a recorded mode (plain) is recorded for it. `--record` (with `--key`) adds the manifest to the entry's `texts`.
 
 For a text obtained another way (by hand, or listed in an existing manifest), `papers registry attach --key <key> --text <path> [--origin <url>] [--retrieved <time>] [--extraction plain|layout]` records it the same way:
 
@@ -196,7 +197,7 @@ For a text obtained another way (by hand, or listed in an existing manifest), `p
 - Directories below the root may be symlinks. A `sources` directory linked to shared storage is accepted, and the text is recorded under its path in the project.
 - A symlinked file must point into the project or into its own directory; a link to a file elsewhere is refused. A `..` after a symlinked directory is refused when it leads to another file than the path without it.
 - A text already recorded at that path is replaced. It keeps the replaced text's origin when `--origin` is not given.
-- When the file is unchanged, the recorded `retrieved`, `extraction` and unknown fields are kept too, unless `--retrieved` or `--extraction` gives new values. They come from the manifest beside the text first, then from the replaced text. When the file changed, they are dropped, and `attach` prints a note for each; pass the options to record them.
+- When the file is unchanged, the recorded `retrieved`, `extraction`, `pdf_sha256` and unknown fields are kept too, unless `--retrieved` or `--extraction` gives new values. They come from the manifest beside the text first, then from the replaced text. When the file changed, they are dropped, and `attach` prints a note for `retrieved` and `extraction`; pass the options to record them.
 - `--retrieved` takes an RFC 3339 time and records it in UTC, to the second.
 - When a `<name>.json` manifest from `read` lies beside a `<name>.txt` text (in any case) and names the same path, `attach` rewrites it with the recorded text, so its sha256, origin, `retrieved` and `extraction` match the registry. It does so under the registry's lock; when the manifest cannot be read or written, `attach` fails and leaves the registry unchanged. Another JSON file there is left alone.
 
