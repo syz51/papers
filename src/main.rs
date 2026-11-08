@@ -132,7 +132,7 @@ enum Command {
     },
     /// Download an open-access PDF of a paper and extract its text; the last
     /// stdout line is the text's manifest {path, sha256, origin, retrieved,
-    /// extraction} as JSON.
+    /// extraction, pdf_sha256} as JSON.
     Read {
         #[arg(
             required_unless_present = "key",
@@ -1981,6 +1981,15 @@ fn read(
     if o.extraction.is_none() && extraction == registry::Extraction::Layout {
         println!("extraction: layout, as recorded (--extraction plain to change)");
     }
+    // Only pdftotext extracts layout text: check it before any download.
+    if extraction == registry::Extraction::Layout {
+        pdf::check_pdftotext(pdftotext).map_err(|e| {
+            format!(
+                "layout extraction needs pdftotext from Poppler ({e}); install Poppler \
+                 or pass --extraction plain"
+            )
+        })?;
+    }
     let target = Target {
         config,
         dir: out_dir,
@@ -3135,6 +3144,54 @@ mod tests {
         assert_ne!(plain.retrieved, text.retrieved, "downloaded again");
         let pdf_sha256 = http::sha256_hex(pdf.as_bytes());
         assert_eq!(plain.pdf_sha256(), Some(pdf_sha256.as_str()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Without pdftotext, layout mode fails before any request, whether it is
+    /// asked for or recorded, and before extracting from a saved PDF. Plain
+    /// mode does not need pdftotext.
+    #[test]
+    fn read_in_layout_mode_needs_pdftotext_before_any_request() {
+        use crate::http::response;
+        use registry::Extraction::{Layout, Plain};
+        let absent = pdf::tests::fake_program("absent");
+        let pdf = tiny_pdf("Synthetic Precheck Paper");
+        let reply = || response("200 OK", &["Content-Type: application/pdf"], &pdf);
+        let (base, server) = http::serve_within(vec![reply()], std::time::Duration::from_secs(1));
+        let (root, mut text) = unmarked_project("no-pdftotext", &format!("{base}/k.pdf"));
+        let sidecar = root.join("sources/text/k.json");
+        let refused = |err: String| {
+            assert!(err.contains("pdftotext"), "{err}");
+            assert!(err.contains("Poppler"), "{err}");
+            assert!(err.contains("absent is not on PATH"), "{err}");
+        };
+
+        // Asked for: a download is needed, as the text is plain.
+        refused(read_key_with(&root, false, Some(Layout), &absent).unwrap_err());
+        // Recorded: --force downloads again in the recorded mode.
+        text.set_extraction(Layout);
+        std::fs::write(&sidecar, serde_json::to_string(&text).unwrap()).unwrap();
+        refused(read_key_with(&root, true, None, &absent).unwrap_err());
+        let panic = server.join().unwrap_err();
+        let message = panic.downcast_ref::<String>().unwrap();
+        assert!(message.contains("got 0 of 1 requests"), "{message}");
+
+        // From the saved PDF, which has the recorded sha256.
+        std::fs::write(root.join("sources/text/k.pdf"), &pdf).unwrap();
+        text.set_extraction(Plain);
+        text.set_pdf_sha256(http::sha256_hex(pdf.as_bytes()));
+        std::fs::write(&sidecar, serde_json::to_string(&text).unwrap()).unwrap();
+        refused(read_key_with(&root, false, Some(Layout), &absent).unwrap_err());
+        assert_eq!(sidecar_of(&root), text);
+
+        // Plain mode runs without it, from the same PDF.
+        text.set_extraction(Layout);
+        std::fs::write(&sidecar, serde_json::to_string(&text).unwrap()).unwrap();
+        assert_eq!(read_key_with(&root, false, Some(Plain), &absent), Ok(true));
+        let plain = sidecar_of(&root);
+        assert_eq!(plain.extraction(), Ok(Some(Plain)));
+        let written = std::fs::read_to_string(root.join("sources/text/k.txt")).unwrap();
+        assert!(written.contains("Synthetic Precheck Paper"), "{written}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

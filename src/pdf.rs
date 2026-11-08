@@ -84,6 +84,22 @@ pub const PDFTOTEXT_MAX_OUTPUT: u64 = 64 << 20;
 /// Error output kept from `pdftotext`, for the reason of a failure.
 const STDERR_LIMIT: u64 = 16 << 10;
 
+/// Whether `pdftotext` (`program`) can start: runs `program -v`, whose exit
+/// status varies between Poppler versions and so is not checked.
+pub fn check_pdftotext(program: &str) -> Result<(), String> {
+    Command::new(program)
+        .arg("-v")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(drop)
+        .map_err(|e| match e.kind() {
+            ErrorKind::NotFound => format!("{program} is not on PATH"),
+            _ => format!("{program} could not start: {e}"),
+        })
+}
+
 /// Extracts the text of the PDF at `path` with `pdftotext` (`program`), as
 /// UTF-8, keeping the page layout when `layout` is set (`-layout`). A run
 /// longer than `timeout` is stopped, and more output than `max_output` bytes
@@ -485,6 +501,10 @@ pub(crate) mod tests {
     fn pdftotext_that_is_not_installed_is_reported() {
         let err = run_fake("absent", Duration::from_secs(1)).unwrap_err();
         assert!(err.ends_with("absent is not on PATH"), "{err}");
+        let err = check_pdftotext(&fake_program("absent")).unwrap_err();
+        assert!(err.ends_with("absent is not on PATH"), "{err}");
+        assert_eq!(check_pdftotext(&fake_program("prints")), Ok(()));
+        assert_eq!(check_pdftotext(&fake_program("fails")), Ok(()));
     }
 
     #[test]

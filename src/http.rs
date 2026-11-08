@@ -598,7 +598,7 @@ pub(crate) fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<
 
 /// `serve` with a custom wait for each request.
 #[cfg(test)]
-fn serve_within(
+pub(crate) fn serve_within(
     responses: Vec<String>,
     deadline: Duration,
 ) -> (String, std::thread::JoinHandle<Vec<String>>) {
