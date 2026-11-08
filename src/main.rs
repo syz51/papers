@@ -2114,16 +2114,29 @@ fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String>
         std::fs::write(&pdf_path, body).map_err(|e| format!("{}: {e}", pdf_path.display()))?;
         println!("pdf: {}", pdf_path.display());
     }
-    let text = match pdf::extract_text(body) {
-        Ok(text) => text,
-        Err(e) => {
-            println!("text: not written ({e})");
-            return Ok(Saved::PdfOnly);
-        }
+    let (text, extractor) = match pdf::extract_text(body) {
+        Ok(text) => (text, "pdf-extract"),
+        Err(e) => match pdf::pdftotext(pdf::PDFTOTEXT, &pdf_path, pdf::PDFTOTEXT_TIMEOUT) {
+            Ok(Some(text)) => {
+                println!(
+                    "text: pdf-extract could not read it ({e}); used {}",
+                    pdf::PDFTOTEXT
+                );
+                (text, pdf::PDFTOTEXT)
+            }
+            Ok(None) => {
+                println!("text: not written ({e})");
+                return Ok(Saved::PdfOnly);
+            }
+            Err(fallback) => {
+                println!("text: not written ({e}; {fallback})");
+                return Ok(Saved::PdfOnly);
+            }
+        },
     };
     std::fs::write(&txt_path, &text).map_err(|e| format!("{}: {e}", txt_path.display()))?;
     println!(
-        "text: {} ({} words)",
+        "text: {} ({} words, extracted by {extractor})",
         txt_path.display(),
         text.split_whitespace().count()
     );

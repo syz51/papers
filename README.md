@@ -171,6 +171,8 @@ When an index's metadata is wrong rather than the note, record why in the note's
 
 `papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin, retrieved}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file, and `retrieved` is the UTC time of the download (RFC 3339). Texts attached by hand have no `retrieved`.
 
+The text comes from the `pdf-extract` crate. When it fails, panics or finds no text, `papers read` runs Poppler's `pdftotext` on the saved PDF, if it is on `PATH`. A `pdftotext` run that takes longer than 60 seconds is stopped and reported. The `text:` line names the extractor that produced the text. Without `pdftotext`, the PDF is kept and no text is written.
+
 `<ref>` can also be the http(s) URL of a PDF or of a landing page, for open copies that have no arXiv id or DOI, such as a central bank's bulletin or a university repository's file:
 - A URL ending in `.pdf` is downloaded directly.
 - Any other URL is read as a landing page. Its `citation_pdf_url` meta tag and same-host PDF links are tried in order.

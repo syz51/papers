@@ -1,7 +1,11 @@
 //! Downloaded PDFs (untrusted data): detection, text extraction, and PDF links
 //! on open-access landing pages.
 
+use std::io::{ErrorKind, Read};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::http::{host, resolve};
 
@@ -63,6 +67,66 @@ pub fn extract_text(bytes: &[u8]) -> Result<String, String> {
         Ok(Err(e)) => Err(format!("PDF text extraction failed: {e}")),
         Err(_) => Err("PDF text extraction failed: the parser panicked on this file".to_owned()),
     }
+}
+
+/// Poppler's text extractor, run when pdf-extract cannot read a PDF.
+pub const PDFTOTEXT: &str = "pdftotext";
+
+/// How long `pdftotext` may run: a crafted PDF can keep it busy forever.
+pub const PDFTOTEXT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Extracts the text of the PDF at `path` with `pdftotext` (`program`), as
+/// UTF-8. `Ok(None)` means the program is not installed. A run longer than
+/// `timeout` is stopped and reported as an error.
+pub fn pdftotext(program: &str, path: &Path, timeout: Duration) -> Result<Option<String>, String> {
+    let spawned = Command::new(program)
+        .args(["-enc", "UTF-8"])
+        .arg(path)
+        .arg("-")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{program} could not start: {e}")),
+    };
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    // Read on another thread so a large output cannot block the child.
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).map(|_| out)
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let stopped = child.kill().and_then(|()| child.wait());
+                return Err(match stopped {
+                    Ok(_) => format!("{program} timed out after {timeout:?} and was stopped"),
+                    Err(e) => {
+                        format!("{program} timed out after {timeout:?}; stopping it failed: {e}")
+                    }
+                });
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return Err(format!("{program}: {e}")),
+        }
+    };
+    let out = reader
+        .join()
+        .expect("the reader thread does not panic")
+        .map_err(|e| format!("{program} output: {e}"))?;
+    if !status.success() {
+        return Err(format!("{program} failed ({status})"));
+    }
+    let text = String::from_utf8_lossy(&out).into_owned();
+    if text.trim().is_empty() {
+        return Err(format!("{program} found no text"));
+    }
+    Ok(Some(text))
 }
 
 /// Download paths of open repositories whose file links lack a `.pdf` suffix.
@@ -215,6 +279,77 @@ mod tests {
     #[test]
     fn rejects_non_pdf_bytes() {
         assert!(extract_text(b"not a pdf").is_err());
+    }
+
+    /// Shell scripts standing in for `pdftotext`, by name. All are written
+    /// before any runs: on Linux, writing one while another test spawns a
+    /// process can fail the spawn with "text file busy".
+    const FAKE_PROGRAMS: [(&str, &str); 4] = [
+        // Echoes its arguments, so the call's arguments are checked too.
+        ("prints", r#"echo "text of $3 with $1 $2 $4""#),
+        ("fails", "exit 1"),
+        ("blank", "echo '  '"),
+        ("hangs", "exec sleep 30"),
+    ];
+
+    fn fake_program(name: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let dir = DIR.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("papers-pdf-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, body) in FAKE_PROGRAMS {
+                let path = dir.join(name);
+                std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            dir
+        });
+        dir.join(name).to_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn pdftotext_returns_the_text_it_prints() {
+        let program = fake_program("prints");
+        let text = pdftotext(&program, Path::new("/x/a.pdf"), Duration::from_secs(10));
+        assert_eq!(
+            text,
+            Ok(Some("text of /x/a.pdf with -enc UTF-8 -\n".to_owned()))
+        );
+    }
+
+    #[test]
+    fn pdftotext_reports_failure_and_empty_output() {
+        let path = Path::new("/x/a.pdf");
+        let timeout = Duration::from_secs(10);
+        let failing = fake_program("fails");
+        let failed = pdftotext(&failing, path, timeout).unwrap_err();
+        assert!(failed.contains("failed"), "{failed}");
+        let blank = fake_program("blank");
+        let empty = pdftotext(&blank, path, timeout).unwrap_err();
+        assert!(empty.ends_with("found no text"), "{empty}");
+    }
+
+    #[test]
+    fn pdftotext_that_is_not_installed_is_none() {
+        let missing = "/nonexistent/papers-test/pdftotext";
+        assert_eq!(
+            pdftotext(missing, Path::new("/x/a.pdf"), Duration::from_secs(1)),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn pdftotext_that_hangs_is_stopped() {
+        let program = fake_program("hangs");
+        let start = Instant::now();
+        let err =
+            pdftotext(&program, Path::new("/x/a.pdf"), Duration::from_millis(200)).unwrap_err();
+        assert!(
+            err.contains("timed out after 200ms and was stopped"),
+            "{err}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
