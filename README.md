@@ -38,9 +38,9 @@ This needs Rust 1.99 or newer (edition 2024). `papers read` can retry a page tha
 | `seen` | Is a work already in the registry or notes? Prints matching keys | `papers seen 10.1234/abc` |
 | `registry build` | Parse the catalogue or notes into the registry, keeping tool-added state | `papers registry build` |
 | `registry check` | Duplicates, missing ids, bad dates, parse problems, as `rf.finding/1` | `papers registry check --format jsonl` |
-| `registry attach` | Record a text file already in the project in an entry's `texts`, with its sha256 | `papers registry attach --key 12 --text sources/text/12.txt --origin <url>` |
+| `registry attach` | Record a text file already in the project in an entry's `texts`, with its sha256, and update its manifest | `papers registry attach --key 12 --text sources/text/12.txt --origin <url> --extraction layout` |
 | `verify` | Compare registry entries (or notes) with arXiv, Crossref, OpenAlex | `papers verify --keys 12,40 --format jsonl` |
-| `read` | Download an open-access PDF and extract its text, with a sha256 manifest | `papers read --key 12 --record` |
+| `read` | Download an open-access PDF and extract its text (plain or layout), with a sha256 manifest | `papers read --key 12 --record --extraction layout` |
 | `refs` | Works a paper cites (OpenAlex, else Semantic Scholar) | `papers refs 2601.00001 --max 50` |
 | `cited-by` | Works citing a paper | `papers cited-by 10.1234/abc --source s2` |
 | `bib` | Export registry entries as BibTeX or CSL-JSON | `papers bib 12 40 --format csl-json` |
@@ -109,7 +109,8 @@ Optional fields that `papers` adds to the contract:
 | `authors_truncated` | `true` when the source lists only the first authors ("et al."). It is omitted when false. `verify` then skips the author count, and exports end the list with "and others" or "et al.". |
 | `author_variants` | Other spellings of the first author that an index uses when its metadata misspells the name; `verify` accepts any of them. Copied from a note's frontmatter. It is omitted when empty. |
 | `citekey` | A citation key that overrides the generated one in `bib` and `cite`. It is set by hand and kept when the registry is rebuilt. |
-| `texts[].retrieved` | When `read` downloaded the text, as a UTC RFC 3339 time. It is omitted for texts attached by hand and for texts recorded before `papers` added it. |
+| `texts[].retrieved` | When `read` downloaded the text, as a UTC RFC 3339 time. It is omitted for texts attached by hand without `--retrieved` and for texts recorded before `papers` added it. |
+| `texts[].extraction` | How the text was extracted from its PDF: `plain` or `layout` (`pdftotext -layout`). It is omitted for texts attached by hand without `--extraction` and for texts recorded before `papers` added it; `read` treats those as `plain`. Another value, such as one a later version writes, is kept as it is; `read` does not re-extract such a text without `--extraction`. |
 
 Fields that `papers` does not know are kept when it rewrites the registry, in entries and in `texts` objects.
 
@@ -171,9 +172,14 @@ When an index's metadata is wrong rather than the note, record why in the note's
 
 ## `read`
 
-`papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin, retrieved}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file, and `retrieved` is the UTC time of the download (RFC 3339). Texts attached by hand have no `retrieved`.
+`papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin, retrieved, extraction}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file, `retrieved` is the UTC time of the download (RFC 3339), and `extraction` is the extraction mode. Texts attached by hand have no `retrieved` unless `--retrieved` gives one.
 
-The text comes from the `pdf-extract` crate. When it fails, panics or finds no text, `papers read` runs Poppler's `pdftotext` on the saved PDF, if it is on `PATH`. It also runs `pdftotext` when the paper's title is missing from `pdf-extract`'s text, as when that text is garbled. It then keeps `pdftotext`'s text only if that text contains the title; otherwise it keeps `pdf-extract`'s text and prints the title warning. A `pdftotext` run that takes longer than 60 seconds, or prints more than 64 MiB, is stopped and reported. The `text:` line names the extractor that produced the text. When neither extractor gives text, the PDF is kept, no text is written, and the `text:` line gives both reasons, such as `pdftotext is not on PATH`.
+`--extraction` chooses how the text is extracted:
+
+- `plain`, the default, gives the text in reading order, as described below.
+- `layout` runs `pdftotext -layout`, which keeps columns and table alignment. It needs Poppler's `pdftotext` on `PATH`; without it, the PDF is kept and no text is written. There is no fallback to `pdf-extract`.
+
+Without `--extraction`, `read` uses the mode recorded for the text it would replace: the stored text that still has its recorded hash, else a text recorded at the same path in the sidecar or the registry entry. So a layout text stays layout when it is extracted again. Other texts of the entry do not set the mode. In plain mode the text comes from the `pdf-extract` crate. When it fails, panics or finds no text, `papers read` runs Poppler's `pdftotext` on the saved PDF, if it is on `PATH`. It also runs `pdftotext` when the paper's title is missing from `pdf-extract`'s text, as when that text is garbled. It then keeps `pdftotext`'s text only if that text contains the title; otherwise it keeps `pdf-extract`'s text and prints the title warning. A `pdftotext` run that takes longer than 60 seconds, or prints more than 64 MiB, is stopped and reported. The `text:` line names the extractor that produced the text. When neither extractor gives text, the PDF is kept, no text is written, and the `text:` line gives both reasons, such as `pdftotext is not on PATH`.
 
 `<ref>` can also be the http(s) URL of a PDF or of a landing page, for open copies that have no arXiv id or DOI, such as a central bank's bulletin or a university repository's file:
 - A URL ending in `.pdf` is downloaded directly.
@@ -182,7 +188,17 @@ The text comes from the `pdf-extract` crate. When it fails, panics or finds no t
 - When the landing page names a DOI in its metadata (`citation_doi`, `dc.identifier`, `prism.doi`), the DOI's own open-access locations are tried next, then other versions with the same title. This happens only when the page and its links yield no PDF, including after the browser retry described below.
 - The manifest's `origin` is the URL the PDF came from.
 
-Running it again skips the download when the stored text still has the recorded hash; `--force` downloads anyway. `--record` (with `--key`) adds the manifest to the entry's `texts`. For a text obtained another way (by hand, or listed in an existing manifest), `papers registry attach --key <key> --text <path> [--origin <url>]` records it the same way: the file must be non-empty UTF-8 text inside the project root (symlinks are resolved first), and a text already recorded at that path is replaced, keeping its origin when `--origin` is not given. When the file is unchanged, the replaced text's `retrieved` is kept too.
+Running it again skips the download when the stored text still has the recorded hash. `--force` downloads anyway, and extracts in the recorded mode. An explicit `--extraction` that differs from the stored text's mode downloads again and says so; this is the only way `read` replaces a layout text with plain text. An explicit mode that matches a stored text without a recorded mode (plain) is recorded for it. `--record` (with `--key`) adds the manifest to the entry's `texts`.
+
+For a text obtained another way (by hand, or listed in an existing manifest), `papers registry attach --key <key> --text <path> [--origin <url>] [--retrieved <time>] [--extraction plain|layout]` records it the same way:
+
+- The file must be non-empty UTF-8 text, and its path must be inside the project root. The path is taken as written, after `.` and `..` are removed. It is inside the project when one of its directories is the project root, under any name.
+- Directories below the root may be symlinks. A `sources` directory linked to shared storage is accepted, and the text is recorded under its path in the project.
+- A symlinked file must point into the project or into its own directory; a link to a file elsewhere is refused. A `..` after a symlinked directory is refused when it leads to another file than the path without it.
+- A text already recorded at that path is replaced. It keeps the replaced text's origin when `--origin` is not given.
+- When the file is unchanged, the recorded `retrieved`, `extraction` and unknown fields are kept too, unless `--retrieved` or `--extraction` gives new values. They come from the manifest beside the text first, then from the replaced text. When the file changed, they are dropped, and `attach` prints a note for each; pass the options to record them.
+- `--retrieved` takes an RFC 3339 time and records it in UTC, to the second.
+- When a `<name>.json` manifest from `read` lies beside a `<name>.txt` text (in any case) and names the same path, `attach` rewrites it with the recorded text, so its sha256, origin, `retrieved` and `extraction` match the registry. It does so under the registry's lock; when the manifest cannot be read or written, `attach` fails and leaves the registry unchanged. Another JSON file there is left alone.
 
 Unless `--no-browser` is given, a candidate retries in headless Chromium only when its plain-HTTP reply was a JavaScript check page: a 202 HTML reply (how AWS WAF serves its challenge, as on figshare) or a small 200 HTML page with a challenge marker. A 403, a 429, any other refusal, and transport errors are reported and never retried in the browser. When a host blocks automated browsers, `papers` reports the block. It does no CAPTCHA solving or fingerprint spoofing.
 

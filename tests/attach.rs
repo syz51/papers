@@ -234,19 +234,17 @@ fn attach_keeps_the_download_time_and_unknown_fields_of_an_unchanged_text() {
 }
 
 #[test]
-fn attach_refuses_links_out_binary_empty_directories_and_a_missing_registry() {
+fn attach_refuses_paths_out_binary_empty_directories_and_a_missing_registry() {
     let dir = project("refuse-more");
-    let outside = dir
-        .parent()
-        .unwrap()
-        .join(format!("papers-outside-link-{}.txt", std::process::id()));
+    let name = format!("papers-outside-up-{}.txt", std::process::id());
+    let outside = dir.parent().unwrap().join(&name);
     std::fs::write(&outside, "outside").unwrap();
-    std::os::unix::fs::symlink(&outside, dir.join("texts/out.txt")).unwrap();
+    let up = format!("texts/../../{name}");
     std::fs::write(dir.join("texts/a.pdf"), b"%PDF-1.7\n\xff\xfe\x00binary").unwrap();
     std::fs::write(dir.join("texts/empty.txt"), "").unwrap();
     let before = std::fs::read_to_string(dir.join("refs.jsonl")).unwrap();
     for (path, message) in [
-        ("texts/out.txt", "outside the project root"),
+        (up.as_str(), "outside the project root"),
         ("texts/a.pdf", "not UTF-8 text"),
         ("texts/empty.txt", "is empty"),
         (".", "is not a file"),
@@ -271,6 +269,268 @@ fn attach_refuses_links_out_binary_empty_directories_and_a_missing_registry() {
         !dir.join("typo").exists(),
         "no directory or lock file is created"
     );
+    let out = attach(&dir, &["--text", "texts/a.txt", "--retrieved", "yesterday"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("RFC 3339"));
     std::fs::remove_file(outside).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A `sources` directory linked to storage outside the project, as in a
+/// project whose texts live on shared storage.
+#[test]
+fn attach_accepts_a_symlinked_sources_directory_and_updates_its_manifest() {
+    let dir = project("linked");
+    let store = dir
+        .parent()
+        .unwrap()
+        .join(format!("papers-attach-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&store);
+    std::fs::create_dir_all(store.join("text")).unwrap();
+    std::os::unix::fs::symlink(&store, dir.join("sources")).unwrap();
+    std::fs::write(store.join("text/k.txt"), "Synthetic      Layout\n").unwrap();
+    // The manifest `read` wrote for the plain text this one replaced.
+    let stale = r#"{"path":"sources/text/k.txt","sha256":"00","origin":"https://example.org/old.pdf","retrieved":"2026-11-01T00:00:00Z"}"#;
+    std::fs::write(store.join("text/k.json"), stale).unwrap();
+
+    let out = attach(
+        &dir,
+        &[
+            "--text",
+            "sources/text/k.txt",
+            "--origin",
+            "https://example.org/k.pdf",
+            "--retrieved",
+            "2026-11-07T19:00:00+09:00",
+            "--extraction",
+            "layout",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let t = texts(&dir);
+    assert_eq!(t[0]["path"], "sources/text/k.txt");
+    assert_eq!(t[0]["origin"], "https://example.org/k.pdf");
+    assert_eq!(t[0]["retrieved"], "2026-11-07T10:00:00Z");
+    assert_eq!(t[0]["extraction"], "layout");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(store.join("text/k.json")).unwrap()).unwrap();
+    assert_eq!(manifest, t[0], "the manifest matches the registry");
+
+    // Attached again without the options: an unchanged file keeps them.
+    assert!(
+        attach(&dir, &["--text", "sources/text/k.txt"])
+            .status
+            .success()
+    );
+    assert_eq!(texts(&dir)[0], t[0]);
+
+    // A changed file drops them, and says so.
+    std::fs::write(store.join("text/k.txt"), "Synthetic plain\n").unwrap();
+    let out = attach(&dir, &["--text", "sources/text/k.txt"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("extraction mode layout is dropped"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("download time"), "{stdout}");
+    let t = texts(&dir);
+    assert!(t[0].get("extraction").is_none(), "{t}");
+    assert!(t[0].get("retrieved").is_none(), "{t}");
+
+    // A JSON file beside the text that is not its manifest is left alone.
+    std::fs::write(store.join("text/k.json"), "{\"other\":1}").unwrap();
+    let out = attach(&dir, &["--text", "sources/text/k.txt"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("left"));
+    assert_eq!(
+        std::fs::read_to_string(store.join("text/k.json")).unwrap(),
+        "{\"other\":1}"
+    );
+    std::fs::remove_dir_all(&store).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn ok(out: &Output) {
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// Attaching a text that `read` downloaded, without options, keeps what its
+/// manifest records about the same file, in the manifest and the registry.
+#[test]
+fn attach_keeps_what_the_manifest_of_an_unchanged_text_records() {
+    let dir = project("manifest-keep");
+    let sha = "fa0343363edb8cb3ed1c098a47c28e56a7d7c8ade8dce7ed408b12b6280dd135";
+    let manifest = format!(
+        r#"{{"path":"texts/a.txt","sha256":"{sha}","origin":"https://example.org/a.pdf","retrieved":"2026-11-07T10:00:00Z","extraction":"layout"}}"#
+    );
+    std::fs::write(dir.join("texts/a.json"), &manifest).unwrap();
+    ok(&attach(&dir, &["--text", "texts/a.txt"]));
+    let t = texts(&dir);
+    assert_eq!(t[0]["origin"], "https://example.org/a.pdf");
+    assert_eq!(t[0]["retrieved"], "2026-11-07T10:00:00Z");
+    assert_eq!(t[0]["extraction"], "layout");
+    assert_eq!(read_json(&dir.join("texts/a.json")), t[0]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A mode a later version writes loads, and survives a rewrite.
+#[test]
+fn attach_keeps_an_unknown_extraction_mode() {
+    let dir = project("unknown-mode");
+    let sha = "fa0343363edb8cb3ed1c098a47c28e56a7d7c8ade8dce7ed408b12b6280dd135";
+    let text =
+        format!(r#"{{"path":"texts/a.txt","sha256":"{sha}","origin":null,"extraction":"ocr"}}"#);
+    let entry = ENTRY.replace(r#""texts":[]"#, &format!(r#""texts":[{text}]"#));
+    std::fs::write(dir.join("refs.jsonl"), format!("{entry}\n")).unwrap();
+    ok(&attach(&dir, &["--text", "texts/a.txt"]));
+    assert_eq!(texts(&dir)[0]["extraction"], "ocr");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn attach_records_the_download_time_in_utc_to_the_second() {
+    let dir = project("round");
+    ok(&attach(
+        &dir,
+        &[
+            "--text",
+            "texts/a.txt",
+            "--retrieved",
+            "2026-11-07T19:00:00.4+09:00",
+        ],
+    ));
+    assert_eq!(texts(&dir)[0]["retrieved"], "2026-11-07T10:00:00Z");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn attach_updates_the_manifest_of_an_upper_case_txt_file() {
+    let dir = project("upper");
+    std::fs::write(dir.join("texts/Paper.TXT"), "upper text").unwrap();
+    let stale =
+        r#"{"path":"texts/Paper.TXT","sha256":"00","origin":"https://example.org/old.pdf"}"#;
+    std::fs::write(dir.join("texts/Paper.json"), stale).unwrap();
+    ok(&attach(&dir, &["--text", "texts/Paper.TXT"]));
+    assert_eq!(read_json(&dir.join("texts/Paper.json")), texts(&dir)[0]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A manifest that cannot be read or written fails the attach, and leaves
+/// the registry unchanged.
+#[test]
+fn attach_fails_on_a_manifest_it_cannot_read_or_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = project("manifest-perm");
+    let sidecar = dir.join("texts/a.json");
+    std::fs::write(
+        &sidecar,
+        r#"{"path":"texts/a.txt","sha256":"00","origin":null}"#,
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(dir.join("refs.jsonl")).unwrap();
+    for mode in [0o000, 0o444] {
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(mode)).unwrap();
+        let out = attach(&dir, &["--text", "texts/a.txt"]);
+        assert_eq!(out.status.code(), Some(2), "mode {mode:o}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("a.json"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("refs.jsonl")).unwrap(),
+            before,
+            "mode {mode:o}"
+        );
+    }
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A symlinked file must point into the project or its own directory; a
+/// `..` after a symlinked directory must not name another file.
+#[test]
+fn attach_refuses_file_links_out_and_dot_dot_through_links() {
+    let dir = project("links-out");
+    let store = dir
+        .parent()
+        .unwrap()
+        .join(format!("papers-attach-store-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&store);
+    std::fs::create_dir_all(store.join("a/text")).unwrap();
+    std::fs::write(store.join("secret.txt"), "outside").unwrap();
+    std::fs::write(store.join("a/text/k.txt"), "stored").unwrap();
+    std::os::unix::fs::symlink(store.join("secret.txt"), dir.join("texts/out.txt")).unwrap();
+    std::os::unix::fs::symlink(store.join("a"), dir.join("sources")).unwrap();
+    // `sources/../secret.txt`: the system reads store/secret.txt; without
+    // the link, the path names this file in the project.
+    std::fs::write(dir.join("secret.txt"), "inside").unwrap();
+    // A link into its own (linked) directory is fine.
+    std::os::unix::fs::symlink("k.txt", store.join("a/text/alias.txt")).unwrap();
+    let before = std::fs::read_to_string(dir.join("refs.jsonl")).unwrap();
+    for (path, message) in [
+        ("texts/out.txt", "is a symlink to a file outside"),
+        (
+            "sources/../secret.txt",
+            "a `..` after a symlinked directory",
+        ),
+    ] {
+        let out = attach(&dir, &["--text", path]);
+        assert_eq!(out.status.code(), Some(2), "{path}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(message), "{path}: {err}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join("refs.jsonl")).unwrap(),
+        before
+    );
+    ok(&attach(&dir, &["--text", "sources/text/alias.txt"]));
+    assert_eq!(texts(&dir)[0]["path"], "sources/text/alias.txt");
+    std::fs::remove_dir_all(&store).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The project named through a link, and its `sources` linked elsewhere.
+#[test]
+fn attach_accepts_a_linked_sources_directory_in_a_linked_project() {
+    let dir = project("linked-both");
+    let store = dir
+        .parent()
+        .unwrap()
+        .join(format!("papers-attach-store-both-{}", std::process::id()));
+    let link = dir
+        .parent()
+        .unwrap()
+        .join(format!("papers-attach-link-both-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&store);
+    let _ = std::fs::remove_file(&link);
+    std::fs::create_dir_all(store.join("text")).unwrap();
+    std::fs::write(store.join("text/k.txt"), "stored").unwrap();
+    std::os::unix::fs::symlink(&store, dir.join("sources")).unwrap();
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+    let config = link.join("research.toml");
+    ok(&attach(
+        &dir,
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--text",
+            "sources/text/k.txt",
+        ],
+    ));
+    assert_eq!(texts(&dir)[0]["path"], "sources/text/k.txt");
+    std::fs::remove_file(&link).unwrap();
+    std::fs::remove_dir_all(&store).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }

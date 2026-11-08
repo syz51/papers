@@ -79,9 +79,60 @@ pub struct Text {
     /// attached by hand and for manifests written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retrieved: Option<String>,
-    /// Fields this version does not know, kept when the registry is rewritten.
+    /// Fields this version does not know, kept when the registry is rewritten,
+    /// and `extraction` (see [`Text::extraction`]).
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// The `texts[]` field that names the extraction mode. It is kept in
+/// [`Text::extra`], so a mode a later version adds survives a rewrite by this
+/// one instead of failing the whole registry's load.
+const EXTRACTION: &str = "extraction";
+
+impl Text {
+    /// How the text was extracted from its PDF. `Ok(None)` when no mode is
+    /// recorded, as for texts attached by hand without `--extraction` and texts
+    /// recorded before modes were; `Err` with the value when this version does
+    /// not know it.
+    pub fn extraction(&self) -> Result<Option<Extraction>, String> {
+        match self.extra.get(EXTRACTION) {
+            None => Ok(None),
+            Some(v) => v
+                .as_str()
+                .and_then(Extraction::parse)
+                .map(Some)
+                .ok_or_else(|| v.to_string()),
+        }
+    }
+
+    pub fn set_extraction(&mut self, mode: Extraction) {
+        self.extra.insert(EXTRACTION.to_owned(), mode.name().into());
+    }
+}
+
+/// How a text was extracted from its PDF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Extraction {
+    /// Reading-order text: pdf-extract, or `pdftotext` when pdf-extract fails.
+    Plain,
+    /// `pdftotext -layout`, which keeps the page's columns and table alignment.
+    Layout,
+}
+
+impl Extraction {
+    fn parse(s: &str) -> Option<Self> {
+        [Extraction::Plain, Extraction::Layout]
+            .into_iter()
+            .find(|m| m.name() == s)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Extraction::Plain => "plain",
+            Extraction::Layout => "layout",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

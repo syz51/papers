@@ -85,15 +85,18 @@ pub const PDFTOTEXT_MAX_OUTPUT: u64 = 64 << 20;
 const STDERR_LIMIT: u64 = 16 << 10;
 
 /// Extracts the text of the PDF at `path` with `pdftotext` (`program`), as
-/// UTF-8. A run longer than `timeout` is stopped, and more output than
-/// `max_output` bytes is refused; both are reported as errors.
+/// UTF-8, keeping the page layout when `layout` is set (`-layout`). A run
+/// longer than `timeout` is stopped, and more output than `max_output` bytes
+/// is refused; both are reported as errors.
 pub fn pdftotext(
     program: &str,
     path: &Path,
+    layout: bool,
     timeout: Duration,
     max_output: u64,
 ) -> Result<String, String> {
     let mut child = Command::new(program)
+        .args(layout.then_some("-layout"))
         .args(["-enc", "UTF-8"])
         .arg(path)
         .arg("-")
@@ -179,7 +182,7 @@ pub fn choose_text<'a>(
     timeout: Duration,
     max_output: u64,
 ) -> Result<Chosen<'a>, String> {
-    let run = || pdftotext(program, path, timeout, max_output);
+    let run = || pdftotext(program, path, false, timeout, max_output);
     match extracted {
         Ok(text) if has_title(&text, title) => Ok(Chosen {
             text,
@@ -348,7 +351,7 @@ fn quoted(s: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -414,7 +417,7 @@ mod tests {
 
     /// The path of a fake program. Every test that runs one gets its path
     /// here first. A name not in `FAKE_PROGRAMS` is a path that does not exist.
-    fn fake_program(name: &str) -> String {
+    pub(crate) fn fake_program(name: &str) -> String {
         use std::os::unix::fs::PermissionsExt;
         static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let dir = DIR.get_or_init(|| {
@@ -434,7 +437,13 @@ mod tests {
     }
 
     fn run_fake(name: &str, timeout: Duration) -> Result<String, String> {
-        pdftotext(&fake_program(name), Path::new("/x/a.pdf"), timeout, 1 << 20)
+        pdftotext(
+            &fake_program(name),
+            Path::new("/x/a.pdf"),
+            false,
+            timeout,
+            1 << 20,
+        )
     }
 
     #[test]
@@ -447,6 +456,16 @@ mod tests {
         assert_eq!(
             run_fake("invalid", timeout),
             Ok("caf\u{fffd} text\n".to_owned())
+        );
+        assert_eq!(
+            pdftotext(
+                &fake_program("prints"),
+                Path::new("/x/a.pdf"),
+                true,
+                timeout,
+                1 << 20
+            ),
+            Ok("text of UTF-8 with -layout -enc /x/a.pdf\n".to_owned())
         );
     }
 
