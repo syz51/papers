@@ -2116,17 +2116,18 @@ fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String>
     }
     let (text, extractor) = match pdf::extract_text(body) {
         Ok(text) => (text, "pdf-extract"),
-        Err(e) => match pdf::pdftotext(pdf::PDFTOTEXT, &pdf_path, pdf::PDFTOTEXT_TIMEOUT) {
-            Ok(Some(text)) => {
+        Err(e) => match pdf::pdftotext(
+            pdf::PDFTOTEXT,
+            &pdf_path,
+            pdf::PDFTOTEXT_TIMEOUT,
+            pdf::PDFTOTEXT_MAX_OUTPUT,
+        ) {
+            Ok(text) => {
                 println!(
                     "text: pdf-extract could not read it ({e}); used {}",
                     pdf::PDFTOTEXT
                 );
                 (text, pdf::PDFTOTEXT)
-            }
-            Ok(None) => {
-                println!("text: not written ({e})");
-                return Ok(Saved::PdfOnly);
             }
             Err(fallback) => {
                 println!("text: not written ({e}; {fallback})");
