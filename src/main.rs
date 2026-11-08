@@ -676,6 +676,7 @@ fn main() -> ExitCode {
                 extraction,
                 browser: !no_browser,
             },
+            pdf::PDFTOTEXT,
         ),
         Command::Verify {
             keys,
@@ -1820,7 +1821,13 @@ fn existing_text(config: &config::Config, recorded: &[registry::Text]) -> Option
     None
 }
 
-fn read(http: &Http, config: &config::Config, o: &ReadOptions) -> Result<bool, String> {
+/// Reads `o`'s paper; `pdftotext` is `pdf::PDFTOTEXT`, or a stand-in in tests.
+fn read(
+    http: &Http,
+    config: &config::Config,
+    o: &ReadOptions,
+    pdftotext: &str,
+) -> Result<bool, String> {
     if o.record && o.key.is_none() {
         return Err("--record adds the text to a registry entry; name it with --key".to_owned());
     }
@@ -1907,6 +1914,9 @@ fn read(http: &Http, config: &config::Config, o: &ReadOptions) -> Result<bool, S
             .find(|m| m != &Ok(None))
             .unwrap_or(Ok(None)),
     };
+    // For a mode change: the saved PDF, when it has the sha256 recorded for
+    // the text, and that text. Its text is extracted again without a download.
+    let mut local = None;
     if !o.force
         && let Some(mut t) = current
     {
@@ -1926,15 +1936,35 @@ fn read(http: &Http, config: &config::Config, o: &ReadOptions) -> Result<bool, S
             );
             return finish_read(config, o, entry.as_ref(), &sidecar, t);
         }
+        let pdf_path = out_dir.join(format!("{name}.pdf"));
+        let pdf = match (t.pdf_sha256(), std::fs::read(&pdf_path)) {
+            (Some(sha), Ok(bytes)) if http::sha256_hex(&bytes) == sha => Some(bytes),
+            (Some(_), Ok(_)) => {
+                println!(
+                    "{} changed since its sha256 was recorded",
+                    config.display(&pdf_path)
+                );
+                None
+            }
+            _ => None,
+        };
         println!(
-            "{} was extracted in {} mode; downloading it again for {} mode",
+            "{} was extracted in {} mode; {} for {} mode",
             t.path,
             match &mode {
                 Ok(m) => m.unwrap_or(registry::Extraction::Plain).name().to_owned(),
                 Err(value) => value.clone(),
             },
+            match pdf {
+                Some(_) => format!(
+                    "extracting it again from {} (sha256 matches)",
+                    config.display(&pdf_path)
+                ),
+                None => "downloading it again".to_owned(),
+            },
             o.extraction.expect("kept unless a mode is asked").name()
         );
+        local = pdf.map(|bytes| (bytes, t));
     }
     // A text extracted in layout mode stays so unless `--extraction` says
     // otherwise: a plain re-extraction would silently lose its layout.
@@ -1961,8 +1991,15 @@ fn read(http: &Http, config: &config::Config, o: &ReadOptions) -> Result<bool, S
             .and_then(|r| r.title.clone())
             .unwrap_or_default(),
         extraction,
-        pdftotext: pdf::PDFTOTEXT,
+        pdftotext,
     };
+    if let Some((bytes, t)) = local {
+        // The PDF's origin and download time stay those recorded for it.
+        return match extract_pdf(&target, &bytes, t.origin, t.retrieved)? {
+            Saved::Text(t) => finish_read(config, o, entry.as_ref(), &sidecar, t),
+            Saved::PdfOnly => Ok(false),
+        };
+    }
     let mut browse = |pages: &[String], target: &Target| {
         if o.browser {
             try_in_browser(pages, target)
@@ -2312,7 +2349,6 @@ fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String>
     debug_assert!(!name.contains(['/', '\\']) && !name.starts_with('.'));
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let pdf_path = dir.join(format!("{name}.pdf"));
-    let txt_path = dir.join(format!("{name}.txt"));
     println!("source: {source}");
     if sha256_file(&pdf_path).as_deref() == Some(http::sha256_hex(body).as_str()) {
         println!("pdf: {} (unchanged)", pdf_path.display());
@@ -2320,6 +2356,20 @@ fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String>
         std::fs::write(&pdf_path, body).map_err(|e| format!("{}: {e}", pdf_path.display()))?;
         println!("pdf: {}", pdf_path.display());
     }
+    extract_pdf(target, body, Some(source.to_owned()), Some(finding::now()))
+}
+
+/// Extracts the text of `<dir>/<name>.pdf`, whose bytes are `body`, into
+/// `<dir>/<name>.txt`, and returns its record with the PDF's `origin`, download
+/// time and sha256.
+fn extract_pdf(
+    target: &Target,
+    body: &[u8],
+    origin: Option<String>,
+    retrieved: Option<String>,
+) -> Result<Saved, String> {
+    let pdf_path = target.dir.join(format!("{}.pdf", target.name));
+    let txt_path = target.dir.join(format!("{}.txt", target.name));
     let chosen = match target.extraction {
         registry::Extraction::Plain => pdf::choose_text(
             pdf::extract_text(body),
@@ -2371,11 +2421,12 @@ fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String>
     let mut saved = registry::Text {
         path: target.config.display(&txt_path),
         sha256: http::sha256_hex(text.as_bytes()),
-        origin: Some(source.to_owned()),
-        retrieved: Some(finding::now()),
+        origin,
+        retrieved,
         extra: Default::default(),
     };
     saved.set_extraction(target.extraction);
+    saved.set_pdf_sha256(http::sha256_hex(body));
     Ok(Saved::Text(saved))
 }
 
@@ -2692,6 +2743,7 @@ mod tests {
                 extraction,
                 browser: false,
             },
+            pdf::PDFTOTEXT,
         )
     }
 
@@ -2724,6 +2776,8 @@ mod tests {
             std::fs::read_to_string(dir.join(text.path.rsplit('/').next().unwrap())).unwrap();
         assert!(saved.contains("Synthetic Working Paper"), "{saved}");
         assert_eq!(text.sha256, http::sha256_hex(saved.as_bytes()));
+        let pdf_sha256 = http::sha256_hex(pdf.as_bytes());
+        assert_eq!(text.pdf_sha256(), Some(pdf_sha256.as_str()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2774,6 +2828,11 @@ mod tests {
         } else {
             assert_eq!(forced, Ok(true));
             assert_ne!(text.retrieved, recorded.retrieved);
+            // Without the PDF's sha256 the switch to plain downloads, as it
+            // does when pdftotext is missing.
+            let mut unmarked = text.clone();
+            unmarked.extra.remove("pdf_sha256");
+            std::fs::write(&sidecar, serde_json::to_string(&unmarked).unwrap()).unwrap();
         }
 
         // Asking for plain extracts plain text over it.
@@ -2840,7 +2899,10 @@ mod tests {
             extraction: None,
             browser: false,
         };
-        assert_eq!(read(&Http::new(), &config, &options), Ok(true));
+        assert_eq!(
+            read(&Http::new(), &config, &options, pdf::PDFTOTEXT),
+            Ok(true)
+        );
         let json = std::fs::read_to_string(&sidecar).unwrap();
         let text: registry::Text = serde_json::from_str(&json).unwrap();
         assert_eq!(text, attached);
@@ -2900,6 +2962,15 @@ mod tests {
         force: bool,
         extraction: Option<registry::Extraction>,
     ) -> Result<bool, String> {
+        read_key_with(root, force, extraction, pdf::PDFTOTEXT)
+    }
+
+    fn read_key_with(
+        root: &Path,
+        force: bool,
+        extraction: Option<registry::Extraction>,
+        pdftotext: &str,
+    ) -> Result<bool, String> {
         let config = config::Config::load(None, root).unwrap();
         let options = ReadOptions {
             reference: None,
@@ -2910,7 +2981,7 @@ mod tests {
             extraction,
             browser: false,
         };
-        read(&Http::new(), &config, &options)
+        read(&Http::new(), &config, &options, pdftotext)
     }
 
     fn sidecar_of(root: &Path) -> registry::Text {
@@ -2979,6 +3050,91 @@ mod tests {
             std::fs::read_to_string(&sidecar).unwrap().trim(),
             before.trim()
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A mode change extracts the text again from the saved PDF when it has
+    /// the recorded sha256. The entry's URL does not resolve, so a download
+    /// would find no PDF.
+    #[test]
+    fn read_switches_mode_from_the_saved_pdf() {
+        use registry::Extraction::{Layout, Plain};
+        let (root, mut text) = unmarked_project("local-pdf", "https://example.invalid/k.pdf");
+        let pdf = tiny_pdf("Synthetic Local Paper");
+        std::fs::write(root.join("sources/text/k.pdf"), &pdf).unwrap();
+        text.set_pdf_sha256(http::sha256_hex(pdf.as_bytes()));
+        std::fs::write(
+            root.join("sources/text/k.json"),
+            serde_json::to_string(&text).unwrap(),
+        )
+        .unwrap();
+        let prints = pdf::tests::fake_program("prints");
+
+        assert_eq!(read_key_with(&root, false, Some(Layout), &prints), Ok(true));
+        let layout = sidecar_of(&root);
+        let written = std::fs::read_to_string(root.join("sources/text/k.txt")).unwrap();
+        // The fake echoes its arguments: "text of $3 with $1 $2 $4".
+        assert!(
+            written.starts_with("text of UTF-8 with -layout -enc "),
+            "{written}"
+        );
+        assert_eq!(layout.sha256, http::sha256_hex(written.as_bytes()));
+        assert_eq!(layout.extraction(), Ok(Some(Layout)));
+        assert_eq!(layout.pdf_sha256(), text.pdf_sha256());
+        // The PDF's origin and download time are kept.
+        assert_eq!(
+            (&layout.origin, &layout.retrieved),
+            (&text.origin, &text.retrieved)
+        );
+
+        // And back to plain, from the same PDF.
+        assert_eq!(read_key_with(&root, false, Some(Plain), &prints), Ok(true));
+        let plain = sidecar_of(&root);
+        let written = std::fs::read_to_string(root.join("sources/text/k.txt")).unwrap();
+        assert!(written.contains("Synthetic Local Paper"), "{written}");
+        assert_eq!(plain.extraction(), Ok(Some(Plain)));
+        assert_eq!(plain.pdf_sha256(), text.pdf_sha256());
+        assert_eq!(plain.retrieved, text.retrieved);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Without a recorded PDF sha256, or when the saved PDF does not have it,
+    /// a mode change downloads the PDF again.
+    #[test]
+    fn read_downloads_for_a_mode_change_without_a_matching_pdf_sha256() {
+        use crate::http::response;
+        use registry::Extraction::{Layout, Plain};
+        let pdf = tiny_pdf("Synthetic Served Paper");
+        let reply = || response("200 OK", &["Content-Type: application/pdf"], &pdf);
+        let (base, server) = http::serve(vec![reply(), reply()]);
+        let (root, mut text) = unmarked_project("pdf-mismatch", &format!("{base}/k.pdf"));
+        let pdf_path = root.join("sources/text/k.pdf");
+        let sidecar = root.join("sources/text/k.json");
+        let prints = pdf::tests::fake_program("prints");
+
+        // A recorded sha256 that the saved PDF does not have.
+        std::fs::write(&pdf_path, tiny_pdf("Another Paper")).unwrap();
+        text.set_pdf_sha256(http::sha256_hex(pdf.as_bytes()));
+        std::fs::write(&sidecar, serde_json::to_string(&text).unwrap()).unwrap();
+        assert_eq!(read_key_with(&root, false, Some(Layout), &prints), Ok(true));
+        let downloaded = sidecar_of(&root);
+        assert_eq!(downloaded.extraction(), Ok(Some(Layout)));
+        assert_ne!(downloaded.retrieved, text.retrieved, "downloaded again");
+        assert_eq!(std::fs::read(&pdf_path).unwrap(), pdf.as_bytes());
+
+        // No recorded sha256, beside the PDF as the download left it.
+        let mut unmarked = downloaded.clone();
+        unmarked.extra.remove("pdf_sha256");
+        unmarked.retrieved = text.retrieved.clone();
+        std::fs::write(&sidecar, serde_json::to_string(&unmarked).unwrap()).unwrap();
+        assert_eq!(read_key_with(&root, false, Some(Plain), &prints), Ok(true));
+        let heads = server.join().unwrap();
+        assert_eq!(heads.len(), 2, "{heads:?}");
+        let plain = sidecar_of(&root);
+        assert_eq!(plain.extraction(), Ok(Some(Plain)));
+        assert_ne!(plain.retrieved, text.retrieved, "downloaded again");
+        let pdf_sha256 = http::sha256_hex(pdf.as_bytes());
+        assert_eq!(plain.pdf_sha256(), Some(pdf_sha256.as_str()));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -3114,6 +3270,7 @@ mod tests {
                 extraction: None,
                 browser: false,
             },
+            pdf::PDFTOTEXT,
         );
         let heads = server.join().unwrap();
         assert_eq!(read_ok, Ok(true), "{heads:?}");

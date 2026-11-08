@@ -80,7 +80,8 @@ pub struct Text {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retrieved: Option<String>,
     /// Fields this version does not know, kept when the registry is rewritten,
-    /// and `extraction` (see [`Text::extraction`]).
+    /// `extraction` (see [`Text::extraction`]) and `pdf_sha256` (see
+    /// [`Text::pdf_sha256`]).
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -90,7 +91,23 @@ pub struct Text {
 /// one instead of failing the whole registry's load.
 const EXTRACTION: &str = "extraction";
 
+/// The `texts[]` field with the sha256 of the PDF the text was extracted from.
+/// It is kept in [`Text::extra`], so it is carried over and dropped with the
+/// other recorded fields when a text is attached again.
+const PDF_SHA256: &str = "pdf_sha256";
+
 impl Text {
+    /// The sha256 of the PDF `read` extracted the text from; `None` when none
+    /// is recorded, as for texts attached by hand and texts recorded before
+    /// `read` recorded it, or when the value is not a string.
+    pub fn pdf_sha256(&self) -> Option<&str> {
+        self.extra.get(PDF_SHA256).and_then(Value::as_str)
+    }
+
+    pub fn set_pdf_sha256(&mut self, sha256: String) {
+        self.extra.insert(PDF_SHA256.to_owned(), sha256.into());
+    }
+
     /// How the text was extracted from its PDF. `Ok(None)` when no mode is
     /// recorded, as for texts attached by hand without `--extraction` and texts
     /// recorded before modes were; `Err` with the value when this version does
