@@ -70,7 +70,8 @@ pub fn extract_text(bytes: &[u8]) -> Result<String, String> {
     }
 }
 
-/// Poppler's text extractor, run when pdf-extract cannot read a PDF.
+/// Poppler's text extractor, run when pdf-extract cannot read a PDF or its
+/// text lacks the paper's title.
 pub const PDFTOTEXT: &str = "pdftotext";
 
 /// How long `pdftotext` may run: a crafted PDF can keep it busy forever.
@@ -147,6 +148,79 @@ pub fn pdftotext(
         return Err(format!("{program} found no text"));
     }
     Ok(text)
+}
+
+/// Whether `text` contains `title`, ignoring case, punctuation and spacing.
+pub fn has_title(text: &str, title: &str) -> bool {
+    crate::text::key(text).contains(&crate::text::key(title))
+}
+
+/// The text chosen for a PDF.
+#[derive(Debug, PartialEq)]
+pub struct Chosen<'a> {
+    pub text: String,
+    /// The program that extracted `text`.
+    pub extractor: &'a str,
+    /// Why `program` ran and what came of it; `None` when it did not run.
+    pub note: Option<String>,
+}
+
+/// Chooses the text to save for the PDF at `path`, given pdf-extract's result
+/// `extracted`. Runs `program` (`pdftotext`) when pdf-extract failed, or when
+/// its text lacks `title`: garbled text, such as glyphs from a font without a
+/// Unicode map, fails that check. In the second case pdftotext's text is kept
+/// only when it contains the title. Errs with both reasons when neither
+/// extractor gives text.
+pub fn choose_text<'a>(
+    extracted: Result<String, String>,
+    path: &Path,
+    title: &str,
+    program: &'a str,
+    timeout: Duration,
+    max_output: u64,
+) -> Result<Chosen<'a>, String> {
+    let run = || pdftotext(program, path, timeout, max_output);
+    match extracted {
+        Ok(text) if has_title(&text, title) => Ok(Chosen {
+            text,
+            extractor: "pdf-extract",
+            note: None,
+        }),
+        Ok(text) => {
+            let (text, extractor, note) = match run() {
+                Ok(other) if has_title(&other, title) => (
+                    other,
+                    program,
+                    format!("pdf-extract's text lacks the title; used {program}"),
+                ),
+                Ok(_) => (
+                    text,
+                    "pdf-extract",
+                    format!("pdf-extract's text lacks the title, and so does {program}'s"),
+                ),
+                Err(e) => (
+                    text,
+                    "pdf-extract",
+                    format!("pdf-extract's text lacks the title; {e}"),
+                ),
+            };
+            Ok(Chosen {
+                text,
+                extractor,
+                note: Some(note),
+            })
+        }
+        Err(e) => match run() {
+            Ok(text) => Ok(Chosen {
+                text,
+                extractor: program,
+                note: Some(format!(
+                    "pdf-extract could not read it ({e}); used {program}"
+                )),
+            }),
+            Err(fallback) => Err(format!("{e}; {fallback}")),
+        },
+    }
 }
 
 /// Reads at most `limit` bytes of a child's piped output on a new thread.
@@ -324,7 +398,7 @@ mod tests {
     /// Shell scripts standing in for `pdftotext`, by name. All are written
     /// before any runs: on Linux, writing one while another test spawns a
     /// process can fail the spawn with "text file busy".
-    const FAKE_PROGRAMS: [(&str, &str); 6] = [
+    const FAKE_PROGRAMS: [(&str, &str); 7] = [
         // Echoes its arguments, so the call's arguments are checked too.
         ("prints", r#"echo "text of $3 with $1 $2 $4""#),
         (
@@ -335,6 +409,7 @@ mod tests {
         ("hangs", "exec sleep 30"),
         ("floods", "exec yes"),
         ("invalid", r"printf 'caf\351 text\n'"),
+        ("titled", "echo 'On Readable Titles: A Study'"),
     ];
 
     /// The path of a fake program. Every test that runs one gets its path
@@ -402,6 +477,105 @@ mod tests {
             "{err}"
         );
         assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    const TITLE: &str = "On readable titles - a study";
+
+    fn choose<'a>(
+        extracted: Result<&str, &str>,
+        program: &'a str,
+        timeout: Duration,
+    ) -> Result<Chosen<'a>, String> {
+        let extracted = extracted.map(str::to_owned).map_err(str::to_owned);
+        choose_text(
+            extracted,
+            Path::new("/x/a.pdf"),
+            TITLE,
+            program,
+            timeout,
+            1 << 20,
+        )
+    }
+
+    #[test]
+    fn pdf_extract_text_with_the_title_is_kept_without_pdftotext() {
+        let program = fake_program("titled");
+        let chosen = choose(
+            Ok("ON READABLE TITLES: A STUDY\nbody"),
+            &program,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(chosen.extractor, "pdf-extract");
+        assert_eq!(chosen.text, "ON READABLE TITLES: A STUDY\nbody");
+        assert_eq!(chosen.note, None);
+    }
+
+    #[test]
+    fn pdftotext_text_with_the_title_replaces_pdf_extract_text_without_it() {
+        let program = fake_program("titled");
+        let chosen = choose(
+            Ok("\u{1}\u{2} glyph soup"),
+            &program,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(chosen.extractor, program);
+        assert_eq!(chosen.text, "On Readable Titles: A Study\n");
+        let note = chosen.note.unwrap();
+        assert!(
+            note.ends_with(&format!("lacks the title; used {program}")),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn pdf_extract_text_is_kept_when_pdftotext_text_lacks_the_title_too() {
+        let program = fake_program("prints");
+        let chosen = choose(Ok("glyph soup"), &program, Duration::from_secs(10)).unwrap();
+        assert_eq!(chosen.extractor, "pdf-extract");
+        assert_eq!(chosen.text, "glyph soup");
+        // save_pdf still warns: the kept text lacks the title.
+        assert!(!has_title(&chosen.text, TITLE));
+        let note = chosen.note.unwrap();
+        assert!(
+            note.ends_with(&format!("and so does {program}'s")),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn pdf_extract_text_is_kept_when_pdftotext_fails_or_hangs() {
+        for (name, timeout) in [
+            ("fails", Duration::from_secs(10)),
+            ("hangs", Duration::from_millis(200)),
+            ("absent", Duration::from_secs(1)),
+        ] {
+            let program = fake_program(name);
+            let chosen = choose(Ok("glyph soup"), &program, timeout).unwrap();
+            assert_eq!(chosen.extractor, "pdf-extract", "{name}");
+            assert_eq!(chosen.text, "glyph soup", "{name}");
+            let note = chosen.note.unwrap();
+            assert!(
+                note.starts_with("pdf-extract's text lacks the title; "),
+                "{note}"
+            );
+        }
+    }
+
+    #[test]
+    fn pdftotext_text_is_used_when_pdf_extract_fails() {
+        let program = fake_program("prints");
+        let chosen = choose(Err("no text"), &program, Duration::from_secs(10)).unwrap();
+        assert_eq!(chosen.extractor, program);
+        assert!(!has_title(&chosen.text, TITLE));
+        let err = choose(
+            Err("no text"),
+            &fake_program("fails"),
+            Duration::from_secs(10),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("no text; "), "{err}");
     }
 
     #[test]

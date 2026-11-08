@@ -2114,34 +2114,35 @@ fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String>
         std::fs::write(&pdf_path, body).map_err(|e| format!("{}: {e}", pdf_path.display()))?;
         println!("pdf: {}", pdf_path.display());
     }
-    let (text, extractor) = match pdf::extract_text(body) {
-        Ok(text) => (text, "pdf-extract"),
-        Err(e) => match pdf::pdftotext(
-            pdf::PDFTOTEXT,
-            &pdf_path,
-            pdf::PDFTOTEXT_TIMEOUT,
-            pdf::PDFTOTEXT_MAX_OUTPUT,
-        ) {
-            Ok(text) => {
-                println!(
-                    "text: pdf-extract could not read it ({e}); used {}",
-                    pdf::PDFTOTEXT
-                );
-                (text, pdf::PDFTOTEXT)
-            }
-            Err(fallback) => {
-                println!("text: not written ({e}; {fallback})");
-                return Ok(Saved::PdfOnly);
-            }
-        },
+    let chosen = pdf::choose_text(
+        pdf::extract_text(body),
+        &pdf_path,
+        &target.title,
+        pdf::PDFTOTEXT,
+        pdf::PDFTOTEXT_TIMEOUT,
+        pdf::PDFTOTEXT_MAX_OUTPUT,
+    );
+    let pdf::Chosen {
+        text,
+        extractor,
+        note,
+    } = match chosen {
+        Ok(chosen) => chosen,
+        Err(e) => {
+            println!("text: not written ({e})");
+            return Ok(Saved::PdfOnly);
+        }
     };
+    if let Some(note) = note {
+        println!("text: {note}");
+    }
     std::fs::write(&txt_path, &text).map_err(|e| format!("{}: {e}", txt_path.display()))?;
     println!(
         "text: {} ({} words, extracted by {extractor})",
         txt_path.display(),
         text.split_whitespace().count()
     );
-    if !text::key(&text).contains(&text::key(&target.title)) {
+    if !pdf::has_title(&text, &target.title) {
         println!(
             "warning: the title does not appear in the extracted text; check this is the right paper"
         );
