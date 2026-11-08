@@ -142,19 +142,52 @@ fn print_stats(records: &[Reference], issues: &[Issue]) {
     }
     if !by_rule.is_empty() {
         let list: Vec<String> = by_rule.iter().map(|(r, n)| format!("{r} {n}")).collect();
-        eprintln!(
-            "  parse issues: {} (run papers registry check for details)",
-            list.join(", ")
-        );
+        let hint = if issues.iter().any(|i| i.severity == Severity::Error) {
+            "errors are listed above; run papers registry check for the rest"
+        } else {
+            "run papers registry check for details"
+        };
+        eprintln!("  parse issues: {} ({hint})", list.join(", "));
     }
 }
 
-/// Parse issues after which an entry's text gave nothing to record.
+/// Parse issues after which an entry's main text (the frontmatter, or the
+/// catalogue entry line) could not be read.
 const UNREADABLE: &[&str] = &["frontmatter-invalid", "entry-missing"];
 
-/// Merges the parsed records into `previous`. An entry whose text could not
-/// be read keeps its previous record; for notes, a recorded depth stays when
-/// the note gives none.
+/// Fills each metadata field that `r` lacks from `prev`. Values the text still
+/// gives, such as a catalogue section's labelled lines, win; `source` stays.
+fn fill_from(r: &mut Reference, prev: &Reference) {
+    fn fill<T: Clone>(field: &mut Option<T>, prev: &Option<T>) {
+        if field.is_none() {
+            field.clone_from(prev);
+        }
+    }
+    fill(&mut r.kind, &prev.kind);
+    fill(&mut r.title, &prev.title);
+    if r.authors.is_none() {
+        r.authors.clone_from(&prev.authors);
+        r.authors_truncated = prev.authors_truncated;
+    }
+    if r.author_variants.is_empty() {
+        r.author_variants.clone_from(&prev.author_variants);
+    }
+    fill(&mut r.year, &prev.year);
+    fill(&mut r.venue, &prev.venue);
+    fill(&mut r.ids.doi, &prev.ids.doi);
+    if r.ids.arxiv.is_none() {
+        r.ids.arxiv.clone_from(&prev.ids.arxiv);
+        r.version.clone_from(&prev.version);
+    }
+    fill(&mut r.ids.url, &prev.ids.url);
+    fill(&mut r.accessed, &prev.accessed);
+    fill(&mut r.depth, &prev.depth);
+    fill(&mut r.duplicate_of, &prev.duplicate_of);
+}
+
+/// Merges the parsed records into `previous`. An entry whose main text could
+/// not be read keeps the recorded values the text no longer gives; for notes,
+/// a recorded depth stays when the note gives none.
 fn merge(from: From, parsed: &Parsed, previous: Vec<Reference>) -> (Vec<Reference>, Vec<String>) {
     let unreadable: BTreeSet<&str> = parsed
         .issues
@@ -163,12 +196,15 @@ fn merge(from: From, parsed: &Parsed, previous: Vec<Reference>) -> (Vec<Referenc
         .map(|i| i.key.as_str())
         .collect();
     let mut fresh = parsed.records.clone();
-    for r in fresh
-        .iter_mut()
-        .filter(|r| unreadable.contains(r.key.as_str()))
-    {
-        if let Some(prev) = previous.iter().find(|p| p.key == r.key) {
-            *r = prev.clone();
+    if !unreadable.is_empty() {
+        let recorded: BTreeMap<&str, &Reference> =
+            previous.iter().map(|p| (p.key.as_str(), p)).collect();
+        for r in &mut fresh {
+            if unreadable.contains(r.key.as_str())
+                && let Some(prev) = recorded.get(r.key.as_str())
+            {
+                fill_from(r, prev);
+            }
         }
     }
     if from == From::Notes {
@@ -182,6 +218,18 @@ fn merge(from: From, parsed: &Parsed, previous: Vec<Reference>) -> (Vec<Referenc
 /// found. An entry whose note has an invalid depth keeps its recorded depth.
 pub fn build(config: &Config, from: From, dry_run: bool) -> Result<bool, String> {
     let parsed = parse_source(config, from)?;
+    // Printed before the write, so a failed write does not hide them.
+    let errors: Vec<&Issue> = parsed
+        .issues
+        .iter()
+        .filter(|i| i.severity == Severity::Error)
+        .collect();
+    for i in &errors {
+        eprintln!(
+            "papers: error: {}:{}: {} {}: {}",
+            i.path, i.line, i.rule, i.key, i.message
+        );
+    }
     let merge = |records: &mut Vec<Reference>| {
         let (merged, vanished) = merge(from, &parsed, std::mem::take(records));
         *records = merged;
@@ -217,17 +265,6 @@ pub fn build(config: &Config, from: From, dry_run: bool) -> Result<bool, String>
         config.display(&config.registry)
     );
     print_stats(&merged, &parsed.issues);
-    let errors: Vec<&Issue> = parsed
-        .issues
-        .iter()
-        .filter(|i| i.severity == Severity::Error)
-        .collect();
-    for i in &errors {
-        eprintln!(
-            "papers: error: {}:{}: {} {}: {}",
-            i.path, i.line, i.rule, i.key, i.message
-        );
-    }
     Ok(errors.is_empty())
 }
 
