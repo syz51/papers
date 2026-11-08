@@ -79,9 +79,33 @@ pub struct Text {
     /// attached by hand and for manifests written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retrieved: Option<String>,
+    /// How the text was extracted from its PDF. Absent for texts attached by
+    /// hand without `--extraction` and for texts recorded before this field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<Extraction>,
     /// Fields this version does not know, kept when the registry is rewritten.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// How a text was extracted from its PDF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Extraction {
+    /// Reading-order text: pdf-extract, or `pdftotext` when pdf-extract fails.
+    Plain,
+    /// `pdftotext -layout`, which keeps the page's columns and table alignment.
+    Layout,
+}
+
+impl Extraction {
+    pub fn name(self) -> &'static str {
+        match self {
+            Extraction::Plain => "plain",
+            Extraction::Layout => "layout",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -339,6 +363,7 @@ mod tests {
                 sha256: "0".repeat(64),
                 origin: Some("https://example.org/2.pdf".into()),
                 retrieved: None,
+                extraction: None,
                 extra: Default::default(),
             });
             Ok(())

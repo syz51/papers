@@ -234,19 +234,17 @@ fn attach_keeps_the_download_time_and_unknown_fields_of_an_unchanged_text() {
 }
 
 #[test]
-fn attach_refuses_links_out_binary_empty_directories_and_a_missing_registry() {
+fn attach_refuses_paths_out_binary_empty_directories_and_a_missing_registry() {
     let dir = project("refuse-more");
-    let outside = dir
-        .parent()
-        .unwrap()
-        .join(format!("papers-outside-link-{}.txt", std::process::id()));
+    let name = format!("papers-outside-up-{}.txt", std::process::id());
+    let outside = dir.parent().unwrap().join(&name);
     std::fs::write(&outside, "outside").unwrap();
-    std::os::unix::fs::symlink(&outside, dir.join("texts/out.txt")).unwrap();
+    let up = format!("texts/../../{name}");
     std::fs::write(dir.join("texts/a.pdf"), b"%PDF-1.7\n\xff\xfe\x00binary").unwrap();
     std::fs::write(dir.join("texts/empty.txt"), "").unwrap();
     let before = std::fs::read_to_string(dir.join("refs.jsonl")).unwrap();
     for (path, message) in [
-        ("texts/out.txt", "outside the project root"),
+        (up.as_str(), "outside the project root"),
         ("texts/a.pdf", "not UTF-8 text"),
         ("texts/empty.txt", "is empty"),
         (".", "is not a file"),
@@ -271,6 +269,88 @@ fn attach_refuses_links_out_binary_empty_directories_and_a_missing_registry() {
         !dir.join("typo").exists(),
         "no directory or lock file is created"
     );
+    let out = attach(&dir, &["--text", "texts/a.txt", "--retrieved", "yesterday"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("RFC 3339"));
     std::fs::remove_file(outside).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A `sources` directory linked to storage outside the project, as in a
+/// project whose texts live on shared storage.
+#[test]
+fn attach_accepts_a_symlinked_sources_directory_and_updates_its_manifest() {
+    let dir = project("linked");
+    let store = dir
+        .parent()
+        .unwrap()
+        .join(format!("papers-attach-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&store);
+    std::fs::create_dir_all(store.join("text")).unwrap();
+    std::os::unix::fs::symlink(&store, dir.join("sources")).unwrap();
+    std::fs::write(store.join("text/k.txt"), "Synthetic      Layout\n").unwrap();
+    // The manifest `read` wrote for the plain text this one replaced.
+    let stale = r#"{"path":"sources/text/k.txt","sha256":"00","origin":"https://example.org/old.pdf","retrieved":"2026-11-01T00:00:00Z"}"#;
+    std::fs::write(store.join("text/k.json"), stale).unwrap();
+
+    let out = attach(
+        &dir,
+        &[
+            "--text",
+            "sources/text/k.txt",
+            "--origin",
+            "https://example.org/k.pdf",
+            "--retrieved",
+            "2026-11-07T19:00:00+09:00",
+            "--extraction",
+            "layout",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let t = texts(&dir);
+    assert_eq!(t[0]["path"], "sources/text/k.txt");
+    assert_eq!(t[0]["origin"], "https://example.org/k.pdf");
+    assert_eq!(t[0]["retrieved"], "2026-11-07T10:00:00Z");
+    assert_eq!(t[0]["extraction"], "layout");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(store.join("text/k.json")).unwrap()).unwrap();
+    assert_eq!(manifest, t[0], "the manifest matches the registry");
+
+    // Attached again without the options: an unchanged file keeps them.
+    assert!(
+        attach(&dir, &["--text", "sources/text/k.txt"])
+            .status
+            .success()
+    );
+    assert_eq!(texts(&dir)[0], t[0]);
+
+    // A changed file drops them, and says so.
+    std::fs::write(store.join("text/k.txt"), "Synthetic plain\n").unwrap();
+    let out = attach(&dir, &["--text", "sources/text/k.txt"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("layout extraction mode is dropped"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("download time"), "{stdout}");
+    let t = texts(&dir);
+    assert!(t[0].get("extraction").is_none(), "{t}");
+    assert!(t[0].get("retrieved").is_none(), "{t}");
+
+    // A JSON file beside the text that is not its manifest is left alone.
+    std::fs::write(store.join("text/k.json"), "{\"other\":1}").unwrap();
+    let out = attach(&dir, &["--text", "sources/text/k.txt"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("left"));
+    assert_eq!(
+        std::fs::read_to_string(store.join("text/k.json")).unwrap(),
+        "{\"other\":1}"
+    );
+    std::fs::remove_dir_all(&store).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
