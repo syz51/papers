@@ -348,42 +348,58 @@ enum RegistryAction {
 }
 
 /// The registry entry for a text file inside the project: its root-relative path
-/// (with `/` separators) and sha256, and the file's path as named. The path is
-/// checked as written, after removing `.` and `..`, so a symlinked directory
-/// inside the project (such as `sources` linked to shared storage) is accepted
-/// and recorded under its in-project name. Only a path that is outside the
-/// root both as written and with its symlinks resolved is refused; the second
-/// covers a project reached through a link to it.
+/// (with `/` separators) and sha256, and the file's path as named.
+///
+/// The path is taken as written, after removing `.` and `..`, and is inside
+/// the project when one of its directories is the project root, under any name
+/// (the root may be reached through a link). Directories below that may be
+/// symlinks, so a `sources` directory linked to shared storage is accepted and
+/// the text is recorded under its in-project name. A symlinked file must point
+/// into the project or into its own directory.
 fn local_text(
     config: &config::Config,
     cwd: &Path,
     path: &Path,
     origin: Option<String>,
 ) -> Result<(registry::Text, PathBuf), String> {
-    let given = config::normalize(&cwd.join(path));
+    let canonical =
+        |p: &Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
+    let raw = cwd.join(path);
+    let given = config::normalize(&raw);
     if !given.is_file() {
         // Says why: missing, or a directory.
         std::fs::metadata(&given).map_err(|e| format!("{}: {e}", given.display()))?;
         return Err(format!("{} is not a file", given.display()));
     }
-    let root = config::normalize(&config.root);
-    let rel = match given.strip_prefix(&root) {
-        Ok(rel) => rel.to_path_buf(),
-        Err(_) => {
-            let canonical =
-                |p: &Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
-            let (real, real_root) = (canonical(&given)?, canonical(&root)?);
-            real.strip_prefix(&real_root)
-                .map_err(|_| {
-                    format!(
-                        "{} is outside the project root {}; texts are recorded relative to it",
-                        given.display(),
-                        root.display()
-                    )
-                })?
-                .to_path_buf()
-        }
+    // `..` is removed here by its name, but the system resolves a `..` after a
+    // symlinked directory from the link's target: the two can be other files.
+    if std::fs::canonicalize(&raw).ok() != std::fs::canonicalize(&given).ok() {
+        return Err(format!(
+            "{}: a `..` after a symlinked directory leads elsewhere than the path without it; \
+             name the file without `..`",
+            raw.display()
+        ));
+    }
+    let root = canonical(&config.root)?;
+    let outside = |what: &str| {
+        format!(
+            "{} {what} outside the project root {}; texts are recorded relative to it",
+            given.display(),
+            config.root.display()
+        )
     };
+    let rel = given
+        .ancestors()
+        .find(|dir| std::fs::canonicalize(dir).is_ok_and(|d| d == root))
+        .map(|dir| given.strip_prefix(dir).expect("an ancestor is a prefix"))
+        .ok_or_else(|| outside("is"))?;
+    if std::fs::symlink_metadata(&given).is_ok_and(|m| m.is_symlink()) {
+        let target = canonical(&given)?;
+        let dir = canonical(given.parent().expect("a file has a parent"))?;
+        if !target.starts_with(&root) && !target.starts_with(&dir) {
+            return Err(outside("is a symlink to a file"));
+        }
+    }
     let rel = rel
         .iter()
         .map(|c| c.to_str())
@@ -405,51 +421,94 @@ fn local_text(
         sha256: http::sha256_hex(&bytes),
         origin,
         retrieved: None,
-        extraction: None,
         extra: Default::default(),
     };
     Ok((text, given))
 }
 
-/// Rewrites the manifest `read` left beside the text at `file` (`<name>.json`
-/// beside `<name>.txt`) with `text`, as recorded. A JSON file there that is
-/// not a manifest of this text is left alone.
-fn update_manifest(file: &Path, text: &registry::Text) -> Result<(), String> {
-    if file.extension().is_none_or(|e| e != "txt") {
-        return Ok(());
+/// The manifest `read` left beside the text at `file` (`<name>.json` beside
+/// `<name>.txt`), with its path. `None` when there is none, or when the JSON
+/// file there is not a manifest of the text at `path`, which is said.
+fn sidecar_manifest(file: &Path, path: &str) -> Result<Option<(PathBuf, registry::Text)>, String> {
+    if !file
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+    {
+        return Ok(None);
     }
     let sidecar = file.with_extension("json");
-    let Ok(json) = std::fs::read_to_string(&sidecar) else {
-        return Ok(());
+    let bytes = match std::fs::read(&sidecar) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", sidecar.display())),
     };
-    match serde_json::from_str::<registry::Text>(&json) {
-        Ok(old) if old.path == text.path => {
-            let line = serde_json::to_string(text).expect("texts serialize");
-            std::fs::write(&sidecar, format!("{line}\n"))
-                .map_err(|e| format!("{}: {e}", sidecar.display()))?;
-            println!("manifest: {} updated", sidecar.display());
+    match serde_json::from_slice::<registry::Text>(&bytes) {
+        Ok(t) if t.path == path => Ok(Some((sidecar, t))),
+        _ => {
+            println!(
+                "manifest: left {} alone; it is not a manifest of {path}",
+                sidecar.display()
+            );
+            Ok(None)
         }
-        _ => println!(
-            "manifest: left {} alone; it is not a manifest of {}",
-            sidecar.display(),
-            text.path
-        ),
     }
-    Ok(())
+}
+
+/// Fills in what `text` leaves unset from `old`, an earlier record of a text at
+/// the same path: its origin, and when the file is unchanged (same sha256), its
+/// download time and other fields (the extraction mode, and fields this
+/// version does not know). Returns notes on what a changed file drops.
+fn inherit(text: &mut registry::Text, old: &registry::Text) -> Vec<String> {
+    if text.origin.is_none() {
+        text.origin.clone_from(&old.origin);
+    }
+    if old.sha256 == text.sha256 {
+        if text.retrieved.is_none() {
+            text.retrieved.clone_from(&old.retrieved);
+        }
+        for (k, v) in &old.extra {
+            text.extra.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        return Vec::new();
+    }
+    // A changed file may be another extraction or download: what was recorded
+    // for the old one is not carried over, but said.
+    let mut notes = Vec::new();
+    let old_mode = match old.extraction() {
+        Ok(mode) => mode.map(|m| m.name().to_owned()),
+        Err(value) => Some(value),
+    };
+    if let (Ok(None), Some(mode)) = (text.extraction(), old_mode) {
+        notes.push(format!(
+            "note: {} changed; its recorded extraction mode {mode} is dropped \
+             (--extraction to record one)",
+            text.path
+        ));
+    }
+    if let (None, Some(at)) = (&text.retrieved, &old.retrieved) {
+        notes.push(format!(
+            "note: {} changed; its recorded download time {at} is dropped \
+             (--retrieved to record one)",
+            text.path
+        ));
+    }
+    notes
 }
 
 /// Records `text` in entry `key`'s `texts`, replacing a text at the same path.
-/// The replaced text's origin is kept when `text` has none, and when the file is
-/// unchanged (same sha256), so are its download time, extraction mode and
-/// fields this version does not know, unless `text` sets them. Returns the
-/// text as recorded.
+/// With `file`, the text's file, the manifest `read` left beside it is read
+/// first and rewritten with the recorded text, under the registry's lock; when
+/// that write fails, the registry is left unchanged. What `text` leaves unset
+/// is filled in from those of the manifest and the replaced text that record
+/// the same file (same sha256), then from the others (see `inherit`). Returns the text as recorded and the manifest's path, if any.
 fn record_text(
     config: &config::Config,
     key: &str,
     mut text: registry::Text,
+    file: Option<&Path>,
     missing: impl FnOnce() -> String,
-) -> Result<registry::Text, String> {
-    registry::update(&config.registry, |records| {
+) -> Result<(registry::Text, Option<PathBuf>), String> {
+    let (text, manifest, notes) = registry::update(&config.registry, |records| {
         let r = records
             .iter_mut()
             .find(|r| r.key == key)
@@ -457,44 +516,35 @@ fn record_text(
         if let Some(target) = &r.duplicate_of {
             println!("note: entry {key} is a duplicate of {target}");
         }
-        if let Some(old) = r.texts.iter().find(|t| t.path == text.path) {
-            if text.origin.is_none() {
-                text.origin = old.origin.clone();
-            }
-            if old.sha256 == text.sha256 {
-                if text.retrieved.is_none() {
-                    text.retrieved = old.retrieved.clone();
-                }
-                if text.extraction.is_none() {
-                    text.extraction = old.extraction;
-                }
-                for (k, v) in &old.extra {
-                    text.extra.entry(k.clone()).or_insert_with(|| v.clone());
-                }
-            } else {
-                // A changed file may be another extraction or download: what
-                // was recorded for the old one is not carried over, but said.
-                if let (None, Some(mode)) = (text.extraction, old.extraction) {
-                    println!(
-                        "note: {} changed; its recorded {} extraction mode is dropped \
-                         (--extraction to record one)",
-                        text.path,
-                        mode.name()
-                    );
-                }
-                if let (None, Some(at)) = (&text.retrieved, &old.retrieved) {
-                    println!(
-                        "note: {} changed; its recorded download time {at} is dropped \
-                         (--retrieved to record one)",
-                        text.path
-                    );
+        let manifest = match file {
+            Some(file) => sidecar_manifest(file, &text.path)?,
+            None => None,
+        };
+        // Records of this very file first: a stale one's origin is older.
+        let mut older: Vec<&registry::Text> = manifest.iter().map(|(_, t)| t).collect();
+        older.extend(r.texts.iter().filter(|t| t.path == text.path));
+        older.sort_by_key(|t| t.sha256 != text.sha256);
+        let mut notes = Vec::new();
+        for old in older {
+            for note in inherit(&mut text, old) {
+                if !notes.contains(&note) {
+                    notes.push(note);
                 }
             }
         }
+        if let Some((sidecar, _)) = &manifest {
+            let line = serde_json::to_string(&text).expect("texts serialize");
+            std::fs::write(sidecar, format!("{line}\n"))
+                .map_err(|e| format!("{}: {e}", sidecar.display()))?;
+        }
         r.texts.retain(|t| t.path != text.path);
         r.texts.push(text.clone());
-        Ok(text)
-    })
+        Ok((text, manifest.map(|(path, _)| path), notes))
+    })?;
+    for note in notes {
+        println!("{note}");
+    }
+    Ok((text, manifest))
 }
 
 /// An RFC 3339 time, in UTC to the second as `read` records it.
@@ -502,6 +552,9 @@ fn parse_timestamp(s: &str) -> Result<String, String> {
     let t: jiff::Timestamp = s
         .parse()
         .map_err(|e| format!("expected an RFC 3339 time such as 2026-11-07T10:00:00Z: {e}"))?;
+    let t = t
+        .round(jiff::Unit::Second)
+        .map_err(|e| format!("{s}: {e}"))?;
     Ok(t.to_string())
 }
 
@@ -964,8 +1017,10 @@ fn registry(mut config: config::Config, action: RegistryAction) -> Result<bool, 
             }
             let (mut text, file) = local_text(&config, &cwd, &text, origin)?;
             text.retrieved = retrieved;
-            text.extraction = extraction;
-            let text = record_text(&config, &key, text, || {
+            if let Some(mode) = extraction {
+                text.set_extraction(mode);
+            }
+            let (text, manifest) = record_text(&config, &key, text, Some(&file), || {
                 format!(
                     "{}: no entry with key {key}",
                     config.display(&config.registry)
@@ -975,7 +1030,9 @@ fn registry(mut config: config::Config, action: RegistryAction) -> Result<bool, 
                 "recorded in {} (key {key})",
                 config.display(&config.registry)
             );
-            update_manifest(&file, &text)?;
+            if let Some(manifest) = manifest {
+                println!("manifest: {} updated", manifest.display());
+            }
             println!("{}", serde_json::to_string(&text).expect("texts serialize"));
             Ok(true)
         }
@@ -1689,6 +1746,8 @@ struct Target<'a> {
     name: String,
     title: String,
     extraction: registry::Extraction,
+    /// The `pdftotext` program: `pdf::PDFTOTEXT`, or a stand-in in tests.
+    pdftotext: &'a str,
 }
 
 /// What a successful download produced.
@@ -1747,15 +1806,14 @@ fn sha256_file(path: &Path) -> Option<String> {
 /// A recorded text whose file still has the recorded hash. When there is none,
 /// says which recorded files changed since.
 fn existing_text(config: &config::Config, recorded: &[registry::Text]) -> Option<registry::Text> {
-    let mut changed = Vec::new();
+    let mut changed: Vec<&str> = Vec::new();
     for t in recorded {
         match sha256_file(&config.root.join(&t.path)) {
             Some(sha) if sha == t.sha256 => return Some(t.clone()),
-            Some(_) => changed.push(&t.path),
-            None => {}
+            Some(_) if !changed.contains(&t.path.as_str()) => changed.push(&t.path),
+            _ => {}
         }
     }
-    changed.dedup();
     for path in changed {
         println!("{path} changed since its sha256 was recorded; downloading again");
     }
@@ -1836,22 +1894,32 @@ fn read(http: &Http, config: &config::Config, o: &ReadOptions) -> Result<bool, S
     }
     recorded.extend(entry.iter().flat_map(|r| r.texts.clone()));
     let current = existing_text(config, &recorded);
-    // A text extracted in layout mode stays so unless `--extraction` says
-    // otherwise: a plain re-extraction would silently lose its layout.
-    let recorded_mode = current
-        .as_ref()
-        .and_then(|t| t.extraction)
-        .or_else(|| recorded.iter().find_map(|t| t.extraction));
-    let extraction = o
-        .extraction
-        .or(recorded_mode)
-        .unwrap_or(registry::Extraction::Plain);
+    let txt_path = config.display(&out_dir.join(format!("{name}.txt")));
+    // The mode of the text this run would replace: the current one, else one
+    // recorded at the same path. Texts recorded before modes were, or attached
+    // without one, count as plain.
+    let recorded_mode = match &current {
+        Some(t) => t.extraction(),
+        None => recorded
+            .iter()
+            .filter(|t| t.path == txt_path)
+            .map(registry::Text::extraction)
+            .find(|m| m != &Ok(None))
+            .unwrap_or(Ok(None)),
+    };
     if !o.force
-        && let Some(t) = current
+        && let Some(mut t) = current
     {
-        // Texts recorded before modes were, or attached without one, count as plain.
-        let mode = t.extraction.unwrap_or(registry::Extraction::Plain);
-        if o.extraction.is_none() || mode == extraction {
+        let mode = t.extraction();
+        let keep = match (o.extraction, &mode) {
+            (None, _) => true,
+            (Some(asked), Ok(m)) => m.unwrap_or(registry::Extraction::Plain) == asked,
+            (Some(_), Err(_)) => false,
+        };
+        if keep {
+            if let (Some(asked), Ok(None)) = (o.extraction, &mode) {
+                t.set_extraction(asked);
+            }
             println!(
                 "already have {} (sha256 matches); not downloading (--force to fetch again)",
                 t.path
@@ -1861,11 +1929,26 @@ fn read(http: &Http, config: &config::Config, o: &ReadOptions) -> Result<bool, S
         println!(
             "{} was extracted in {} mode; downloading it again for {} mode",
             t.path,
-            mode.name(),
-            extraction.name()
+            match &mode {
+                Ok(m) => m.unwrap_or(registry::Extraction::Plain).name().to_owned(),
+                Err(value) => value.clone(),
+            },
+            o.extraction.expect("kept unless a mode is asked").name()
         );
     }
-    if o.extraction.is_none() && recorded_mode == Some(registry::Extraction::Layout) {
+    // A text extracted in layout mode stays so unless `--extraction` says
+    // otherwise: a plain re-extraction would silently lose its layout.
+    let extraction = match (o.extraction, recorded_mode) {
+        (Some(asked), _) => asked,
+        (None, Ok(mode)) => mode.unwrap_or(registry::Extraction::Plain),
+        (None, Err(value)) => {
+            return Err(format!(
+                "{txt_path} was extracted in mode {value}, which this version of papers \
+                 does not know; pass --extraction plain or layout"
+            ));
+        }
+    };
+    if o.extraction.is_none() && extraction == registry::Extraction::Layout {
         println!("extraction: layout, as recorded (--extraction plain to change)");
     }
     let target = Target {
@@ -1878,6 +1961,7 @@ fn read(http: &Http, config: &config::Config, o: &ReadOptions) -> Result<bool, S
             .and_then(|r| r.title.clone())
             .unwrap_or_default(),
         extraction,
+        pdftotext: pdf::PDFTOTEXT,
     };
     let mut browse = |pages: &[String], target: &Target| {
         if o.browser {
@@ -1913,7 +1997,7 @@ fn finish_read(
         && let Some(entry) = entry
     {
         // Applied to the registry as it is now, not the copy loaded before the download.
-        record_text(config, &entry.key, text, || {
+        record_text(config, &entry.key, text, None, || {
             format!("entry {} left the registry during the download", entry.key)
         })?;
         println!(
@@ -2241,13 +2325,13 @@ fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String>
             pdf::extract_text(body),
             &pdf_path,
             &target.title,
-            pdf::PDFTOTEXT,
+            target.pdftotext,
             pdf::PDFTOTEXT_TIMEOUT,
             pdf::PDFTOTEXT_MAX_OUTPUT,
         ),
         // Only pdftotext keeps the layout: no fallback to pdf-extract.
         registry::Extraction::Layout => pdf::pdftotext(
-            pdf::PDFTOTEXT,
+            target.pdftotext,
             &pdf_path,
             true,
             pdf::PDFTOTEXT_TIMEOUT,
@@ -2284,14 +2368,15 @@ fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String>
             "warning: the title does not appear in the extracted text; check this is the right paper"
         );
     }
-    Ok(Saved::Text(registry::Text {
+    let mut saved = registry::Text {
         path: target.config.display(&txt_path),
         sha256: http::sha256_hex(text.as_bytes()),
         origin: Some(source.to_owned()),
         retrieved: Some(finding::now()),
-        extraction: Some(target.extraction),
         extra: Default::default(),
-    }))
+    };
+    saved.set_extraction(target.extraction);
+    Ok(Saved::Text(saved))
 }
 
 struct VerifyOptions {
@@ -2539,6 +2624,7 @@ mod tests {
             name: "x".into(),
             title: "X".into(),
             extraction: registry::Extraction::Plain,
+            pdftotext: pdf::PDFTOTEXT,
         };
         let (mut tried, mut challenged) = (Vec::new(), Vec::new());
         let saved = try_candidates(
@@ -2658,14 +2744,14 @@ mod tests {
         // A layout text, as `read --extraction layout` or attach would leave it.
         let layout = "Synthetic      Layout      Paper\n";
         std::fs::write(dir.join(format!("{name}.txt")), layout).unwrap();
-        let recorded = registry::Text {
+        let mut recorded = registry::Text {
             path: format!("{name}.txt"),
             sha256: http::sha256_hex(layout.as_bytes()),
             origin: Some(url.clone()),
             retrieved: Some("2026-11-07T10:00:00Z".into()),
-            extraction: Some(Layout),
             extra: Default::default(),
         };
+        recorded.set_extraction(Layout);
         let sidecar = dir.join(format!("{name}.json"));
         std::fs::write(&sidecar, serde_json::to_string(&recorded).unwrap()).unwrap();
 
@@ -2682,7 +2768,7 @@ mod tests {
         // pdftotext no text is written, and the layout text stays.
         let forced = read_url_with(url.clone(), &dir, true, None);
         let text = manifest(&dir, &url);
-        assert_eq!(text.extraction, Some(Layout), "{forced:?}");
+        assert_eq!(text.extraction(), Ok(Some(Layout)), "{forced:?}");
         if forced == Ok(false) {
             assert_eq!(text, recorded);
         } else {
@@ -2697,7 +2783,7 @@ mod tests {
         );
         server.join().unwrap();
         let text = manifest(&dir, &url);
-        assert_eq!(text.extraction, Some(Plain));
+        assert_eq!(text.extraction(), Ok(Some(Plain)));
         let saved = std::fs::read_to_string(dir.join(&text.path)).unwrap();
         assert!(saved.contains("Synthetic Layout Paper"), "{saved}");
         assert_eq!(text.sha256, http::sha256_hex(saved.as_bytes()));
@@ -2719,14 +2805,19 @@ mod tests {
         .unwrap();
         let layout = "Synthetic      Layout\n";
         std::fs::write(root.join("sources/text/k.txt"), layout).unwrap();
-        let attached = registry::Text {
+        let mut attached = registry::Text {
             path: "sources/text/k.txt".into(),
             sha256: http::sha256_hex(layout.as_bytes()),
             origin: Some("https://example.org/k.pdf".into()),
             retrieved: Some("2026-11-07T10:00:00Z".into()),
-            extraction: Some(registry::Extraction::Layout),
             extra: Default::default(),
         };
+        let stale = registry::Text {
+            sha256: "0".repeat(64),
+            origin: Some("https://example.org/old.pdf".into()),
+            ..attached.clone()
+        };
+        attached.set_extraction(registry::Extraction::Layout);
         let mut entry = registry::Reference::new("k".into());
         // Never fetched: the recorded text is reused.
         entry.ids.url = Some("https://example.invalid/k.pdf".into());
@@ -2736,12 +2827,6 @@ mod tests {
             format!("{}\n", serde_json::to_string(&entry).unwrap()),
         )
         .unwrap();
-        let stale = registry::Text {
-            sha256: "0".repeat(64),
-            origin: Some("https://example.org/old.pdf".into()),
-            extraction: None,
-            ..attached.clone()
-        };
         let sidecar = root.join("sources/text/k.json");
         std::fs::write(&sidecar, serde_json::to_string(&stale).unwrap()).unwrap();
 
@@ -2764,6 +2849,183 @@ mod tests {
             layout
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A project with a registry entry `k` whose URL is `url`, and its text
+    /// `sources/text/k.txt` with a manifest that records no mode, as `read`
+    /// left it before modes were recorded.
+    fn unmarked_project(name: &str, url: &str) -> (PathBuf, registry::Text) {
+        let root = std::env::temp_dir().join(format!("papers-read-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sources/text")).unwrap();
+        std::fs::write(
+            root.join("research.toml"),
+            "[papers]\nregistry = \"refs.jsonl\"\n",
+        )
+        .unwrap();
+        let body = "synthetic plain text\n";
+        std::fs::write(root.join("sources/text/k.txt"), body).unwrap();
+        let text = registry::Text {
+            path: "sources/text/k.txt".into(),
+            sha256: http::sha256_hex(body.as_bytes()),
+            origin: Some(url.to_owned()),
+            retrieved: Some("2026-11-07T10:00:00Z".into()),
+            extra: Default::default(),
+        };
+        std::fs::write(
+            root.join("sources/text/k.json"),
+            serde_json::to_string(&text).unwrap(),
+        )
+        .unwrap();
+        // Another text of the entry, at another path, in layout mode.
+        let mut tables = registry::Text {
+            path: "sources/text/k-tables.txt".into(),
+            sha256: "0".repeat(64),
+            ..text.clone()
+        };
+        tables.set_extraction(registry::Extraction::Layout);
+        let mut entry = registry::Reference::new("k".into());
+        entry.ids.url = Some(url.to_owned());
+        entry.texts.push(tables);
+        std::fs::write(
+            root.join("refs.jsonl"),
+            format!("{}\n", serde_json::to_string(&entry).unwrap()),
+        )
+        .unwrap();
+        (root, text)
+    }
+
+    fn read_key(
+        root: &Path,
+        force: bool,
+        extraction: Option<registry::Extraction>,
+    ) -> Result<bool, String> {
+        let config = config::Config::load(None, root).unwrap();
+        let options = ReadOptions {
+            reference: None,
+            key: Some("k".into()),
+            out: None,
+            record: false,
+            force,
+            extraction,
+            browser: false,
+        };
+        read(&Http::new(), &config, &options)
+    }
+
+    fn sidecar_of(root: &Path) -> registry::Text {
+        let json = std::fs::read_to_string(root.join("sources/text/k.json")).unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// A text without a recorded mode counts as plain: an explicit plain
+    /// request keeps it and records the mode, and --force extracts plain text,
+    /// whatever mode the entry's other texts have.
+    #[test]
+    fn read_takes_the_mode_only_from_the_text_it_replaces() {
+        use crate::http::response;
+        let pdf = tiny_pdf("Synthetic Unmarked Paper");
+        let (base, server) = http::serve(vec![response(
+            "200 OK",
+            &["Content-Type: application/pdf"],
+            &pdf,
+        )]);
+        let url = format!("{base}/k.pdf");
+        let (root, _) = unmarked_project("unmarked", &url);
+
+        // The entry's layout text at another path does not set the mode.
+        assert_eq!(read_key(&root, true, None), Ok(true));
+        server.join().unwrap();
+        let mut forced = sidecar_of(&root);
+        assert_eq!(forced.extraction(), Ok(Some(registry::Extraction::Plain)));
+        let saved = std::fs::read_to_string(root.join("sources/text/k.txt")).unwrap();
+        assert!(saved.contains("Synthetic Unmarked Paper"), "{saved}");
+
+        // An explicit plain request keeps an unmarked text and records its mode.
+        forced.extra.remove("extraction");
+        std::fs::write(
+            root.join("sources/text/k.json"),
+            serde_json::to_string(&forced).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_key(&root, false, Some(registry::Extraction::Plain)),
+            Ok(true)
+        );
+        let kept = sidecar_of(&root);
+        assert_eq!(kept.sha256, forced.sha256, "not downloaded");
+        assert_eq!(kept.extraction(), Ok(Some(registry::Extraction::Plain)));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A mode this version does not know is kept, and never guessed.
+    #[test]
+    fn read_does_not_guess_an_unknown_recorded_mode() {
+        let url = "https://example.invalid/k.pdf";
+        let (root, mut text) = unmarked_project("unknown-mode", url);
+        text.extra.insert("extraction".into(), "ocr".into());
+        let sidecar = root.join("sources/text/k.json");
+        std::fs::write(&sidecar, serde_json::to_string(&text).unwrap()).unwrap();
+        let before = std::fs::read_to_string(&sidecar).unwrap();
+
+        // Kept as it is without --force, with no request.
+        assert_eq!(read_key(&root, false, None), Ok(true));
+        assert_eq!(sidecar_of(&root), text);
+        // Refused with --force and no mode, before any request.
+        let err = read_key(&root, true, None).unwrap_err();
+        assert!(err.contains("mode \"ocr\""), "{err}");
+        assert!(err.contains("--extraction"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&sidecar).unwrap().trim(),
+            before.trim()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Layout mode runs `pdftotext -layout` and records the mode; without
+    /// pdftotext it writes no text, and never falls back to pdf-extract.
+    #[test]
+    fn save_pdf_extracts_layout_text_with_pdftotext_only() {
+        let dir = std::env::temp_dir().join(format!("papers-save-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = config::Config::load(None, &dir).unwrap();
+        let prints = pdf::tests::fake_program("prints");
+        let target = |program| Target {
+            config: &config,
+            dir: dir.clone(),
+            name: "lay".into(),
+            title: String::new(),
+            extraction: registry::Extraction::Layout,
+            pdftotext: program,
+        };
+        let pdf = tiny_pdf("Synthetic Layout Paper");
+        let saved = save_pdf(
+            &target(&prints),
+            pdf.as_bytes(),
+            "https://example.org/lay.pdf",
+        );
+        let Ok(Saved::Text(text)) = saved else {
+            panic!("expected a text");
+        };
+        assert_eq!(text.extraction(), Ok(Some(registry::Extraction::Layout)));
+        let written = std::fs::read_to_string(dir.join("lay.txt")).unwrap();
+        // The fake echoes its arguments: "text of $3 with $1 $2 $4".
+        assert!(
+            written.starts_with("text of UTF-8 with -layout -enc "),
+            "{written}"
+        );
+        assert_eq!(text.sha256, http::sha256_hex(written.as_bytes()));
+
+        std::fs::remove_file(dir.join("lay.txt")).unwrap();
+        let absent = pdf::tests::fake_program("absent");
+        let saved = save_pdf(
+            &target(&absent),
+            pdf.as_bytes(),
+            "https://example.org/lay.pdf",
+        );
+        assert!(matches!(saved, Ok(Saved::PdfOnly)));
+        assert!(!dir.join("lay.txt").exists(), "no pdf-extract fallback");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2926,6 +3188,7 @@ mod tests {
             name: "order".into(),
             title: String::new(),
             extraction: registry::Extraction::Plain,
+            pdftotext: pdf::PDFTOTEXT,
         };
         let mut retried = Vec::new();
         let mut browse = |pages: &[String], _: &Target| {
@@ -2992,7 +3255,6 @@ mod tests {
             sha256: sha,
             origin: Some("https://example.org/7.pdf".into()),
             retrieved: None,
-            extraction: None,
             extra: Default::default(),
         };
         let good = text(http::sha256_hex(b"synthetic text"));

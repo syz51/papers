@@ -351,7 +351,7 @@ fn quoted(s: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -417,7 +417,7 @@ mod tests {
 
     /// The path of a fake program. Every test that runs one gets its path
     /// here first. A name not in `FAKE_PROGRAMS` is a path that does not exist.
-    fn fake_program(name: &str) -> String {
+    pub(crate) fn fake_program(name: &str) -> String {
         use std::os::unix::fs::PermissionsExt;
         static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let dir = DIR.get_or_init(|| {
