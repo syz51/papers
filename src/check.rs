@@ -8,7 +8,7 @@
 //! | `malformed-date` | error (warn for reported dates) | an access or reported date that is not a calendar date |
 //! | `invalid-value` | error | `type` or `depth` outside the `rf.reference/1` vocabulary |
 //! | `key-mismatch` | error | the heading number and the `[N]` entry number differ |
-//! | plus the parser's `entry-unnumbered`, `entry-missing`, `duplicate-key`, `duplicate-annotation-conflict`, `ambiguous-id`, `authors-unparsed`, `frontmatter-invalid` |
+//! | plus the parser's `entry-unnumbered`, `entry-missing`, `duplicate-key`, `duplicate-annotation-conflict`, `ambiguous-id`, `authors-unparsed`, `frontmatter-invalid`, `depth-invalid` |
 
 use std::collections::{BTreeMap, BTreeSet};
 

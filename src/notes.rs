@@ -31,6 +31,22 @@ pub struct Meta {
     pub author_variants: Vec<String>,
     /// Reading status, mapped to a registry depth by `[papers] status_depth`.
     pub status: Option<String>,
+    /// Registry depth set by hand; it overrides the status mapping.
+    pub depth: Option<String>,
+}
+
+impl Meta {
+    /// The note's own `depth`, or an error when it is outside the
+    /// `rf.reference/1` vocabulary.
+    pub fn explicit_depth(&self) -> Result<Option<&str>, String> {
+        match self.depth.as_deref() {
+            Some(d) if !crate::registry::DEPTHS.contains(&d) => Err(format!(
+                "depth {d:?} is not one of {}",
+                crate::registry::DEPTHS.join(", ")
+            )),
+            d => Ok(d),
+        }
+    }
 }
 
 /// A list of strings, a single string as a one-item list, or nothing.
@@ -80,7 +96,8 @@ impl Note {
     }
 
     /// The registry record for this note. `source_path` is the note's path as
-    /// recorded; `status_depth` maps the note's `status` to a depth.
+    /// recorded. The depth is the note's own `depth`, else its `status` mapped
+    /// by `status_depth`; an invalid `depth` gives none.
     pub fn to_reference(
         &self,
         source_path: &str,
@@ -118,11 +135,15 @@ impl Note {
             r.version = id.version.map(|v| format!("v{v}"));
             r.ids.arxiv = Some(id.id);
         }
-        r.depth = meta
-            .status
-            .as_ref()
-            .and_then(|s| status_depth.get(s))
-            .cloned();
+        r.depth = match meta.explicit_depth() {
+            Ok(Some(d)) => Some(d.to_owned()),
+            Ok(None) => meta
+                .status
+                .as_ref()
+                .and_then(|s| status_depth.get(s))
+                .cloned(),
+            Err(_) => None,
+        };
         r
     }
 }
@@ -454,6 +475,7 @@ mod tests {
             author_variants: vec![],
             id: None,
             status: None,
+            depth: None,
         }
     }
 
