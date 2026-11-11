@@ -39,6 +39,7 @@ This needs Rust 1.99 or newer (edition 2024). `papers read` can retry a page tha
 | `registry build` | Parse the catalogue or notes into the registry, keeping tool-added state | `papers registry build` |
 | `registry check` | Duplicates, missing ids, bad dates, parse problems, as `rf.finding/1` | `papers registry check --format jsonl` |
 | `registry attach` | Record a text file already in the project in an entry's `texts`, with its sha256, and update its manifest | `papers registry attach --key 12 --text sources/text/12.txt --origin <url> --extraction layout` |
+| `registry record-pdfs` | Record `pdf_sha256` for texts saved before `read` recorded it, when the saved PDF reproduces the text; no network request | `papers registry record-pdfs --dry-run` |
 | `verify` | Compare registry entries (or notes) with arXiv, Crossref, OpenAlex | `papers verify --keys 12,40 --format jsonl` |
 | `read` | Download an open-access PDF and extract its text (plain or layout), with a sha256 manifest | `papers read --key 12 --record --extraction layout` |
 | `refs` | Works a paper cites (OpenAlex, else Semantic Scholar) | `papers refs 2601.00001 --max 50` |
@@ -111,7 +112,7 @@ Optional fields that `papers` adds to the contract:
 | `citekey` | A citation key that overrides the generated one in `bib` and `cite`. It is set by hand and kept when the registry is rebuilt. |
 | `texts[].retrieved` | When `read` downloaded the text, as a UTC RFC 3339 time. It is omitted for texts attached by hand without `--retrieved` and for texts recorded before `papers` added it. |
 | `texts[].extraction` | How the text was extracted from its PDF: `plain` or `layout` (`pdftotext -layout`). It is omitted for texts attached by hand without `--extraction` and for texts recorded before `papers` added it; `read` treats those as `plain`. Another value, such as one a later version writes, is kept as it is; `read` does not re-extract such a text without `--extraction`. |
-| `texts[].pdf_sha256` | The sha256 of the PDF that `read` extracted the text from, saved beside the text as `<name>.pdf`. It is omitted for texts attached by hand and for texts recorded before `papers` added it. |
+| `texts[].pdf_sha256` | The sha256 of the PDF that `read` extracted the text from, saved beside the text as `<name>.pdf`. It is omitted for texts attached by hand and for texts recorded before `papers` added it; `registry record-pdfs` adds it to those whose saved PDF reproduces the text. |
 
 Fields that `papers` does not know are kept when it rewrites the registry, in entries and in `texts` objects.
 
@@ -124,7 +125,7 @@ Fields that `papers` does not know are kept when it rewrites the registry, in en
 
 Every value comes from the text. When the text does not settle a value, it stays `null` and is reported as a parse issue. `registry build` prints each parse issue at error severity as `file:line: rule key: message`. It still writes the registry, so one bad entry does not hold back the others, and then exits 1. When an entry's main text cannot be read (`entry-missing`, `frontmatter-invalid`), each field the text no longer gives keeps its recorded value. Values the text still gives, such as a section's labelled lines, are updated. Warnings alone leave the exit code at 0. `--dry-run` reports the same issues and exit code without writing. A rebuild keeps tool-added state (`texts`, `verified`, and fields `papers` does not know) and warns about keys that have disappeared. Keys are never renumbered.
 
-Every write (`registry build`, `registry attach`, `verify --record`, `read --record`) takes an exclusive lock on `<registry>.lock` next to the registry, reads the registry afresh, applies its change, and replaces the file atomically. Long runs apply their results at the end, so concurrent runs do not overwrite each other's changes. The lock file holds no data; keep it out of version control.
+Every write (`registry build`, `registry attach`, `registry record-pdfs`, `verify --record`, `read --record`) takes an exclusive lock on `<registry>.lock` next to the registry, reads the registry afresh, applies its change, and replaces the file atomically. Long runs apply their results at the end, so concurrent runs do not overwrite each other's changes. The lock file holds no data; keep it out of version control.
 
 ### `registry check` rules
 
@@ -189,7 +190,7 @@ Without `--extraction`, `read` uses the mode recorded for the text it would repl
 - When the landing page names a DOI in its metadata (`citation_doi`, `dc.identifier`, `prism.doi`), the DOI's own open-access locations are tried next, then other versions with the same title. This happens only when the page and its links yield no PDF, including after the browser retry described below.
 - The manifest's `origin` is the URL the PDF came from.
 
-Running it again skips the download when the stored text still has the recorded hash. `--force` downloads anyway, and extracts in the recorded mode. An explicit `--extraction` that differs from the stored text's mode extracts the text again; this is the only way `read` replaces a layout text with plain text. When the stored text's record, in its sidecar or the registry entry, has a `pdf_sha256` and `<name>.pdf` in `--out` still has it, `read` extracts from that PDF and makes no network request; the manifest keeps the PDF's `origin` and `retrieved`. Without `--key`, there is then no title for plain mode's title check. Otherwise, as for manifests written before `papers` recorded `pdf_sha256`, it downloads the PDF again. Either way it says which. An explicit mode that matches a stored text without a recorded mode (plain) is recorded for it. `--record` (with `--key`) adds the manifest to the entry's `texts`.
+Running it again skips the download when the stored text still has the recorded hash. `--force` downloads anyway, and extracts in the recorded mode. An explicit `--extraction` that differs from the stored text's mode extracts the text again; this is the only way `read` replaces a layout text with plain text. When the stored text's record, in its sidecar or the registry entry, has a `pdf_sha256` and `<name>.pdf` in `--out` still has it, `read` extracts from that PDF and makes no network request; the manifest keeps the PDF's `origin` and `retrieved`. Without `--key`, there is then no title for plain mode's title check. Otherwise, as for manifests written before `papers` recorded `pdf_sha256`, it downloads the PDF again; [`registry record-pdfs`](#registry-record-pdfs) records `pdf_sha256` for those manifests when the saved PDF reproduces the text. Either way it says which. An explicit mode that matches a stored text without a recorded mode (plain) is recorded for it. `--record` (with `--key`) adds the manifest to the entry's `texts`.
 
 For a text obtained another way (by hand, or listed in an existing manifest), `papers registry attach --key <key> --text <path> [--origin <url>] [--retrieved <time>] [--extraction plain|layout]` records it the same way:
 
@@ -202,6 +203,23 @@ For a text obtained another way (by hand, or listed in an existing manifest), `p
 - When a `<name>.json` manifest from `read` lies beside a `<name>.txt` text (in any case) and names the same path, `attach` rewrites it with the recorded text, so its sha256, origin, `retrieved` and `extraction` match the registry. It does so under the registry's lock; when the manifest cannot be read or written, `attach` fails and leaves the registry unchanged. Another JSON file there is left alone.
 
 Unless `--no-browser` is given, a candidate retries in headless Chromium only when its plain-HTTP reply was a JavaScript check page: a 202 HTML reply (how AWS WAF serves its challenge, as on figshare) or a small 200 HTML page with a challenge marker. A 403, a 429, any other refusal, and transport errors are reported and never retried in the browser. When a host blocks automated browsers, `papers` reports the block. It does no CAPTCHA solving or fingerprint spoofing.
+
+### `registry record-pdfs`
+
+`papers registry record-pdfs [--dir <dir>] [--dry-run] [--registry <path>]` records `pdf_sha256` for texts that `read` saved before it recorded that field. After it, `papers read --extraction <mode>` extracts such a text again from the saved PDF and makes no download. The command makes no network request.
+
+It looks at each `<name>.json` manifest in `--dir`, which defaults to `<root>/sources/text`, that names `<name>.txt`, has no `pdf_sha256` and has `<name>.pdf` beside it. It extracts that PDF in the text's recorded mode, or in plain mode when none is recorded, with the extractors `read` uses:
+
+- Plain: `pdf-extract` first, then `pdftotext` if it is on `PATH`. `read` kept one or the other, depending on the title it knew then, so the text may have come from either.
+- Layout: `pdftotext -layout` only.
+
+It records the PDF's sha256 only when an extractor gives a text with the recorded text sha256:
+
+- It writes `pdf_sha256` to the manifest and to each registry text with the same path and sha256, under the registry's lock. It prints a `recorded:` line that names the extractor.
+- Any other text is left unchanged. It prints a `not reproduced:` line with the reason, such as `pdftotext is not on PATH`. `read` downloads again for a mode change of such a text.
+- A text is not reproduced when another version of an extractor wrote it and that version's output differs. Installing Poppler can reproduce more plain and layout texts; run the command again then.
+
+A text is named by the keys of the registry entries that list its path, else by `<name>`. The last lines give the counts and the names of the texts that were not reproduced. `--dry-run` prints the same and writes nothing. The exit code is 0 also when texts were not reproduced.
 
 ## Search log: `rf.search/1`
 
