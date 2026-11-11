@@ -355,6 +355,8 @@ cargo test
 
 The tests use synthetic records and public metadata fixtures only, and they make no network requests.
 
+Every pull request that changes the tool's behaviour raises the version in `Cargo.toml` and `Cargo.lock`.
+
 ## Licence
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT licence](LICENSE-MIT), at your option.
