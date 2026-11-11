@@ -345,6 +345,25 @@ enum RegistryAction {
         #[arg(long, value_name = "PATH")]
         registry: Option<PathBuf>,
     },
+    /// Record `pdf_sha256` for texts that `read` saved before it recorded that
+    /// field, so that `read --extraction <mode>` can extract them again from the
+    /// saved PDF. For each <name>.json manifest without one and with <name>.pdf
+    /// beside it, extracts the PDF in the text's recorded mode (plain when none
+    /// is recorded) and records the PDF's sha256, in the manifest and the
+    /// registry, only when that gives the recorded text sha256. Other texts are
+    /// left unchanged and listed as `not reproduced`. Makes no network request.
+    RecordPdfs {
+        /// Directory of the texts, their PDFs and manifests (default:
+        /// sources/text under the project root).
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Print what would be recorded; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Registry file (overrides [papers] registry).
+        #[arg(long, value_name = "PATH")]
+        registry: Option<PathBuf>,
+    },
 }
 
 /// The registry entry for a text file inside the project: its root-relative path
@@ -545,6 +564,233 @@ fn record_text(
         println!("{note}");
     }
     Ok((text, manifest))
+}
+
+/// What `record_pdfs` found; texts are named by key (see `record_pdfs`).
+#[derive(Debug, Default, PartialEq)]
+struct PdfRecords {
+    recorded: Vec<String>,
+    not_reproduced: Vec<String>,
+    /// Manifests that already had a `pdf_sha256`.
+    already: usize,
+    /// Manifests without a `<name>.pdf` beside them.
+    no_pdf: usize,
+}
+
+/// The extractor with which the PDF at `path`, whose bytes are `bytes`, gives
+/// the text with `sha256` in `mode`, or why none does. `pdftotext` gives the
+/// program, or why it cannot run.
+///
+/// A plain text came from pdf-extract or from `pdftotext`: which one `read`
+/// kept depended on the title it knew then, so both are tried here, and either
+/// reproducing the text shows that it came from this PDF. A layout text came
+/// from `pdftotext -layout` only.
+fn reproduce<'a>(
+    path: &Path,
+    bytes: &[u8],
+    mode: Result<Option<registry::Extraction>, String>,
+    sha256: &str,
+    pdftotext: impl FnOnce() -> Result<&'a str, String>,
+) -> Result<String, String> {
+    let same = |text: &str| http::sha256_hex(text.as_bytes()) == sha256;
+    let run = |program: &str, layout: bool| {
+        pdf::pdftotext(
+            program,
+            path,
+            layout,
+            pdf::PDFTOTEXT_TIMEOUT,
+            pdf::PDFTOTEXT_MAX_OUTPUT,
+        )
+    };
+    match mode.map(|m| m.unwrap_or(registry::Extraction::Plain)) {
+        Ok(registry::Extraction::Plain) => {
+            let first = match pdf::extract_text(bytes) {
+                Ok(text) if same(&text) => return Ok("pdf-extract".to_owned()),
+                Ok(_) => "pdf-extract gives another text".to_owned(),
+                Err(e) => e,
+            };
+            let program = pdftotext().map_err(|e| format!("{first}; {e}"))?;
+            match run(program, false) {
+                Ok(text) if same(&text) => Ok(program.to_owned()),
+                Ok(_) => Err(format!("{first}, and so does {program}")),
+                Err(e) => Err(format!("{first}; {e}")),
+            }
+        }
+        Ok(registry::Extraction::Layout) => {
+            let program = pdftotext()
+                .map_err(|e| format!("layout extraction needs pdftotext from Poppler ({e})"))?;
+            match run(program, true)? {
+                text if same(&text) => Ok(format!("{program} -layout")),
+                _ => Err(format!("{program} -layout gives another text")),
+            }
+        }
+        Err(value) => Err(format!(
+            "its extraction mode {value} is not known to this version of papers"
+        )),
+    }
+}
+
+/// Records `pdf_sha256` for the texts in `dir` that `read` saved before it
+/// recorded that field: each `<name>.json` manifest of `<name>.txt` without a
+/// `pdf_sha256` and with `<name>.pdf` beside it. The PDF is extracted in the
+/// text's recorded mode (plain when none is recorded; see `reproduce`). Only
+/// when that gives the recorded text sha256 is the PDF's sha256 written to the
+/// manifest and to each registry text with the same path and sha256, under the
+/// registry's lock. Any other text is left as it is and listed. Makes no
+/// network request; with `dry_run`, writes nothing.
+///
+/// A text is named by the keys of the registry entries that list its path,
+/// else by its file name without the extension. `pdftotext` is
+/// `pdf::PDFTOTEXT`, or a stand-in in tests.
+fn record_pdfs(
+    config: &config::Config,
+    dir: &Path,
+    dry_run: bool,
+    pdftotext: &str,
+) -> Result<PdfRecords, String> {
+    struct Reproduced {
+        manifest: PathBuf,
+        text: registry::Text,
+        key: String,
+        pdf_sha256: String,
+        extractor: String,
+    }
+    let at = |path: &Path, e: std::io::Error| format!("{}: {e}", path.display());
+    let mut manifests = std::fs::read_dir(dir)
+        .map_err(|e| at(dir, e))?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| at(dir, e))?;
+    manifests.retain(|p| p.extension().is_some_and(|e| e == "json"));
+    manifests.sort();
+    let known = registry::load(&config.registry)?.unwrap_or_default();
+    // Started once, and only when a text needs it.
+    let checked = std::cell::OnceCell::new();
+    let program = || {
+        checked
+            .get_or_init(|| pdf::check_pdftotext(pdftotext))
+            .clone()
+            .map(|()| pdftotext)
+    };
+    let mut out = PdfRecords::default();
+    let mut reproduced = Vec::new();
+    for manifest in manifests {
+        let path = config.display(&manifest.with_extension("txt"));
+        let bytes = std::fs::read(&manifest).map_err(|e| at(&manifest, e))?;
+        let Some(text) = serde_json::from_slice::<registry::Text>(&bytes)
+            .ok()
+            .filter(|t| t.path == path)
+        else {
+            println!(
+                "skipped: {} is not a manifest of {path}",
+                config.display(&manifest)
+            );
+            continue;
+        };
+        if text.pdf_sha256().is_some() {
+            out.already += 1;
+            continue;
+        }
+        let pdf_path = manifest.with_extension("pdf");
+        let pdf = match std::fs::read(&pdf_path) {
+            Ok(pdf) => pdf,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                out.no_pdf += 1;
+                continue;
+            }
+            Err(e) => return Err(at(&pdf_path, e)),
+        };
+        let keys: Vec<&str> = known
+            .iter()
+            .filter(|r| r.texts.iter().any(|t| t.path == path))
+            .map(|r| r.key.as_str())
+            .collect();
+        let key = match keys.is_empty() {
+            true => manifest
+                .with_extension("")
+                .file_name()
+                .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned()),
+            false => keys.join(","),
+        };
+        let pdf_sha256 = http::sha256_hex(&pdf);
+        // pdftotext reads the file, not `pdf`: the two must be the same PDF.
+        let extractor = reproduce(&pdf_path, &pdf, text.extraction(), &text.sha256, program)
+            .and_then(|extractor| {
+                match sha256_file(&pdf_path).as_deref() == Some(pdf_sha256.as_str()) {
+                    true => Ok(extractor),
+                    false => Err("the PDF changed during the run".to_owned()),
+                }
+            });
+        match extractor {
+            Ok(extractor) => reproduced.push(Reproduced {
+                manifest,
+                text,
+                key,
+                pdf_sha256,
+                extractor,
+            }),
+            Err(why) => {
+                println!("not reproduced: {key} ({path}): {why}");
+                out.not_reproduced.push(key);
+            }
+        }
+    }
+    let nothing = reproduced.is_empty();
+    let record = |records: &mut Vec<registry::Reference>| -> Result<(), String> {
+        for found in reproduced {
+            let Reproduced {
+                manifest,
+                mut text,
+                key,
+                pdf_sha256,
+                extractor,
+            } = found;
+            // The manifest as it is under the lock: a `read` may have replaced the text.
+            let now = std::fs::read(&manifest).map_err(|e| at(&manifest, e))?;
+            if serde_json::from_slice::<registry::Text>(&now).ok().as_ref() != Some(&text) {
+                println!(
+                    "not reproduced: {key} ({}): its manifest changed during the run",
+                    text.path
+                );
+                out.not_reproduced.push(key);
+                continue;
+            }
+            text.set_pdf_sha256(pdf_sha256.clone());
+            if !dry_run {
+                let line = serde_json::to_string(&text).expect("texts serialize");
+                std::fs::write(&manifest, format!("{line}\n")).map_err(|e| at(&manifest, e))?;
+            }
+            let mut in_registry = false;
+            for t in records
+                .iter_mut()
+                .flat_map(|r| &mut r.texts)
+                .filter(|t| t.path == text.path && t.sha256 == text.sha256)
+                .filter(|t| t.pdf_sha256().is_none())
+            {
+                t.set_pdf_sha256(pdf_sha256.clone());
+                in_registry = true;
+            }
+            println!(
+                "{}: {key} ({}): pdf_sha256 {pdf_sha256}, reproduced by {extractor}; in the manifest{}",
+                if dry_run { "would record" } else { "recorded" },
+                text.path,
+                match in_registry {
+                    true => " and the registry",
+                    false => " only (no registry entry lists this text with this sha256)",
+                }
+            );
+            out.recorded.push(key);
+        }
+        Ok(())
+    };
+    if nothing {
+        // Nothing to write: the registry is not rewritten.
+    } else if dry_run || !config.registry.is_file() {
+        record(&mut { known })?;
+    } else {
+        registry::update(&config.registry, record)?;
+    }
+    Ok(out)
 }
 
 /// An RFC 3339 time, in UTC to the second as `read` records it.
@@ -1035,6 +1281,30 @@ fn registry(mut config: config::Config, action: RegistryAction) -> Result<bool, 
                 println!("manifest: {} updated", manifest.display());
             }
             println!("{}", serde_json::to_string(&text).expect("texts serialize"));
+            Ok(true)
+        }
+        RegistryAction::RecordPdfs {
+            dir,
+            dry_run,
+            registry,
+        } => {
+            set_registry(&mut config, registry);
+            let dir = match dir {
+                Some(dir) => config::normalize(&cwd.join(dir)),
+                None => config.root.join("sources/text"),
+            };
+            let found = record_pdfs(&config, &dir, dry_run, pdf::PDFTOTEXT)?;
+            println!(
+                "{} {}, {} not reproduced, {} already with a pdf_sha256, {} without a saved PDF",
+                found.recorded.len(),
+                if dry_run { "to record" } else { "recorded" },
+                found.not_reproduced.len(),
+                found.already,
+                found.no_pdf
+            );
+            if !found.not_reproduced.is_empty() {
+                println!("not reproduced: {}", found.not_reproduced.join(" "));
+            }
             Ok(true)
         }
     }
@@ -3211,6 +3481,187 @@ mod tests {
         assert_eq!(plain.extraction(), Ok(Some(Plain)));
         let written = std::fs::read_to_string(root.join("sources/text/k.txt")).unwrap();
         assert!(written.contains("Synthetic Precheck Paper"), "{written}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Writes `text` as `sources/text/<name>.txt` in `root`, with its manifest
+    /// as `read` left it before it recorded `pdf_sha256`, and returns that.
+    fn old_text(
+        root: &Path,
+        name: &str,
+        text: &str,
+        mode: Option<registry::Extraction>,
+    ) -> registry::Text {
+        let dir = root.join("sources/text");
+        std::fs::write(dir.join(format!("{name}.txt")), text).unwrap();
+        let mut manifest = registry::Text {
+            path: format!("sources/text/{name}.txt"),
+            sha256: http::sha256_hex(text.as_bytes()),
+            origin: Some(format!("https://example.invalid/{name}.pdf")),
+            retrieved: Some("2026-11-07T10:00:00Z".into()),
+            extra: Default::default(),
+        };
+        if let Some(mode) = mode {
+            manifest.set_extraction(mode);
+        }
+        std::fs::write(
+            dir.join(format!("{name}.json")),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+        manifest
+    }
+
+    /// `record-pdfs` records the sha256 of a PDF that reproduces its text, in
+    /// the manifest and the registry, and leaves the other texts alone. Then a
+    /// mode change extracts from the saved PDF. Neither makes a request: the
+    /// entry's URL is a server that fails when it gets none.
+    #[test]
+    fn record_pdfs_records_only_a_pdf_that_reproduces_its_text() {
+        use crate::http::response;
+        let absent = pdf::tests::fake_program("absent");
+        let pdf = tiny_pdf("Synthetic Recorded Paper");
+        let reply = response("200 OK", &["Content-Type: application/pdf"], &pdf);
+        let (base, server) = http::serve_within(vec![reply], std::time::Duration::from_secs(1));
+        let (root, _) = unmarked_project("record-pdfs", &format!("{base}/k.pdf"));
+        let dir = root.join("sources/text");
+        let config = config::Config::load(None, &root).unwrap();
+        let registry_path = root.join("refs.jsonl");
+
+        // `k`: the text pdf-extract gives for its PDF, recorded in the entry.
+        std::fs::write(dir.join("k.pdf"), &pdf).unwrap();
+        let plain = pdf::extract_text(pdf.as_bytes()).unwrap();
+        let text = old_text(&root, "k", &plain, None);
+        registry::update(&registry_path, |records| {
+            records[0].texts.push(text.clone());
+            Ok(())
+        })
+        .unwrap();
+        // `other`: a PDF of another paper beside the text, and no entry.
+        std::fs::write(dir.join("other.pdf"), tiny_pdf("Another Paper")).unwrap();
+        old_text(&root, "other", "text of some paper\n", None);
+        // A text without a PDF, and a JSON file that is no manifest.
+        old_text(&root, "bare", "text without a PDF\n", None);
+        std::fs::write(dir.join("notes.json"), "{\"a\":1}").unwrap();
+        let files = || {
+            ["k.json", "other.json", "bare.json", "notes.json"]
+                .map(|name| std::fs::read_to_string(dir.join(name)).unwrap())
+        };
+        let (before, registry_before) = (files(), std::fs::read(&registry_path).unwrap());
+        let expected = PdfRecords {
+            recorded: vec!["k".into()],
+            not_reproduced: vec!["other".into()],
+            already: 0,
+            no_pdf: 1,
+        };
+
+        // A dry run finds the same and writes nothing.
+        assert_eq!(record_pdfs(&config, &dir, true, &absent), Ok(expected));
+        assert_eq!(files(), before);
+        assert_eq!(std::fs::read(&registry_path).unwrap(), registry_before);
+
+        let found = record_pdfs(&config, &dir, false, &absent).unwrap();
+        assert_eq!(found.recorded, ["k"]);
+        assert_eq!(found.not_reproduced, ["other"]);
+        let pdf_sha256 = http::sha256_hex(pdf.as_bytes());
+        let mut recorded = text.clone();
+        recorded.set_pdf_sha256(pdf_sha256.clone());
+        assert_eq!(sidecar_of(&root), recorded);
+        let entry = registry::load(&registry_path).unwrap().unwrap().remove(0);
+        assert_eq!(entry.texts.len(), 2);
+        // The entry's other text, at another path, is not touched.
+        assert_eq!(entry.texts[0].pdf_sha256(), None);
+        assert_eq!(entry.texts[1], recorded);
+        assert_eq!(files()[1..], before[1..]);
+
+        // A second run has nothing left to record.
+        let again = PdfRecords {
+            recorded: vec![],
+            not_reproduced: vec!["other".into()],
+            already: 1,
+            no_pdf: 1,
+        };
+        assert_eq!(record_pdfs(&config, &dir, false, &absent), Ok(again));
+
+        // The mode change now extracts from the saved PDF.
+        let prints = pdf::tests::fake_program("prints");
+        let layout = Some(registry::Extraction::Layout);
+        assert_eq!(read_key_with(&root, false, layout, &prints), Ok(true));
+        let written = std::fs::read_to_string(dir.join("k.txt")).unwrap();
+        assert!(
+            written.starts_with("text of UTF-8 with -layout -enc "),
+            "{written}"
+        );
+        let switched = sidecar_of(&root);
+        assert_eq!(switched.extraction(), Ok(layout));
+        assert_eq!(switched.pdf_sha256(), Some(pdf_sha256.as_str()));
+        assert_eq!(switched.retrieved, text.retrieved, "not downloaded");
+
+        let panic = server.join().unwrap_err();
+        let message = panic.downcast_ref::<String>().unwrap();
+        assert!(message.contains("got 0 of 1 requests"), "{message}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A plain text that pdf-extract does not reproduce is tried with
+    /// pdftotext, and a layout text with `pdftotext -layout` only. Without
+    /// pdftotext, or in a mode this version does not know, nothing is
+    /// recorded. Without a registry, only the manifests are written.
+    #[test]
+    fn record_pdfs_tries_pdftotext_in_the_recorded_mode() {
+        use registry::Extraction::Layout;
+        let root =
+            std::env::temp_dir().join(format!("papers-record-pdfs-modes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sources/text")).unwrap();
+        std::fs::write(root.join("research.toml"), "").unwrap();
+        let config = config::Config::load(None, &root).unwrap();
+        let dir = config.root.join("sources/text");
+        let pdf = tiny_pdf("Synthetic Fallback Paper");
+        // What the fake pdftotext prints for a PDF: "text of $3 with $1 $2 $4".
+        let fake = |name: &str, layout: bool| {
+            let path = dir.join(format!("{name}.pdf"));
+            std::fs::write(&path, &pdf).unwrap();
+            match layout {
+                true => format!("text of UTF-8 with -layout -enc {}\n", path.display()),
+                false => format!("text of {} with -enc UTF-8 -\n", path.display()),
+            }
+        };
+        let texts = [
+            old_text(&root, "a", &fake("a", false), None),
+            old_text(&root, "b", &fake("b", true), Some(Layout)),
+            // A plain text recorded as layout, and a layout text as plain.
+            old_text(&root, "c", &fake("c", false), Some(Layout)),
+            old_text(&root, "d", &fake("d", true), None),
+        ];
+        let mut unknown = old_text(&root, "e", &fake("e", false), None);
+        unknown.extra.insert("extraction".into(), "ocr".into());
+        std::fs::write(dir.join("e.json"), serde_json::to_string(&unknown).unwrap()).unwrap();
+        let manifest = |name: &str| -> registry::Text {
+            let json = std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap();
+            serde_json::from_str(&json).unwrap()
+        };
+
+        let absent = pdf::tests::fake_program("absent");
+        let found = record_pdfs(&config, &dir, false, &absent).unwrap();
+        assert_eq!(found.recorded, [""; 0]);
+        assert_eq!(found.not_reproduced, ["a", "b", "c", "d", "e"]);
+        assert_eq!(manifest("a"), texts[0]);
+
+        let prints = pdf::tests::fake_program("prints");
+        let found = record_pdfs(&config, &dir, false, &prints).unwrap();
+        assert_eq!(found.recorded, ["a", "b"]);
+        assert_eq!(found.not_reproduced, ["c", "d", "e"]);
+        let pdf_sha256 = http::sha256_hex(pdf.as_bytes());
+        for (name, text) in ["a", "b"].into_iter().zip(&texts) {
+            let mut recorded = text.clone();
+            recorded.set_pdf_sha256(pdf_sha256.clone());
+            assert_eq!(manifest(name), recorded);
+        }
+        assert_eq!(manifest("c"), texts[2]);
+        assert_eq!(manifest("d"), texts[3]);
+        assert_eq!(manifest("e"), unknown);
+        assert!(!config.registry.exists(), "no registry was created");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
