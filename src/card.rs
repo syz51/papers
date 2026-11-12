@@ -8,7 +8,7 @@
 //!   quotation (normalised, not cutting a word or number), which gives its
 //!   raw line range;
 //! - every number in the value occurs in the quote, as claimcheck matches
-//!   numbers.
+//!   numbers, unless it is part of a name ([`missing_numbers`]).
 //!
 //! An item that fails is dropped and counted. A card that keeps less than
 //! [`MIN_KEPT_PERCENT`] of its items is not stored. When quotes were not found,
@@ -190,13 +190,12 @@ pub fn locate(text: &IndexedText, quote: &str) -> Option<[usize; 2]> {
 ///
 /// A number that the quote lacks is also kept when its [`name_phrase`]
 /// (`S&P 500`, `Stage 3`, `Claude 3.5`, `ViT-B/32`, `3-gram`) occurs in
-/// `text`, matched as a quote is.
+/// `text` as written, apart from white space ([`written_in`]).
 pub fn missing_numbers(value: &str, quote: &str, text: &IndexedText) -> Vec<String> {
     let chars: Vec<char> = normalize::normalize_str(value)
         .iter()
         .map(|n| n.c)
         .collect();
-    let in_word = |c: char| c.is_alphanumeric() || matches!(c, '.' | '-' | '@');
     let name = |t: &numbers::NumTok| {
         let first = chars[..t.start]
             .iter()
@@ -218,14 +217,40 @@ pub fn missing_numbers(value: &str, quote: &str, text: &IndexedText) -> Vec<Stri
         .into_iter()
         .filter(|t| !(t.dotted || name(t)))
         .filter(|t| !t.lookup_keys().iter().any(|k| quote.has_number(k)))
-        .filter(|t| {
-            name_phrase(&chars, t).is_none_or(|phrase| {
-                let needle = normalize::skeleton_str(&phrase);
-                text.find_bounded(&needle, 0).is_none()
-            })
-        })
+        .filter(|t| name_phrase(&chars, t).is_none_or(|phrase| !written_in(text, &phrase)))
         .map(|t| chars[t.start..t.end].iter().collect())
         .collect()
+}
+
+/// Whether `c` belongs to a word: a letter, a digit, `.`, `-` or `@`.
+fn in_word(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '.' | '-' | '@')
+}
+
+/// Whether `phrase` occurs in `text` as written: found as a quote is, and the
+/// passage then has the same characters, case and marks, apart from white
+/// space. So `Stage 3` is not found in `stage. 3`, nor `Accuracy 81` in
+/// `Accuracy: 81`.
+fn written_in(text: &IndexedText, phrase: &str) -> bool {
+    let solid = |s: &str| -> Vec<char> {
+        normalize::normalize_str(s)
+            .iter()
+            .map(|n| n.c)
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    };
+    let want = solid(phrase);
+    let needle = normalize::skeleton_str(phrase);
+    let len = needle.chars().count();
+    let mut from = 0;
+    while let Some(at) = text.find_bounded(&needle, from) {
+        let (start, end) = text.skel_span(at, at + len);
+        if solid(&text.text[start..end]) == want {
+            return true;
+        }
+        from = at + 1;
+    }
+    false
 }
 
 /// Capitalised words that start a figure, not a name (`In 2020`, `Top 20`).
@@ -240,11 +265,21 @@ const NOT_NAMES: &[&str] = &[
 /// `Stage 3`, `Claude 3.5`, `Qwen 2.5 7B`, `ViT-B/32`, `DEF 14A`). The name
 /// word comes just before the number, joined to it by a mark or one or more
 /// spaces, past at most one other number. It holds a letter and no digit, and
-/// a capital, unless it is a common word (`In`, `Top`), or a mark (`S&P`,
-/// `ViT-B`). A lowercase word (`top 20`, `reaches 92.4`) and a
-/// word that ends a clause (`Accuracy: 92.4`) are not names.
+/// a capital, unless it is a common word (`In`, `Top`), or a mark `&`, `/`,
+/// `+` or `_` (`S&P`). A lowercase word (`top 20`, `reaches 92.4`,
+/// `zero-shot 45`), a word that ends a clause (`Accuracy: 92.4`) and a word
+/// glued by another mark (`B=256`, `US$5`) are not names. Nor is a percentage
+/// or a decimal with two or more digits before the point (`BLEU 28.4`): a
+/// name's number is a whole number or a version (`3.5`, `2.0`).
 fn name_phrase(chars: &[char], t: &numbers::NumTok) -> Option<String> {
-    let in_word = |c: char| c.is_alphanumeric() || matches!(c, '.' | '-' | '@');
+    let whole = chars[t.start..t.end]
+        .iter()
+        .take_while(|c| **c != '.')
+        .filter(|c| c.is_ascii_digit())
+        .count();
+    if t.percent || (t.decimal && whole > 1) {
+        return None;
+    }
     let mut end = t.end + chars[t.end..].iter().take_while(|c| in_word(**c)).count();
     while end > t.end && matches!(chars[end - 1], '.' | '-') {
         end -= 1;
@@ -294,9 +329,10 @@ fn name_phrase(chars: &[char], t: &numbers::NumTok) -> Option<String> {
     }
     let word = &chars[word_start..word_end];
     let last = *word.last()?;
-    // A name word glued to the number may end in a mark (`ViT-B/`, `Q(`);
-    // one apart from it may not end a clause (`Accuracy:`).
-    if word_end != t.start && !last.is_alphanumeric() {
+    // A name word glued to the number ends in `/`, `(`, `-` or `_` (`ViT-B/`,
+    // `Q(`); one apart from it may not end a clause (`Accuracy:`).
+    let glued = word_end == t.start;
+    if (glued && !matches!(last, '/' | '(' | '-' | '_')) || (!glued && !last.is_alphanumeric()) {
         return None;
     }
     if word.iter().any(|c| c.is_ascii_digit()) {
@@ -304,11 +340,11 @@ fn name_phrase(chars: &[char], t: &numbers::NumTok) -> Option<String> {
     }
     let lower: String = word.iter().flat_map(|c| c.to_lowercase()).collect();
     let capital = word.iter().any(|c| c.is_uppercase()) && !NOT_NAMES.contains(&lower.as_str());
-    let inner = &word[..word.len() - usize::from(word_end == t.start)];
+    let inner = &word[..word.len() - usize::from(glued)];
     let mark = inner
         .iter()
         .skip(1)
-        .any(|c| matches!(c, '&' | '-' | '/' | '+' | '_'));
+        .any(|c| matches!(c, '&' | '/' | '+' | '_'));
     if capital || mark {
         phrase(word_start)
     } else {
@@ -753,6 +789,27 @@ mod tests {
         assert_eq!(
             missing_numbers("a 7-point gain, 5-fold, 200ms", quote, &text),
             vec!["7", "5", "200"]
+        );
+        // Figures that look like names are checked: a metric's score, a
+        // percentage, a setting, an assignment or a price.
+        let text = IndexedText::new(
+            "We reach BLEU 28.4 and BLEU 28 with Recall 90%.\n\
+             The zero-shot 45 score uses N=128 and US$5 per run.\n\
+             Accuracy: 81 on the final stage. 3 runs failed.\n"
+                .to_owned(),
+        );
+        assert_eq!(
+            missing_numbers(
+                "BLEU 28.4, Recall 90%, zero-shot 45, N=128, US$5, Accuracy 81, Stage 3",
+                quote,
+                &text
+            ),
+            vec!["28.4", "90", "45", "128", "5", "81", "3"]
+        );
+        // A whole number after a name is kept only as the text writes it.
+        assert_eq!(
+            missing_numbers("BLEU 28", quote, &text),
+            Vec::<String>::new()
         );
     }
 
