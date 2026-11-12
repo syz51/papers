@@ -162,6 +162,7 @@ Every write (`registry build`, `registry attach`, `registry record-pdfs`, `regis
 | `duplicate-cycle` | error | Following `duplicate_of` from a key comes back to it, such as `1 → 2 → 1`. It is reported once, at the cycle's least key. |
 | `duplicate-chain` | warn | `duplicate_of` names a key that is itself a duplicate. The message names the key the chain ends at, which `duplicate_of` should name. |
 | `verified-mismatch` | warn | `verify --record` recorded `mismatch` or `not-found` in `verified.status`. Check the entry, then run `verify --keys <key> --record` again. |
+| `malformed-doi` | warn | The `doi` does not parse as a DOI, or ends in a character other than a letter, a digit or `)`, such as a stray backtick. |
 | `no-identifier` | warn | The entry has no DOI, arXiv id or URL. |
 | `malformed-date` | error (warn for reported dates) | An access date, a reported date or `verified.at` is not a calendar date. |
 | `invalid-value` | error | `type` or `depth` is outside the `rf.reference/1` vocabulary, or `verified.status` is not `match`, `mismatch` or `not-found`. |
@@ -322,7 +323,7 @@ An item is kept only when all of these hold:
 - its `field` is one of the prompt's fields;
 - its quote has at least 8 words, where each CJK character counts as a word, as word processors count them;
 - its quote occurs in the text as one contiguous passage, after claimcheck's normalisation (case, ligatures, quote and dash variants, hyphenation at line ends, white space and punctuation). The match gives the item's `lines`;
-- every number in its `value` also occurs in its quote, as claimcheck matches numbers (`92.4` matches `92.40`, `1,200` matches `1200`). A number that is part of a name is not checked: one in a word that starts with a letter (`F1`, `GPT-4o`, `Llama-2`, `recall@5`, `top-1`), one followed by `-` and a capital (`10-K`), and a dotted identifier. A word here is a run of letters, digits, `.`, `-` and `@`. Figures joined to a word, such as `7-point`, `5-fold` and `200ms`, are checked. The prompt asks the model to take figures only from the quote.
+- every number in its `value` also occurs in its quote, as claimcheck matches numbers (`92.4` matches `92.40`, `1,200` matches `1200`). A number that is part of a name is not checked: one in a word that starts with a letter (`F1`, `GPT-4o`, `Llama-2`, `recall@5`, `top-1`), one followed by `-` and a capital (`10-K`), one joined to a capitalised word (`2WikiMultiHopQA`), and a dotted identifier. A word here is a run of letters, digits, `.`, `-` and `@`. Figures joined to a word, such as `7-point`, `5-fold` and `200ms`, or to a unit in capitals, such as `200MB` and `3D`, are checked. The prompt asks the model to take figures only from the quote.
 
 The gate: when fewer than 80% of the written items are kept, or none were written, the card is not stored. The command prints `not stored`, names the main cause, and exits 1. An earlier card of the entry is left as it was.
 

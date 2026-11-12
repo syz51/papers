@@ -7,6 +7,7 @@
 //! | `duplicate-cycle` | error | following `duplicate_of` from a key comes back to it |
 //! | `duplicate-chain` | warn | `duplicate_of` names a key that is itself a duplicate |
 //! | `verified-mismatch` | warn | `verify --record` found the entry's metadata differs from its index, or not there |
+//! | `malformed-doi` | warn | a `doi` that does not parse, or that ends in a character other than a letter, a digit or `)` |
 //! | `no-identifier` | warn | no DOI, arXiv id, or URL |
 //! | `malformed-date` | error (warn for reported dates) | an access or reported date that is not a calendar date |
 //! | `invalid-value` | error | `type`, `depth` or `verified.status` outside the `rf.reference/1` vocabulary |
@@ -180,6 +181,20 @@ pub fn check(records: &[Reference]) -> Vec<Finding> {
                 None
             };
             out.extend(finding.map(|f| with_source(f, r)));
+        }
+        if let Some(doi) = &r.ids.doi
+            && (Doi::parse(doi).is_none()
+                || !doi.ends_with(|c: char| c.is_ascii_alphanumeric() || c == ')'))
+        {
+            out.push(with_source(
+                Finding::new(
+                    "malformed-doi",
+                    Severity::Warn,
+                    r.key.clone(),
+                    format!("doi {doi:?} is not a DOI, or ends in a stray character"),
+                ),
+                r,
+            ));
         }
         if let Some(date) = &r.accessed
             && !valid_iso_date(date)
@@ -450,6 +465,30 @@ mod tests {
         assert!(got.contains(&("duplicate-target-missing", Severity::Error, "700")));
         assert!(got.contains(&("malformed-date", Severity::Error, "700")));
         assert!(got.contains(&("invalid-value", Severity::Error, "700")));
+    }
+
+    #[test]
+    fn stray_doi_ends_are_reported() {
+        let mut a = rec("1");
+        a.ids.doi = Some("10.18653/v1/2026.acl-long.923`".into());
+        let mut b = rec("2");
+        b.ids.doi = Some("not a doi".into());
+        let mut c = rec("3");
+        c.ids.doi = Some("10.5555/0304-405x(90)90011-x".into());
+        let mut d = rec("4");
+        d.ids.doi = Some("10.1002/(sici)1097-0258(1996)".into());
+        let got = check(&[a, b, c, d]);
+        let got: Vec<_> = rules(&got)
+            .into_iter()
+            .filter(|g| g.0 == "malformed-doi")
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("malformed-doi", Severity::Warn, "1"),
+                ("malformed-doi", Severity::Warn, "2")
+            ]
+        );
     }
 
     #[test]

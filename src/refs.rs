@@ -14,7 +14,7 @@ impl Doi {
     pub fn parse(input: &str) -> Option<Doi> {
         let s = input
             .trim()
-            .trim_start_matches(['(', '[', '<', '"', '\''])
+            .trim_start_matches(['(', '[', '<', '"', '\'', '`'])
             .trim_start();
         let s = strip_ci(s, "doi:")
             .or_else(|| strip_doi_host(s).map(|rest| rest.split(['?', '#']).next().unwrap_or("")))
@@ -154,7 +154,7 @@ fn strip_doi_host(s: &str) -> Option<&str> {
 
 /// Validates `10.<registrant>/<suffix>`, trims trailing punctuation, lowercases.
 fn bare(s: &str) -> Option<Doi> {
-    let mut s = s.trim_end_matches(['.', ',', ';', ':', '"', '\'', '>', ']', '}']);
+    let mut s = s.trim_end_matches(['.', ',', ';', ':', '"', '\'', '`', '>', ']', '}']);
     // A closing parenthesis belongs to the DOI only when it is balanced there.
     while s.ends_with(')') && s.matches(')').count() > s.matches('(').count() {
         s = s[..s.len() - 1].trim_end_matches(['.', ',', ';', ':']);
@@ -246,6 +246,8 @@ mod tests {
             "10.5555/j.synth.2019.07.001.",
             "(10.5555/j.synth.2019.07.001)",
             "https://doi.org/10.5555/j.synth.2019.07.001?x=1#y",
+            "`10.5555/j.synth.2019.07.001`",
+            "`10.5555/j.synth.2019.07.001`.",
         ] {
             assert_eq!(doi(input), jfe, "{input:?}");
         }
