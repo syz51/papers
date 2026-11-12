@@ -1,0 +1,36 @@
+{
+  "key": "237",
+  "headings": [
+    {"number": null, "title": "Abstract", "level": 1, "page": 1},
+    {"number": "1", "title": "Introduction", "level": 1, "page": 1},
+    {"number": "2", "title": "Related Work", "level": 1, "page": 2},
+    {"number": "2.1", "title": "Financial Question-Answering Datasets", "level": 2, "page": 2},
+    {"number": "2.2", "title": "Retrieval-Augmented Generation (RAG) in Finance", "level": 2, "page": 2},
+    {"number": "3", "title": "FinDER Dataset", "level": 1, "page": 3},
+    {"number": "3.1", "title": "Data Collection", "level": 2, "page": 4},
+    {"number": "3.2", "title": "Annotation Process", "level": 2, "page": 4},
+    {"number": "3.3", "title": "Statistics", "level": 2, "page": 5},
+    {"number": "4", "title": "Experimental Setup", "level": 1, "page": 6},
+    {"number": "4.1", "title": "Baseline Systems for Retrieval Models", "level": 2, "page": 7},
+    {"number": "4.2", "title": "Baseline systems for generation models", "level": 2, "page": 7},
+    {"number": "5", "title": "Results on FinDER", "level": 1, "page": 7},
+    {"number": "5.1", "title": "Retrieval Performance Across Financial Domains", "level": 2, "page": 8},
+    {"number": "5.2", "title": "Reranking with Language Models", "level": 2, "page": 8},
+    {"number": "5.3", "title": "Generation Under Financial Reasoning Tasks", "level": 2, "page": 9},
+    {"number": "6", "title": "Conclusion", "level": 1, "page": 10},
+    {"number": null, "title": "References", "level": 1, "page": 10}
+  ],
+  "references": {"heading": "References", "page": 10, "first_entry": "Josh Achiam, Steven Adler, Sandhini Agarwal,"},
+  "numbers": [
+    {"table": "Table 4", "page": 8, "row": "Accounting", "column": "E5-mistral", "value": "31.92"},
+    {"table": "Table 4", "page": 8, "row": "Company overview", "column": "GTE", "value": "24.76"},
+    {"table": "Table 4", "page": 8, "row": "Legal", "column": "BM25", "value": "13.17"},
+    {"table": "Table 4", "page": 8, "row": "Total", "column": "mE5", "value": "17.36"},
+    {"table": "Table 5", "page": 8, "row": "E5-Mistral", "column": "Well-formed Questions", "value": "33.9"},
+    {"table": "Table 5", "page": 8, "row": "GTE", "column": "FinDER", "value": "18.1"},
+    {"table": "Table 6", "page": 9, "row": "Accounting", "column": "Deepseek-R1-Distill", "value": "84.71"},
+    {"table": "Table 6", "page": 9, "row": "Legal", "column": "Qwen-QWQ", "value": "80.22"},
+    {"table": "Table 6", "page": 9, "row": "Shareholder return", "column": "Claude-3.7-Sonnet", "value": "45.91"},
+    {"table": "Table 6", "page": 9, "row": "Total", "column": "GPT-o1", "value": "62.90"}
+  ]
+}

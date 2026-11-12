@@ -1,0 +1,32 @@
+{
+  "key": "4",
+  "headings": [
+    {"number": null, "title": "Abstract", "level": 1, "page": 1},
+    {"number": null, "title": "Keywords", "level": 1, "page": 1},
+    {"number": "1", "title": "Introduction", "level": 1, "page": 1},
+    {"number": "2", "title": "JFinTEB Benchmark", "level": 1, "page": 2},
+    {"number": "2.1", "title": "Task Design and Dataset Construction", "level": 2, "page": 2},
+    {"number": "2.2", "title": "Dataset Statistics and Availability", "level": 2, "page": 2},
+    {"number": "2.3", "title": "Evaluation Methodology", "level": 2, "page": 2},
+    {"number": "2.4", "title": "Quality Assurance and Validation", "level": 2, "page": 3},
+    {"number": "3", "title": "Evaluation", "level": 1, "page": 3},
+    {"number": "4", "title": "Discussion", "level": 1, "page": 3},
+    {"number": "5", "title": "Resource Availability and Ethics", "level": 1, "page": 4},
+    {"number": "6", "title": "Conclusions", "level": 1, "page": 5},
+    {"number": null, "title": "Acknowledgments", "level": 1, "page": 5},
+    {"number": null, "title": "References", "level": 1, "page": 5}
+  ],
+  "references": {"heading": "References", "page": 5, "first_entry": "Chung-Chi Chen, Hen-Hsen Huang, Yow-Ting Shiue,"},
+  "numbers": [
+    {"table": "Table 4", "page": 4, "row": "Sarashina", "column": "Wikipedia", "value": "98.7"},
+    {"table": "Table 4", "page": 4, "row": "Sarashina", "column": "Sentiment", "value": "55.9"},
+    {"table": "Table 4", "page": 4, "row": "GLuCoSE", "column": "PFMT", "value": "97.8"},
+    {"table": "Table 4", "page": 4, "row": "GLuCoSE", "column": "Sentiment", "value": "49.8"},
+    {"table": "Table 4", "page": 4, "row": "Jina", "column": "Industry 17", "value": "65.1"},
+    {"table": "Table 4", "page": 4, "row": "Jina", "column": "Reason", "value": "28.6"},
+    {"table": "Table 4", "page": 4, "row": "BERT", "column": "JaFIn", "value": "31.6"},
+    {"table": "Table 4", "page": 4, "row": "BERT", "column": "Wikipedia", "value": "14.1"},
+    {"table": "Table 4", "page": 4, "row": "FinBERT", "column": "Wikipedia", "value": "21.8"},
+    {"table": "Table 4", "page": 4, "row": "FinBERT", "column": "Avg.", "value": "59.3"}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "registry": "masters docs/research/references.jsonl (rf.reference/1), read on 2026-11-12",
+  "papers": [
+    {"key": "4", "title": "JFinTEB: Japanese Financial Text Embedding Benchmark", "pages": 5, "arxiv": "2604.15882v1", "arxiv_html": true},
+    {"key": "62", "title": "Ebisu: Benchmarking Large Language Models in Japanese Finance", "pages": 18, "arxiv": "2602.01479v1", "arxiv_html": true, "note": "holds Japanese text"},
+    {"key": "85", "title": "Empirical Evaluation of PDF Parsing and Chunking for Financial Question Answering with RAG", "pages": 12, "arxiv": "2604.12047v1", "arxiv_html": false, "note": "submitted to arXiv as a PDF: no HTML and no LaTeX source"},
+    {"key": "232", "title": "FinanceBench: A New Benchmark for Financial Question Answering", "pages": 16, "arxiv": "2311.11944v1", "arxiv_html": true},
+    {"key": "237", "title": "FinDER: Financial Dataset for Question Answering and Evaluating Retrieval-Augmented Generation", "pages": 14, "arxiv": "2504.15800v3", "arxiv_html": true},
+    {"key": "848", "title": "Optimizing Retrieval Strategies for Financial Question Answering Documents in Retrieval-Augmented Generation Systems", "pages": 15, "arxiv": "2503.15191v1", "arxiv_html": true},
+    {"key": "849", "title": "DROP: A Reading Comprehension Benchmark Requiring Discrete Reasoning Over Paragraphs", "pages": 12, "arxiv": "1903.00161v2", "arxiv_html": true},
+    {"key": "49", "title": "FinQA: A Dataset of Numerical Reasoning over Financial Data", "pages": 14, "arxiv": null, "arxiv_html": false, "note": "ACL Anthology PDF"},
+    {"key": "50", "title": "TAT-QA: A Question Answering Benchmark on a Hybrid of Tabular and Textual Content in Finance", "pages": 11, "arxiv": null, "arxiv_html": false, "note": "ACL Anthology PDF"},
+    {"key": "484", "title": "Dense Passage Retrieval for Open-Domain Question Answering", "pages": 13, "arxiv": null, "arxiv_html": false, "note": "ACL Anthology PDF"}
+  ]
+}

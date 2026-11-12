@@ -1,0 +1,42 @@
+{
+  "key": "49",
+  "headings": [
+    {"number": null, "title": "Abstract", "level": 1, "page": 1},
+    {"number": "1", "title": "Introduction", "level": 1, "page": 1},
+    {"number": "2", "title": "Related Work", "level": 1, "page": 2},
+    {"number": "3", "title": "Task Definition", "level": 1, "page": 3},
+    {"number": "4", "title": "The FinQA Dataset", "level": 1, "page": 3},
+    {"number": "4.1", "title": "Data Preparation", "level": 2, "page": 3},
+    {"number": "4.2", "title": "Annotation Procedure", "level": 2, "page": 4},
+    {"number": "4.3", "title": "Data Quality Assessment", "level": 2, "page": 4},
+    {"number": "4.4", "title": "Data Analysis", "level": 2, "page": 5},
+    {"number": "5", "title": "Baseline Systems", "level": 1, "page": 5},
+    {"number": "5.1", "title": "The FinQANet Framework", "level": 2, "page": 5},
+    {"number": "5.2", "title": "Other Baselines", "level": 2, "page": 6},
+    {"number": "6", "title": "Experimental Results", "level": 1, "page": 7},
+    {"number": "6.1", "title": "QA Model Performance", "level": 2, "page": 7},
+    {"number": "6.2", "title": "Performance Breakdown", "level": 2, "page": 7},
+    {"number": "6.3", "title": "Error Analysis", "level": 2, "page": 8},
+    {"number": "7", "title": "Conclusion and Future Work", "level": 1, "page": 8},
+    {"number": "8", "title": "Ethical Considerations", "level": 1, "page": 9},
+    {"number": null, "title": "Acknowledgment", "level": 1, "page": 9},
+    {"number": null, "title": "References", "level": 1, "page": 9},
+    {"number": "A", "title": "Operation Definitions", "level": 1, "page": 11},
+    {"number": "B", "title": "Experiment Details", "level": 1, "page": 11},
+    {"number": "C", "title": "Case Studies", "level": 1, "page": 11},
+    {"number": "D", "title": "Annotation Interface", "level": 1, "page": 11}
+  ],
+  "references": {"heading": "References", "page": 9, "first_entry": "Md. Shad Akhtar, Abhishek Kumar, Deepanway"},
+  "numbers": [
+    {"table": "Table 2", "page": 7, "row": "Pre-Trained Longformer (base)", "column": "Prog Acc", "value": "20.48"},
+    {"table": "Table 2", "page": 7, "row": "Retriever + NeRd (BERT-base)", "column": "Exe Acc", "value": "48.57"},
+    {"table": "Table 2", "page": 7, "row": "FinQANet (BERT-large)", "column": "Prog Acc", "value": "51.62"},
+    {"table": "Table 2", "page": 7, "row": "FinQANet (RoBERTa-large)", "column": "Exe Acc", "value": "61.24"},
+    {"table": "Table 2", "page": 7, "row": "FinQANet-Gold (RoBERTa-large)", "column": "Prog Acc", "value": "68.76"},
+    {"table": "Table 2", "page": 7, "row": "Human Expert Performance", "column": "Prog Acc", "value": "87.49"},
+    {"table": "Table 3", "page": 8, "row": "table-only inference", "column": "Prog Acc", "value": "43.62"},
+    {"table": "Table 3", "page": 8, "row": "text-only questions", "column": "Exe Acc", "value": "54.86"},
+    {"table": "Table 3", "page": 8, "row": ">2 step programs", "column": "Exe Acc", "value": "22.78"},
+    {"table": "Table 3", "page": 8, "row": "Programs with constants", "column": "Prog Acc", "value": "39.80"}
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "key": "50",
+  "headings": [
+    {"number": null, "title": "Abstract", "level": 1, "page": 1},
+    {"number": "1", "title": "Introduction", "level": 1, "page": 1},
+    {"number": "2", "title": "Dataset Construction and Analysis", "level": 1, "page": 2},
+    {"number": "2.1", "title": "Data Collection and Preprocessing", "level": 2, "page": 2},
+    {"number": "2.2", "title": "Dataset Annotation", "level": 2, "page": 3},
+    {"number": "2.3", "title": "Quality Control", "level": 2, "page": 3},
+    {"number": "2.4", "title": "Dataset Analysis", "level": 2, "page": 4},
+    {"number": "3", "title": "TagOp Model", "level": 1, "page": 4},
+    {"number": "3.1", "title": "Sequence Tagging", "level": 2, "page": 4},
+    {"number": "3.2", "title": "Aggregation Operator", "level": 2, "page": 4},
+    {"number": "3.3", "title": "Scale Prediction", "level": 2, "page": 5},
+    {"number": "3.4", "title": "Training", "level": 2, "page": 6},
+    {"number": "4", "title": "Experiments and Results", "level": 1, "page": 6},
+    {"number": "4.1", "title": "Baselines", "level": 2, "page": 6},
+    {"number": "4.2", "title": "Evaluation Metrics", "level": 2, "page": 6},
+    {"number": "4.3", "title": "Results and Analysis", "level": 2, "page": 6},
+    {"number": "5", "title": "Related Work", "level": 1, "page": 8},
+    {"number": "6", "title": "Conclusion", "level": 1, "page": 8},
+    {"number": null, "title": "Acknowledgments", "level": 1, "page": 9},
+    {"number": null, "title": "References", "level": 1, "page": 9},
+    {"number": "A", "title": "Appendix", "level": 1, "page": 11},
+    {"number": "A.1", "title": "Table Analysis", "level": 2, "page": 11},
+    {"number": "A.2", "title": "Operator Classifier", "level": 2, "page": 11},
+    {"number": "A.3", "title": "Scale Prediction", "level": 2, "page": 11}
+  ],
+  "references": {"heading": "References", "page": 9, "first_entry": "Daniel Andor, Luheng He, Kenton Lee,"},
+  "numbers": [
+    {"table": "Table 3", "page": 7, "row": "Human", "column": "F1", "value": "90.8"},
+    {"table": "Table 3", "page": 7, "row": "BERT-RC", "column": "F1", "value": "18.7"},
+    {"table": "Table 3", "page": 7, "row": "NumNet+ V2", "column": "EM", "value": "38.1"},
+    {"table": "Table 3", "page": 7, "row": "TaPas for WTQ", "column": "F1", "value": "26.5"},
+    {"table": "Table 3", "page": 7, "row": "TagOp", "column": "EM", "value": "50.1"},
+    {"table": "Table 5", "page": 7, "row": "+ Span-in-text", "column": "F1", "value": "21.8"},
+    {"table": "Table 5", "page": 7, "row": "+ Cell-in-table", "column": "EM", "value": "25.4"},
+    {"table": "Table 5", "page": 7, "row": "+ Average", "column": "F1", "value": "50.6"},
+    {"table": "Table 5", "page": 7, "row": "+ Multiplication", "column": "EM", "value": "37.9"},
+    {"table": "Table 5", "page": 7, "row": "+ Difference", "column": "F1", "value": "53.3"}
+  ]
+}
