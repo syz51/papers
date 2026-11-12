@@ -182,9 +182,11 @@ pub fn locate(text: &IndexedText, quote: &str) -> Option<[usize; 2]> {
 /// The numbers of `value` that `quote` lacks, as written in `value`. A number
 /// that is part of a name is not a figure and is not checked: one in a word
 /// that starts with a letter (`F1`, `GPT-4o`, `Llama-2`, `recall@5`, `top-1`,
-/// `Qwen-2.5-14B`), one followed by `-` and a capital (`10-K`), and a dotted
+/// `Qwen-2.5-14B`), one followed by `-` and a capital (`10-K`), one joined to a
+/// capitalised word of at least five letters (`2WikiMultiHopQA`), and a dotted
 /// identifier. A word is a run of letters, digits, `.`, `-` and `@`. Figures
-/// joined to a word (`7-point`, `5-fold`, `200ms`) are checked.
+/// joined to a word (`7-point`, `5-fold`, `200ms`) or to a unit (`200MB`,
+/// `3D`, `50Hz`, `8Gb`, `10Mbps`) are checked.
 pub fn missing_numbers(value: &str, quote: &str) -> Vec<String> {
     let chars: Vec<char> = normalize::normalize_str(value)
         .iter()
@@ -199,6 +201,13 @@ pub fn missing_numbers(value: &str, quote: &str) -> Vec<String> {
         chars[first].is_alphabetic()
             || (chars.get(t.end) == Some(&'-')
                 && chars.get(t.end + 1).is_some_and(|c| c.is_uppercase()))
+            || (chars.get(t.end).is_some_and(|c| c.is_uppercase())
+                && chars.get(t.end + 1).is_some_and(|c| c.is_lowercase())
+                && chars[t.end..]
+                    .iter()
+                    .take_while(|c| c.is_alphabetic())
+                    .count()
+                    >= 5)
     };
     let quote = IndexedText::new(quote.to_owned());
     numbers::scan(&chars)
@@ -584,6 +593,15 @@ mod tests {
                 "no numbers here"
             ),
             Vec::<String>::new()
+        );
+        // A name may start with a digit joined to a capitalised word.
+        assert_eq!(
+            missing_numbers("on 2WikiMultiHopQA and HotpotQA", "on HotpotQA and MuSiQue"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            missing_numbers("uses 200MB in 3D at 50Hz, 8Gb, 10Mbps", "no numbers here"),
+            vec!["200", "3", "50", "8", "10"]
         );
         // A figure beside such a name is still checked.
         assert_eq!(

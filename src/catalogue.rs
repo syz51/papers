@@ -1315,6 +1315,16 @@ Inspection depth: original page fetched; abstract only.
     }
 
     #[test]
+    fn dois_lose_markdown_code_marks() {
+        let src = "## Reference 1\n\n[1] **Widgets**. DOI: `10.18653/v1/2026.acl-long.923`.\n";
+        let p = parse(src, "r.md");
+        assert_eq!(
+            get(&p, "1").ids.doi.as_deref(),
+            Some("10.18653/v1/2026.acl-long.923")
+        );
+    }
+
+    #[test]
     fn dois_keep_balanced_parentheses() {
         let text = "## Reference 1\n\n[1] **Widgets**. J. Synth. \
                     [Original](https://doi.org/10.5555/0304-405X(90)90011-X). Accessed 2026-01-01.\n\n\
