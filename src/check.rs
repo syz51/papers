@@ -7,7 +7,7 @@
 //! | `duplicate-cycle` | error | following `duplicate_of` from a key comes back to it |
 //! | `duplicate-chain` | warn | `duplicate_of` names a key that is itself a duplicate |
 //! | `verified-mismatch` | warn | `verify --record` found the entry's metadata differs from its index, or not there |
-//! | `malformed-doi` | warn | a `doi` that does not parse, or that ends in a character other than a letter, a digit or `)` |
+//! | `malformed-doi` | warn | a `doi` that does not parse, or that ends in a character other than an ASCII letter, an ASCII digit or `)` |
 //! | `no-identifier` | warn | no DOI, arXiv id, or URL |
 //! | `malformed-date` | error (warn for reported dates) | an access or reported date that is not a calendar date |
 //! | `invalid-value` | error | `type`, `depth` or `verified.status` outside the `rf.reference/1` vocabulary |

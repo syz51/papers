@@ -157,7 +157,7 @@ fn bare(s: &str) -> Option<Doi> {
     let mut s = s.trim_end_matches(['.', ',', ';', ':', '"', '\'', '`', '>', ']', '}']);
     // A closing parenthesis belongs to the DOI only when it is balanced there.
     while s.ends_with(')') && s.matches(')').count() > s.matches('(').count() {
-        s = s[..s.len() - 1].trim_end_matches(['.', ',', ';', ':']);
+        s = s[..s.len() - 1].trim_end_matches(['.', ',', ';', ':', '"', '\'', '`']);
     }
     let (prefix, suffix) = s.split_once('/')?;
     let registrant = prefix.strip_prefix("10.")?;
@@ -248,6 +248,8 @@ mod tests {
             "https://doi.org/10.5555/j.synth.2019.07.001?x=1#y",
             "`10.5555/j.synth.2019.07.001`",
             "`10.5555/j.synth.2019.07.001`.",
+            "(`10.5555/j.synth.2019.07.001`).",
+            "(\"10.5555/j.synth.2019.07.001\")",
         ] {
             assert_eq!(doi(input), jfe, "{input:?}");
         }
