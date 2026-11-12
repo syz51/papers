@@ -136,9 +136,9 @@ The file is one JSON object, pretty-printed, with a final LF.
 | `sections[].heading` | The heading, trimmed, with single spaces. `null` for a span without a heading. When the extractor put a heading's number and its words on two lines, it is both joined by a space, and `first_line` is the number's line. |
 | `sections[].level` | 1 for a top heading, 2 for `2.1`, 3 for `2.1.1`. 0 for a span without a heading. In a Markdown text, a heading with a section number has the number's depth, and any other heading has its count of `#`. |
 | `references` | The reference list, or the string `unknown` when no reference heading is detected. |
-| `references.first_line`, `last_line` | The list without its heading line and without blank lines at its end. It lies inside the `references` section. |
-| `references.split` | How the list divides into references: `numbered` (`[1]` or `1.` marks), `blank` (blank lines between references) or `unknown`. |
-| `references.entries` | With `numbered` or `blank`: every reference in order, each with its line range. With `unknown`: only the matches, each with the lines of the id or title that matched. |
+| `references.first_line`, `last_line` | The list without its heading line and without blank lines or page marks at its ends. It lies inside the `references` section. It ends at its last reference: see [Where the list ends](#where-the-list-ends). |
+| `references.split` | How the list divides into references: `numbered` (`[1]`, `- [1]` or `1.` marks), `blank` (blank lines between references; in a Markdown text, each list item also starts a reference), `author-year` (no marks and no blank lines; see [Author-year lists](#author-year-lists)) or `unknown`. |
+| `references.entries` | With `numbered`, `blank` or `author-year`: every reference in order, each with its line range. With `unknown`: only the matches, each with the lines of the id or title that matched. |
 | `entries[].key` | The registry key the reference cites. `null` when no entry matches. |
 | `entries[].by` | What matched: `doi`, `arxiv` or `title`. `null` when `key` is `null`. |
 | `warnings` | Sentences that say what detection did not find or could not decide. |
@@ -148,7 +148,7 @@ The file is one JSON object, pretty-printed, with a final LF.
 - `front`: the lines before the first heading, such as the title and the authors. It has no heading.
 - `abstract`: from an `Abstract` heading to the next heading. When no heading follows within 80 lines, the abstract ends before its first blank line, or after 80 lines when it has none; the lines after it up to the next heading are `unknown`, with a warning.
 - `body`: a numbered heading (`1 Introduction`, `2.1 Method`, `IV. RESULTS`) or a common unnumbered one (`Introduction`, `Conclusion`, `Acknowledgments`). In a Markdown text (`.md`, `.markdown`), detection reads only the `#` headings outside code fences: `Abstract` and `References` headings give those kinds, headings after the references are `appendix`, and all others are `body`.
-- `references`: from a `References`, `Bibliography` or similar heading to the next heading. The span may hold lines that follow the list, such as tables, when no heading separates them.
+- `references`: from a `References`, `Bibliography` or similar heading to the next heading. The span may hold lines that follow the list, such as tables, when no heading separates them; `references.last_line` then ends before them.
 - `appendix`: an `Appendix` or `Supplementary Material` heading, and lettered headings (`A Proofs`, `A.1 Details`) after the reference list.
 - `unknown`: lines whose kind detection cannot decide. A text without any detected heading is one `unknown` span, with a warning.
 
@@ -162,7 +162,26 @@ Each entry of `references.entries` with a `key` is a citation edge from the text
 - A title matches when the reference's normalised text contains the entry's normalised title. A normalised title is lower case, without accents, punctuation or spaces, and a line-end hyphen is joined. Titles shorter than 20 normalised characters do not match. The longest title wins. Of two entries with the same DOI, arXiv id or title, the first in the registry is the match.
 - A match on an entry that has `duplicate_of` gives that key instead.
 - The entries that record the text itself are never a match.
-- A DOI or arXiv id that a line break divides does not match.
+- A DOI that a line end divides is joined with the first word of the next line, first as written and then without a line-end hyphen. The match covers both lines. An arXiv id that a line break divides does not match.
+- Of several matches in one reference, a DOI beats an arXiv id and an arXiv id beats a title. Of two matches of one kind, the one on the earlier line wins, so a paper's title beats the title of the proceedings it appears in.
+
+### Author-year lists
+
+A list without `[n]` or `n.` marks and without blank lines between references splits at authors' names. A reference starts at the list's first line and at each line that follows a line ending a reference and begins with a name:
+
+- A line ends a reference when it ends with a full stop, or with a DOI or URL and no hyphen.
+- A name is a capitalised word, followed by up to four more capitalised words or particles (`van`, `de`, `von` and similar), then a comma, a year, or `and` and a capital letter. A Markdown list mark may come first.
+- A start whose reference holds no year (1900 to 2099) is not a start, unless it opens a Markdown list item. So `Preprint, arXiv:2509.03787.` continues the reference before it.
+- A line of digits only, such as a page number, and a page mark are skipped.
+
+The split is `author-year` only when the first line begins with a name, there are 3 references or more, and they average at most 8 lines. Otherwise the list is `unknown`.
+
+### Where the list ends
+
+The list ends at the last line of the `references` span, with two exceptions:
+
+- In a `blank` or `author-year` list, the last references without a year are not references: what follows the list, such as table rows or an appendix's contents, does not name a year. The list ends at the last reference with a year.
+- When the last reference is longer than every other reference, it runs on into what follows the list. It ends at the last line before its first blank line.
 
 ### What a search index does with it
 

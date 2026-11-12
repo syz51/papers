@@ -806,9 +806,32 @@ fn sections(
     out
 }
 
-static BRACKET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*\[(\d{1,3})\]").unwrap());
+/// `[12]`, also as a Markdown list item: `- [12]`.
+static BRACKET: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*(?:[-*+]\s+)?\[(\d{1,3})\]").unwrap());
 static DOTTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(\d{1,3})\.\s+\S").unwrap());
 static DOI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"10\.\d{4,9}/[^\s"<>]+"#).unwrap());
+/// A DOI that the line end may divide: its last token, possibly only
+/// `10.18653/`.
+static DOI_TAIL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"10\.\d{4,9}/[^\s"<>]*$"#).unwrap());
+/// A line that starts a reference of an author-year list: a name of
+/// capitalised words, initials and particles, then a comma (`Asai, A.` or
+/// `Akari Asai, Zeqiu Wu`), `and` and a second name, or a full stop and a year
+/// (`Meta AI. 2025.`). A Markdown list item's `- ` may come first.
+static AUTHOR: LazyLock<Regex> = LazyLock::new(|| {
+    let name = r"\p{Lu}[\p{L}\p{M}'’\-]*\.?";
+    let part = format!(r"(?:{name}|van|von|der|den|de|del|della|da|di|du|dos|le|la|ten|ter)");
+    Regex::new(&format!(
+        r"^\s*(?:[-*+]\s+)?{name}(?:[ \t]+{part}){{0,4}}(?:,|\.?[ \t]+(?:19|20)\d{{2}}|[ \t]+and[ \t]+\p{{Lu}})"
+    ))
+    .unwrap()
+});
+/// A year as references give it: `2023`, `2023a`.
+static YEAR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|[^\d])(?:19|20)\d{2}[a-z]?(?:[^\d]|$)").unwrap());
+/// A Markdown list item.
+static ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*[-*+]\s").unwrap());
 static ARXIV: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:arxiv:\s*|arxiv\.org/(?:abs|pdf)/|abs/)(\d{4}\.\d{4,5}|[a-z\-]+(?:\.[a-z]{2})?/\d{7})")
         .unwrap()
@@ -847,8 +870,9 @@ fn references(
         }
         return Known::Unknown(UNKNOWN);
     };
-    // 0-based, without the heading and without blank lines at either end.
-    let filled = |i: &usize| !clean(lines[*i]).is_empty();
+    // 0-based, without the heading and without blank lines or page marks at
+    // either end.
+    let filled = |i: &usize| listed(lines[*i]);
     let range = section.first_line..section.last_line;
     let (Some(first), Some(last)) = (
         range.clone().find(|i| filled(i)),
@@ -859,16 +883,19 @@ fn references(
     };
     let matches = matches(lines, first, last, targets);
     let starts = entry_starts(lines, first, last);
+    let mut last = last;
     let (split, entries) = match starts {
-        Some((split, starts)) => {
+        Some((split, starts, end)) => {
+            last = end;
+            let stop = |n: usize| starts.get(n + 1).map_or(last, |next| next - 1);
             let mut entries = Vec::with_capacity(starts.len());
             for (n, &start) in starts.iter().enumerate() {
-                let stop = starts.get(n + 1).map_or(last, |next| next - 1);
+                let stop = stop(n);
                 let end = (start..=stop).rev().find(|i| filled(i)).unwrap_or(start);
                 let best = matches
                     .iter()
                     .filter(|m| (start..=stop).contains(&m.first))
-                    .min_by_key(|m| rank(m.by));
+                    .min_by_key(|m| (rank(m.by), m.first));
                 entries.push(Entry {
                     first_line: start + 1,
                     last_line: end + 1,
@@ -906,15 +933,23 @@ fn references(
     })
 }
 
-/// Where each reference starts: at `[n]` or `n.` marks, else after blank lines.
-fn entry_starts(lines: &[&str], first: usize, last: usize) -> Option<(&'static str, Vec<usize>)> {
+/// How the list splits, where each reference starts, and the list's last
+/// line: at `[n]` or `n.` marks, else after blank lines, else at authors'
+/// names (see [`author_year`]). A list without marks ends at its last
+/// reference with a year (see [`dated`]).
+fn entry_starts(
+    lines: &[&str],
+    first: usize,
+    last: usize,
+) -> Option<(&'static str, Vec<usize>, usize)> {
     let bracket: Vec<usize> = (first..=last)
         .filter(|&i| BRACKET.is_match(lines[i]))
         .collect();
     // Marks that do not start at the top of the list are not its references.
     let at_top = |starts: &[usize]| starts.first().is_some_and(|s| *s <= first + 2);
     if bracket.len() >= 3 && at_top(&bracket) {
-        return Some(("numbered", bracket));
+        let end = close(lines, &bracket, last);
+        return Some(("numbered", bracket, end));
     }
     let mut dotted = Vec::new();
     for (i, line) in lines.iter().enumerate().take(last + 1).skip(first) {
@@ -926,15 +961,111 @@ fn entry_starts(lines: &[&str], first: usize, last: usize) -> Option<(&'static s
         }
     }
     if dotted.len() >= 3 && at_top(&dotted) {
-        return Some(("numbered", dotted));
+        let end = close(lines, &dotted, last);
+        return Some(("numbered", dotted, end));
     }
-    let blank = |i: usize| clean(lines[i]).is_empty();
+    let blank = |i: usize| !listed(lines[i]);
     let paragraphs: Vec<usize> = (first..=last)
-        .filter(|&i| !blank(i) && (i == first || blank(i - 1)))
+        .filter(|&i| !blank(i) && (i == first || blank(i - 1) || ITEM.is_match(lines[i])))
         .collect();
+    let (paragraphs, end) = dated(lines, paragraphs, last);
     // References of one to a few lines each, not pages of text between blanks.
-    (paragraphs.len() >= 3 && (last - first + 1) <= paragraphs.len() * 8)
-        .then_some(("blank", paragraphs))
+    if paragraphs.len() >= 3 && (end + 1 - first) <= paragraphs.len() * 8 {
+        return Some(("blank", paragraphs, end));
+    }
+    author_year(lines, first, last).map(|(starts, end)| ("author-year", starts, end))
+}
+
+/// `starts` without its last references that have no year, and the last
+/// filled line of the rest: what follows a list without marks, such as table
+/// rows or an appendix's contents, is not a reference. The first stays.
+fn dated(lines: &[&str], mut starts: Vec<usize>, mut last: usize) -> (Vec<usize>, usize) {
+    while let [.., before, start] = starts[..] {
+        if has_year(lines, start, last) {
+            break;
+        }
+        starts.pop();
+        last = (before..start)
+            .rev()
+            .find(|&i| listed(lines[i]))
+            .unwrap_or(before);
+    }
+    let last = close(lines, &starts, last);
+    (starts, last)
+}
+
+/// The list's last line: a last reference longer than every other runs on
+/// into what follows the list, such as an appendix or a table, so it ends
+/// before its first blank line.
+fn close(lines: &[&str], starts: &[usize], last: usize) -> usize {
+    let filled = |i: &usize| listed(lines[*i]);
+    let Some((&start, others)) = starts.split_last() else {
+        return last;
+    };
+    let longest = (0..others.len())
+        .map(|n| starts[n + 1] - starts[n])
+        .max()
+        .unwrap_or(0);
+    if others.is_empty() || last + 1 - start <= longest {
+        return last;
+    }
+    (start..=last)
+        .find(|i| !filled(i))
+        .and_then(|blank| (start..blank).rev().find(filled))
+        .unwrap_or(last)
+}
+
+/// Whether `line` is text in a reference list: not blank and not a page mark.
+fn listed(line: &str) -> bool {
+    !clean(line).is_empty() && !PAGE_COMMENT.is_match(line.trim())
+}
+
+/// Whether `line` can end a reference: a full stop, or a DOI or URL at its end.
+fn ends_reference(line: &str) -> bool {
+    let line = clean(line);
+    line.ends_with('.')
+        || (!line.ends_with('-')
+            && line
+                .rsplit(' ')
+                .next()
+                .is_some_and(|w| DOI.is_match(w) || w.starts_with("http")))
+}
+
+/// Whether lines `from..=to` hold a year.
+fn has_year(lines: &[&str], from: usize, to: usize) -> bool {
+    (from..=to).any(|i| YEAR.is_match(lines[i]))
+}
+
+/// The starts of an author-year list without numbers or blank lines between
+/// references: the list's first line and each line that reads as a name (see
+/// [`AUTHOR`]) after a line that ends a reference. The list ends at its last
+/// reference with a year (see [`dated`]); before it, a start whose reference
+/// has no year was not a start, unless it opens a Markdown list item. `None` unless the first line reads as a name,
+/// there are 3 references or more, and they average at most 8 lines. Returns
+/// the starts and the list's last line.
+fn author_year(lines: &[&str], first: usize, last: usize) -> Option<(Vec<usize>, usize)> {
+    // Page marks and blank lines are not text.
+    let filled: Vec<usize> = (first..=last)
+        .filter(|&i| listed(lines[i]) && !clean(lines[i]).bytes().all(|b| b.is_ascii_digit()))
+        .collect();
+    if !AUTHOR.is_match(lines[first]) {
+        return None;
+    }
+    let mut starts = vec![first];
+    for pair in filled.windows(2) {
+        if ends_reference(lines[pair[0]]) && AUTHOR.is_match(lines[pair[1]]) {
+            starts.push(pair[1]);
+        }
+    }
+    let (starts, last) = dated(lines, starts, last);
+    let stop = |n: usize| starts.get(n + 1).map_or(last, |next| next - 1);
+    let kept: Vec<usize> = (0..starts.len())
+        .filter(|&n| {
+            n == 0 || ITEM.is_match(lines[starts[n]]) || has_year(lines, starts[n], stop(n))
+        })
+        .map(|n| starts[n])
+        .collect();
+    (kept.len() >= 3 && last + 1 - first <= kept.len() * 8).then_some((kept, last))
 }
 
 /// The registry entries that lines `first..=last` name by DOI, arXiv id or title.
@@ -944,21 +1075,46 @@ fn matches(lines: &[&str], first: usize, last: usize, targets: &Targets) -> Vec<
     // drops hyphens and line ends, so a title broken across lines still matches.
     let mut normal = String::new();
     let mut line_of: Vec<usize> = Vec::new();
+    let doi_hit = |doi: &str| {
+        let doi = doi
+            .trim_end_matches(['.', ',', ';', ')', ']'])
+            .to_lowercase();
+        targets.doi.get(&doi).map(|k| (k, "doi")).or_else(|| {
+            doi.strip_prefix("10.48550/arxiv.")
+                .and_then(|id| targets.arxiv.get(id))
+                .map(|k| (k, "arxiv"))
+        })
+    };
     for (i, line) in lines.iter().enumerate().take(last + 1).skip(first) {
+        let mut ends_with_hit = false;
         for m in DOI.find_iter(line) {
-            let doi = m
-                .as_str()
-                .trim_end_matches(['.', ',', ';', ')', ']'])
-                .to_lowercase();
-            let hit = targets.doi.get(&doi).map(|k| (k, "doi")).or_else(|| {
-                doi.strip_prefix("10.48550/arxiv.")
-                    .and_then(|id| targets.arxiv.get(id))
-                    .map(|k| (k, "arxiv"))
-            });
-            if let Some((key, by)) = hit {
+            if let Some((key, by)) = doi_hit(m.as_str()) {
+                ends_with_hit |= m.end() == line.trim_end().len();
                 out.push(Match {
                     first: i,
                     last: i,
+                    key: key.clone(),
+                    by,
+                });
+            }
+        }
+        // A DOI that the line end divides: joined with the next line's first
+        // word, with a final hyphen kept or dropped, as the registry has it.
+        let next_word = lines
+            .get(i + 1)
+            .filter(|_| i < last)
+            .and_then(|l| l.split_whitespace().next());
+        if let (Some(tail), Some(word), false) =
+            (DOI_TAIL.find(line.trim_end()), next_word, ends_with_hit)
+        {
+            let tail = tail.as_str();
+            let unhyphenated = tail.strip_suffix('-').map(|t| format!("{t}{word}"));
+            let hit = doi_hit(&format!("{tail}{word}"))
+                .or_else(|| unhyphenated.as_deref().and_then(doi_hit));
+            if let Some((key, by)) = hit {
+                out.push(Match {
+                    first: i,
+                    last: i + 1,
                     key: key.clone(),
                     by,
                 });
@@ -1359,6 +1515,157 @@ words
                 key: Some("20".into()),
                 by: Some("title"),
             }]
+        );
+    }
+
+    fn entry_spans(list: &RefList) -> Vec<(usize, usize, Option<&str>, Option<&str>)> {
+        list.entries
+            .iter()
+            .map(|e| (e.first_line, e.last_line, e.key.as_deref(), e.by))
+            .collect()
+    }
+
+    #[test]
+    fn an_author_year_list_without_blank_lines_splits_at_names_and_ends_at_its_last_reference() {
+        let records = [entry(
+            "157",
+            None,
+            None,
+            "RARE: Redundancy-Aware Retrieval Evaluation for Synthetic Corpora",
+        )];
+        // Line 10 reads as a name but its reference has no year; line 11 is a
+        // page number; an appendix's contents follow without a heading.
+        let text = "1 Introduction
+words
+References
+Cho, H.; and Lee, J. 2026. RARE: Redundancy-Aware
+Retrieval Evaluation for Synthetic Corpora. In Proceedings.
+Chen, Z.; Smith, A.; and Wang, W. Y. 2021. FinQA: A
+Dataset. Transactions on Data.
+María Andrea Cruz Blandón and Bruno Charron. 2025.
+MEMERAG: A benchmark. In Proceedings, pages 1–9.
+Preprint, arXiv:2509.03787.
+12
+Gordon V. Cormack and Stefan Buettcher. 2009. Rank
+fusion. In Proceedings of SIGIR.
+Lee, K. 2023. Other Work. Journal.
+
+Technical Appendix
+
+A.1 Example 1 . . . . . . . . 13
+
+A.2 Example 2 . . . . . . . . 14
+";
+        let s = structure(text, false, &Targets::new(&records, &[]));
+        let list = s.references.known().expect("a reference list");
+        assert_eq!(
+            (list.first_line, list.last_line, list.split),
+            (4, 14, "author-year")
+        );
+        assert_eq!(
+            entry_spans(list),
+            vec![
+                (4, 5, Some("157"), Some("title")),
+                (6, 7, None, None),
+                (8, 11, None, None),
+                (12, 13, None, None),
+                (14, 14, None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_list_followed_by_a_table_ends_at_its_last_reference() {
+        let text = "1 Introduction
+words
+References
+[1] A. Smith. 2024. One. Journal.
+[2] B. Jones. 2023. Two. Journal.
+[3] C. Lee. 2022. Three. Journal.
+
+Table 5: Results
+Model  Score
+GPT    0.91
+Claude 0.95
+";
+        let s = structure(text, false, &Targets::default());
+        let list = s.references.known().unwrap();
+        assert_eq!(
+            (list.first_line, list.last_line, list.split),
+            (4, 6, "numbered")
+        );
+        assert_eq!(
+            entry_spans(list),
+            vec![(4, 4, None, None), (5, 5, None, None), (6, 6, None, None)]
+        );
+
+        // Markdown: each list item is a reference, a page mark is not, and the
+        // table after the list has no year.
+        let text = "## References
+
+- Smith, A. 2024. One. Journal.
+- Jones, B. 2023. Two. Journal.
+
+<!-- page -->
+
+- Lee, C. 2022. Three. Journal.
+
+| Model | Score |
+|---|---|
+| GPT | 0.91 |
+";
+        let s = structure(text, true, &Targets::default());
+        let list = s.references.known().unwrap();
+        assert_eq!(
+            (list.first_line, list.last_line, list.split),
+            (3, 8, "blank")
+        );
+        assert_eq!(
+            entry_spans(list),
+            vec![(3, 3, None, None), (4, 4, None, None), (8, 8, None, None)]
+        );
+    }
+
+    #[test]
+    fn a_doi_divided_by_a_line_end_matches_and_a_paper_title_beats_its_venue() {
+        let records = [
+            entry(
+                "6",
+                None,
+                None,
+                "Proceedings of the Synthetic Conference on Widgets and Markets",
+            ),
+            entry("1", Some("10.18653/v1/2023.acl-long.137"), None, "x"),
+            entry("2", Some("10.1234/synthetic.5"), None, "y"),
+            entry("3", Some("10.1234/a-b"), None, "z"),
+            entry(
+                "34",
+                None,
+                None,
+                "MEMERAG: A Multilingual Benchmark for Synthetic Widgets",
+            ),
+        ];
+        let text = "References
+[1] A. Smith. 2023. Widgets. In Proceedings of ACL. https://doi.org/10.18653/
+v1/2023.acl-long.137.
+[2] B. Jones. 2024. Hyphen. https://doi.org/10.1234/syn-
+thetic.5
+[3] C. Lee. 2022. Kept. https://doi.org/10.1234/a-
+b.
+[4] D. Cruz. 2025. MEMERAG: A multilingual benchmark for synthetic
+widgets. In Proceedings of the Synthetic Conference on Widgets and
+Markets, pages 1–9.
+";
+        let s = structure(text, false, &Targets::new(&records, &[]));
+        let list = s.references.known().unwrap();
+        assert_eq!(
+            entry_spans(list),
+            vec![
+                (2, 3, Some("1"), Some("doi")),
+                (4, 5, Some("2"), Some("doi")),
+                (6, 7, Some("3"), Some("doi")),
+                (8, 10, Some("34"), Some("title")),
+            ]
         );
     }
 }
