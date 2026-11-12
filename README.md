@@ -313,7 +313,7 @@ The sidecar holds, as raw line ranges of the text:
 
 - the pages, from the form feeds the extractor wrote, or a Markdown text's `<!-- page -->` lines;
 - the section spans: `front`, `abstract`, `body`, `references`, `appendix` or `unknown`, each with its heading and level;
-- the reference list, divided into references where they are numbered or separated by blank lines;
+- the reference list, divided into references where they are numbered, separated by blank lines or Markdown list items, or start with authors' names and hold a year;
 - for each reference, the registry key it cites, matched by DOI, arXiv id or normalised title.
 
 The command reads only the text and the registry. It makes no network request, never changes a text, and works for a text of any `extraction` value and for Markdown texts. What detection does not find is `unknown` or a warning, never a guess. It prints one line per text, then the text's warnings, then the counts of texts with a reference list and with an abstract span. `--dry-run` prints the same and writes nothing. A sidecar is rewritten only when its content changes. It records its text's sha256; `registry check` reports `derivative-stale` when the text no longer has it.
