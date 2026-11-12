@@ -9,14 +9,16 @@ use sha2::{Digest, Sha256};
 const TEXT: &str = "A Synthetic Title\n\nAbstract\nWe train a parser on the Penn Treebank and reach an F1\nof 92.4 on section 23, which beats the baseline by 1.2 points.\nThe method fails on long sentences with more than forty words.\n";
 
 /// Stands in for `claude`: records its arguments, working directory and
-/// standard input, then prints `reply.json`.
+/// standard input, then prints `reply.json` and exits with the code in
+/// `exit-code`, else 0.
 const STUB: &str = r#"dir=$(dirname "$0")
 for a in "$@"; do printf '%s\n' "$a"; done > "$dir/args"
 pwd > "$dir/cwd"
 ls -A | wc -l | tr -d ' ' > "$dir/cwd-entries"
 cat > "$dir/stdin"
 echo call >> "$dir/calls"
-cat "$dir/reply.json"
+cat "$dir/reply.json" 2>/dev/null
+exit "$(cat "$dir/exit-code" 2>/dev/null || echo 0)"
 "#;
 
 fn sha256(bytes: &[u8]) -> String {
@@ -285,4 +287,64 @@ fn a_stale_docling_card_is_made_again_from_the_docling_text() {
         found[0].contains("papers card --key 4 --force --docling"),
         "{found:?}"
     );
+}
+
+#[test]
+fn preflight_runs_the_card_flags_through_the_command_and_fails_on_its_exit() {
+    let p = project("preflight", true);
+    let out = p.papers(&["card", "--preflight"]);
+    assert_eq!(out.status.code(), Some(0), "{}", shown(&out));
+    assert!(shown(&out).contains("preflight passed"), "{}", shown(&out));
+    let args: Vec<String> = p.read("args").unwrap().lines().map(String::from).collect();
+    assert_eq!(args[..5], ["preflight", "--cap", "1500", "-p", "--model"]);
+    let prompt = &args[args
+        .iter()
+        .position(|a| a == "--system-prompt-file")
+        .unwrap()
+        + 1];
+    assert!(prompt.contains("card-prompt-"), "{prompt}");
+    for flag in [
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--json-schema",
+    ] {
+        assert!(args.iter().any(|a| a == flag), "{flag} missing: {args:?}");
+    }
+    assert!(p.read("cwd").unwrap().trim().ends_with("card-cwd"));
+    assert_eq!(p.read("cwd-entries").unwrap().trim(), "0");
+    assert_eq!(
+        p.read("stdin").unwrap(),
+        "",
+        "the preflight sends its own canary"
+    );
+    assert!(p.read("sources/cards/4.json").is_none());
+
+    std::fs::write(p.dir.join("exit-code"), "3").unwrap();
+    let out = p.papers(&["card", "--preflight", "--cap", "777"]);
+    assert_eq!(out.status.code(), Some(1), "{}", shown(&out));
+    assert!(shown(&out).contains("exit 3"), "{}", shown(&out));
+    assert!(shown(&out).contains("start no cards"), "{}", shown(&out));
+    assert_eq!(p.read("args").unwrap().lines().nth(2), Some("777"));
+    assert_eq!(p.calls(), 2);
+}
+
+#[test]
+fn preflight_takes_no_key_and_cap_needs_preflight() {
+    let p = project("preflight-args", true);
+    let out = p.papers(&["card", "--preflight", "--key", "4"]);
+    assert_eq!(out.status.code(), Some(2), "{}", shown(&out));
+    let out = p.papers(&["card", "--key", "4", "--cap", "10"]);
+    assert_eq!(out.status.code(), Some(2), "{}", shown(&out));
+    let out = p.papers(&["card"]);
+    assert_eq!(out.status.code(), Some(2), "{}", shown(&out));
+    assert_eq!(p.calls(), 0);
+}
+
+#[test]
+fn preflight_needs_cards_switched_on() {
+    let p = project("preflight-off", false);
+    let out = p.papers(&["card", "--preflight"]);
+    assert_eq!(out.status.code(), Some(2), "{}", shown(&out));
+    assert!(shown(&out).contains("cards = true"), "{}", shown(&out));
+    assert_eq!(p.calls(), 0);
 }

@@ -285,8 +285,8 @@ enum Command {
     /// fault). Off unless `[papers] cards = true`.
     Card {
         /// The registry key.
-        #[arg(long)]
-        key: String,
+        #[arg(long, required_unless_present = "preflight")]
+        key: Option<String>,
         /// Make it from the entry's Docling text (default: its first other text).
         #[arg(long)]
         docling: bool,
@@ -296,6 +296,15 @@ enum Command {
         /// Only check a saved raw reply: no call, nothing stored.
         #[arg(long, value_name = "FILE")]
         reply: Option<PathBuf>,
+        /// Make no card: run `<[papers] claude> preflight --cap <cap>` with the
+        /// card call's flags, for `claude-experiment`, and exit 1 when it
+        /// fails. Run it before a batch of cards.
+        #[arg(long, conflicts_with_all = ["key", "docling", "force", "reply"])]
+        preflight: bool,
+        /// The preflight's cap on a request's prompt tokens (default 1500).
+        // `requires = "preflight"` would pass: a flag counts as present at false.
+        #[arg(long, conflicts_with = "key")]
+        cap: Option<u32>,
     },
     /// Build or check the reference registry (rf.reference/1 JSONL), attach a
     /// text to an entry, or fill abstracts.
@@ -1066,11 +1075,23 @@ fn main() -> ExitCode {
             dry_run,
         } => structure_cmd(&config, &targets, all, dry_run),
         Command::Card {
+            preflight: true,
+            cap,
+            ..
+        } => card::preflight(&config, cap.unwrap_or(card::PREFLIGHT_CAP)),
+        Command::Card {
             key,
             docling,
             force,
             reply,
-        } => card::run(&config, &key, docling, force, reply.as_deref()),
+            ..
+        } => card::run(
+            &config,
+            &key.expect("clap requires --key without --preflight"),
+            docling,
+            force,
+            reply.as_deref(),
+        ),
         Command::Registry { action } => registry(config, action, &http),
         Command::Config { json } => {
             show_config(&config, json);
