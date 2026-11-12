@@ -534,3 +534,45 @@ fn attach_accepts_a_linked_sources_directory_in_a_linked_project() {
     std::fs::remove_dir_all(&store).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn attach_keeps_the_extractor_and_pdf_sha256_of_a_docling_text() {
+    let dir = project("docling");
+    let md = "# A Synthetic Title\n\nBody.\n";
+    std::fs::write(dir.join("texts/1.docling.md"), md).unwrap();
+    let sha = {
+        use sha2::Digest;
+        sha2::Sha256::digest(md.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    // The manifest `read --extraction docling` leaves without --record.
+    let manifest = format!(
+        r#"{{"path":"texts/1.docling.md","sha256":"{sha}","origin":"https://arxiv.org/pdf/2601.00001v1","retrieved":"2026-11-07T10:00:00Z","extraction":"docling","pdf_sha256":"ab12","extractor":"docling 2.150.0"}}"#
+    );
+    std::fs::write(dir.join("texts/1.docling.json"), format!("{manifest}\n")).unwrap();
+    let out = attach(
+        &dir,
+        &["--text", "texts/1.docling.md", "--extraction", "docling"],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("manifest: "), "{stdout}");
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("texts/1.docling.json")).unwrap())
+            .unwrap();
+    let t = texts(&dir);
+    for record in [&t[0], &written] {
+        assert_eq!(record["extractor"], "docling 2.150.0", "{record}");
+        assert_eq!(record["pdf_sha256"], "ab12", "{record}");
+        assert_eq!(record["extraction"], "docling", "{record}");
+        assert_eq!(record["retrieved"], "2026-11-07T10:00:00Z", "{record}");
+        assert_eq!(record["origin"], "https://arxiv.org/pdf/2601.00001v1");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
