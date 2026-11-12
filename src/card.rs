@@ -265,28 +265,47 @@ const NOT_NAMES: &[&str] = &[
 const METRICS: &[&str] = &[
     "acc",
     "accuracy",
+    "ap",
     "auc",
+    "auprc",
+    "auroc",
     "bertscore",
     "bleu",
     "cer",
     "chrf",
     "cider",
+    "comet",
+    "elo",
     "em",
     "f-measure",
     "f-score",
+    "fid",
     "hits",
+    "iou",
+    "kappa",
+    "kendall",
+    "lpips",
+    "mae",
     "map",
     "match",
     "meteor",
+    "miou",
     "mrr",
+    "mse",
     "ndcg",
+    "pearson",
     "perplexity",
     "ppl",
     "precision",
+    "psnr",
     "recall",
+    "rmse",
     "rouge",
+    "sacrebleu",
     "score",
+    "spearman",
     "spice",
+    "ssim",
     "ter",
     "wer",
 ];
@@ -371,7 +390,7 @@ fn name_phrase(chars: &[char], t: &numbers::NumTok) -> Option<String> {
         return None;
     }
     let lower: String = word.iter().flat_map(|c| c.to_lowercase()).collect();
-    let metric = |w: &str| METRICS.contains(&w.trim_end_matches(['/', '(', '-', '_']));
+    let metric = |w: &str| METRICS.contains(&w.trim_end_matches(['/', '(', '-', '_', '+']));
     if metric(&lower) || lower.split_once('-').is_some_and(|(head, _)| metric(head)) {
         return None;
     }
@@ -833,7 +852,8 @@ mod tests {
             "We reach BLEU 28.4 and BLEU 28 with Recall 90%.\n\
              The zero-shot 45 score uses N=128 and US$5 per run.\n\
              Accuracy: 81 on the final stage. 3 runs failed.\n\
-             ROUGE 41, ROUGE-L 39, Accuracy 81 and Exact Match 45 on S&P 500.\n"
+             ROUGE 41, ROUGE-L 39, Accuracy 81 and Exact Match 45 on S&P 500.\n\
+             BLEU/28, chrF++ 50 and PSNR 30.\n"
                 .to_owned(),
         );
         assert_eq!(
@@ -848,11 +868,11 @@ mod tests {
         // text writes the phrase so.
         assert_eq!(
             missing_numbers(
-                "BLEU 28, ROUGE 41, ROUGE-L 39, Accuracy 81, Exact Match 45",
+                "BLEU 28, ROUGE 41, ROUGE-L 39, Accuracy 81, Exact Match 45, BLEU/28, chrF++ 50, PSNR 30",
                 quote,
                 &text
             ),
-            vec!["28", "41", "39", "81", "45"]
+            vec!["28", "41", "39", "81", "45", "28", "50", "30"]
         );
         assert_eq!(
             missing_numbers("S&P 500", quote, &text),
