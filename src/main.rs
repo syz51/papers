@@ -2629,6 +2629,7 @@ fn read_from(
         );
     }
     let sidecar = out_dir.join(format!("{name}.json"));
+    let txt_file = out_dir.join(format!("{name}.txt"));
     // The sidecar first: it keeps the download time, which a text
     // attached by hand to the entry does not have.
     let mut recorded: Vec<registry::Text> = Vec::new();
@@ -2673,7 +2674,7 @@ fn read_from(
                 "already have {} (sha256 matches); not downloading (--force to fetch again)",
                 t.path
             );
-            return finish_read(config, o, entry.as_ref(), &sidecar, t);
+            return finish_text(config, o, entry.as_ref(), &sidecar, &txt_file, t, false);
         }
         let pdf_path = out_dir.join(format!("{name}.pdf"));
         let pdf = match (t.pdf_sha256(), std::fs::read(&pdf_path)) {
@@ -2745,7 +2746,7 @@ fn read_from(
     if let Some((bytes, t)) = local {
         // The PDF's origin and download time stay those recorded for it.
         return match extract_pdf(&target, &bytes, t.origin, t.retrieved)? {
-            Saved::Text(t) => finish_read(config, o, entry.as_ref(), &sidecar, t),
+            Saved::Text(t) => finish_text(config, o, entry.as_ref(), &sidecar, &txt_file, t, true),
             Saved::PdfOnly => Ok(false),
         };
     }
@@ -2759,35 +2760,15 @@ fn read_from(
     };
     let saved = download(http, &input, reference.as_ref(), target, &mut browse)?;
     match saved {
-        Some(Saved::Text(t)) => finish_read(config, o, entry.as_ref(), &sidecar, t),
+        Some(Saved::Text(t)) => {
+            finish_text(config, o, entry.as_ref(), &sidecar, &txt_file, t, true)
+        }
         Some(Saved::PdfOnly) => Ok(false),
         None => {
             println!("no candidate yielded a PDF; open the landing page in a browser");
             Ok(false)
         }
     }
-}
-
-/// Writes the manifest sidecar, records the text when asked, and prints the manifest.
-fn finish_read(
-    config: &config::Config,
-    o: &ReadOptions,
-    entry: Option<&registry::Reference>,
-    sidecar: &Path,
-    text: registry::Text,
-) -> Result<bool, String> {
-    let line = serde_json::to_string(&text).expect("texts serialize");
-    std::fs::write(sidecar, format!("{line}\n"))
-        .map_err(|e| format!("{}: {e}", sidecar.display()))?;
-    let saved = text.clone();
-    if o.record
-        && let Some(entry) = entry
-    {
-        record_read(config, entry, text)?;
-    }
-    structure_after_read(config, entry, saved);
-    println!("{line}");
-    Ok(true)
 }
 
 /// Records a read text in `entry`, applied to the registry as it is now, not
@@ -2888,7 +2869,7 @@ fn read_docling(
             "already have {} (sha256 matches); not converting (--force to convert again)",
             t.path
         );
-        return finish_docling(
+        return finish_text(
             config,
             o,
             entry.as_ref(),
@@ -2963,7 +2944,7 @@ fn read_docling(
     };
     match saved {
         Some(Saved::Text(t)) => {
-            finish_docling(config, o, entry.as_ref(), &manifest, &md_path, t, true)
+            finish_text(config, o, entry.as_ref(), &manifest, &md_path, t, true)
         }
         Some(Saved::PdfOnly) => Ok(false),
         None => {
@@ -2973,12 +2954,12 @@ fn read_docling(
     }
 }
 
-/// Records a Docling text, writes its manifest, then moves the staged text
-/// into place (when `staged`): a reader never finds the text without its
-/// record. When a step fails, the steps before it are undone: the staged text
-/// is removed, the old manifest is put back, and the entry gets back the
-/// Docling text it had. The structure sidecar comes last.
-fn finish_docling(
+/// Records a read text, writes its manifest, then moves the staged text
+/// (see [`derivative::pending`]) into place when `staged`: a reader never
+/// finds the text without its record. When a step fails, the steps before it
+/// are undone: the staged text is removed, the old manifest is put back, and
+/// the entry gets back the text it had. The structure sidecar comes last.
+fn finish_text(
     config: &config::Config,
     o: &ReadOptions,
     entry: Option<&registry::Reference>,
@@ -3019,14 +3000,15 @@ fn finish_docling(
             undo.extend(restored.err());
         }
         if let Some(entry) = recorded {
-            undo.extend(unrecord_docling(config, entry, &text).err());
+            undo.extend(unrecord_text(config, entry, &text).err());
         }
         return Err(match undo.is_empty() {
             true => e,
             false => format!("{e}; undoing it also failed: {}", undo.join("; ")),
         });
     }
-    if staged {
+    // A plain or layout text's path was printed when it was extracted.
+    if staged && is_docling(&text) {
         println!("text: {}", config.display(md_path));
     }
     structure_after_read(config, entry, text);
@@ -3034,14 +3016,19 @@ fn finish_docling(
     Ok(true)
 }
 
-/// Takes the Docling text `text` out of `entry` in the registry and puts back
-/// the Docling text the entry had when `read` started, if any.
-fn unrecord_docling(
+/// Takes the read text `text` out of `entry` in the registry and puts back
+/// the text it replaced when `read` started, if any (see `record_text`).
+fn unrecord_text(
     config: &config::Config,
     entry: &registry::Reference,
     text: &registry::Text,
 ) -> Result<(), String> {
-    let previous = entry.texts.iter().find(|t| is_docling(t)).cloned();
+    let docling = is_docling(text);
+    let previous = entry
+        .texts
+        .iter()
+        .find(|t| t.path == text.path || (docling && is_docling(t)))
+        .cloned();
     registry::update(&config.registry, |records| {
         if let Some(r) = records.iter_mut().find(|r| r.key == entry.key)
             && let Some(at) = r
@@ -3353,8 +3340,8 @@ fn try_candidates(
     Ok(None)
 }
 
-/// Writes `<dir>/<name>.pdf` and its extracted text `<dir>/<name>.txt`; an
-/// unchanged PDF is not rewritten.
+/// Writes `<dir>/<name>.pdf` and stages its extracted text `<dir>/<name>.txt`
+/// (see [`extract_pdf`]); an unchanged PDF is not rewritten.
 fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String> {
     let (dir, name) = (&target.dir, &target.name);
     debug_assert!(!name.contains(['/', '\\']) && !name.starts_with('.'));
@@ -3420,8 +3407,8 @@ fn docling_text(
     Ok(Saved::Text(saved))
 }
 
-/// Extracts the text of `<dir>/<name>.pdf`, whose bytes are `body`, into
-/// `<dir>/<name>.txt`, and returns its record with the PDF's `origin`, download
+/// Extracts the text of `<dir>/<name>.pdf`, whose bytes are `body`, into the
+/// staged `<dir>/<name>.txt` (see [`derivative::pending`]), and returns its record with the PDF's `origin`, download
 /// time and sha256.
 fn extract_pdf(
     target: &Target,
@@ -3472,7 +3459,8 @@ fn extract_pdf(
     if let Some(note) = note {
         println!("text: {note}");
     }
-    std::fs::write(&txt_path, &text).map_err(|e| format!("{}: {e}", txt_path.display()))?;
+    // Staged: the caller moves it into place once its record is written.
+    derivative::stage(&txt_path, text.as_bytes())?;
     println!(
         "text: {} ({} words, extracted by {extractor})",
         txt_path.display(),
@@ -4742,7 +4730,8 @@ mod tests {
             panic!("expected a text");
         };
         assert_eq!(text.extraction(), Ok(Some(registry::Extraction::Layout)));
-        let written = std::fs::read_to_string(dir.join("lay.txt")).unwrap();
+        assert!(!dir.join("lay.txt").exists(), "staged until it is recorded");
+        let written = std::fs::read_to_string(derivative::pending(&dir.join("lay.txt"))).unwrap();
         // The fake echoes its arguments: "text of $3 with $1 $2 $4".
         assert!(
             written.starts_with("text of UTF-8 with -layout -enc "),
@@ -4750,7 +4739,7 @@ mod tests {
         );
         assert_eq!(text.sha256, http::sha256_hex(written.as_bytes()));
 
-        std::fs::remove_file(dir.join("lay.txt")).unwrap();
+        derivative::discard(&dir.join("lay.txt"));
         let absent = pdf::tests::fake_program("absent");
         let saved = save_pdf(
             &target(&absent),
@@ -4759,6 +4748,92 @@ mod tests {
         );
         assert!(matches!(saved, Ok(Saved::PdfOnly)));
         assert!(!dir.join("lay.txt").exists(), "no pdf-extract fallback");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A plain text is staged, then recorded, then moved into place. When
+    /// `read` stops before its record is written, no text is left without one.
+    #[test]
+    fn a_read_text_appears_only_after_its_record() {
+        let dir = std::env::temp_dir().join(format!("papers-text-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = config::Config::load(None, &dir).unwrap();
+        let target = Target {
+            config: &config,
+            dir: dir.join("texts"),
+            name: "5".into(),
+            title: String::new(),
+            extraction: registry::Extraction::Plain,
+            pdftotext: "papers-no-such-pdftotext",
+            docling: &[],
+        };
+        let pdf = tiny_pdf("Synthetic Order Paper");
+        let Ok(Saved::Text(text)) = save_pdf(&target, pdf.as_bytes(), "https://example.org/5.pdf")
+        else {
+            panic!("expected a text");
+        };
+        let txt = dir.join("texts/5.txt");
+        let sidecar = dir.join("texts/5.json");
+        assert!(!txt.exists(), "the text waits for its record");
+        assert!(derivative::pending(&txt).exists());
+        let entry = registry::Reference::new("5".into());
+        let options = ReadOptions {
+            reference: None,
+            key: Some("5".into()),
+            out: None,
+            record: true,
+            force: false,
+            extraction: None,
+            browser: false,
+        };
+        // The registry cannot be written: read stops between the writes.
+        std::fs::write(&config.registry, "not json\n").unwrap();
+        let stopped = finish_text(
+            &config,
+            &options,
+            Some(&entry),
+            &sidecar,
+            &txt,
+            text.clone(),
+            true,
+        );
+        assert!(stopped.is_err());
+        assert!(!txt.exists(), "no text without a record");
+        assert!(
+            !derivative::pending(&txt).exists(),
+            "the staged text is removed"
+        );
+        assert!(!sidecar.exists());
+
+        let Ok(Saved::Text(text)) = save_pdf(&target, pdf.as_bytes(), "https://example.org/5.pdf")
+        else {
+            panic!("expected a text");
+        };
+        std::fs::write(
+            &config.registry,
+            registry::render(std::slice::from_ref(&entry)),
+        )
+        .unwrap();
+        assert_eq!(
+            finish_text(
+                &config,
+                &options,
+                Some(&entry),
+                &sidecar,
+                &txt,
+                text.clone(),
+                true
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            http::sha256_hex(&std::fs::read(&txt).unwrap()),
+            text.sha256,
+            "moved into place"
+        );
+        let recorded = registry::load(&config.registry).unwrap().unwrap();
+        assert_eq!(recorded[0].texts[0].path, text.path);
+        assert!(sidecar.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

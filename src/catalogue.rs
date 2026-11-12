@@ -849,20 +849,46 @@ static EXPLICIT_DEPTH: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid built-in pattern")
 });
 
+// `Inspection depth: unknown`, then the reason, if any: `unknown. Reason: …`.
+re!(STATED_UNKNOWN, r"(?i)^unknown\b[\s*_`.;,:()\-–—]*(.*)$");
+
 /// The inspection depth. A line `Inspection depth: <level>` naming one
 /// `rf.reference/1` level states it outright and wins over prose; a one-word
 /// value outside the vocabulary, or two different explicit levels, is reported
 /// and leaves the depth unknown. A longer value is read as prose. Without an explicit line, it is the level when the
 /// section's `Inspection:` lines name exactly one in plain words (negated
 /// mentions such as "not read in full" are ignored).
+///
+/// `Inspection depth: unknown` followed by a reason states that the depth is
+/// not known: the depth is `None` and nothing is reported. Any other entry left
+/// without a depth, and not reported as `depth-unparsed`, is reported as
+/// `depth-missing`, as is `unknown` without a reason.
 fn depth(
     section: &Section,
     issue: &mut impl FnMut(&'static str, Severity, usize, String),
 ) -> Option<String> {
     let mut explicit = BTreeMap::new();
     let mut levels = BTreeSet::new();
+    // Set once the missing depth is accounted for: stated unknown, or reported.
+    let mut explained = false;
     for &(n, line) in &section.body {
         let line = line.trim();
+        if let Some(c) = EXPLICIT_DEPTH.captures(line)
+            && let Some(u) = STATED_UNKNOWN.captures(c[1].trim_start_matches(['*', '_', '`']))
+        {
+            if u[1].trim().is_empty() {
+                issue(
+                    "depth-missing",
+                    Severity::Warn,
+                    n,
+                    "inspection depth is unknown but no reason is given; \
+                     write `Inspection depth: unknown. Reason: …`"
+                        .to_owned(),
+                );
+            }
+            explained = true;
+            continue;
+        }
         // A one-word value is a stated level; longer text is prose, read below.
         if let Some(c) = EXPLICIT_DEPTH.captures(line)
             && let stated = c[1]
@@ -875,16 +901,19 @@ fn depth(
                 Some(level) => {
                     explicit.entry(*level).or_insert(n);
                 }
-                None => issue(
-                    "depth-unparsed",
-                    Severity::Warn,
-                    n,
-                    format!(
-                        "inspection depth {:?} is not one of {}",
-                        clip(&c[1]),
-                        DEPTHS.join(", ")
-                    ),
-                ),
+                None => {
+                    explained = true;
+                    issue(
+                        "depth-unparsed",
+                        Severity::Warn,
+                        n,
+                        format!(
+                            "inspection depth {:?} is not one of {}",
+                            clip(&c[1]),
+                            DEPTHS.join(", ")
+                        ),
+                    )
+                }
             }
             continue;
         }
@@ -922,9 +951,22 @@ fn depth(
         }
         return explicit.keys().next().map(|l| (*l).to_owned());
     }
-    (levels.len() == 1)
+    let level = (levels.len() == 1)
         .then(|| levels.first().map(|l| (*l).to_owned()))
-        .flatten()
+        .flatten();
+    if level.is_none() && !explained {
+        issue(
+            "depth-missing",
+            Severity::Warn,
+            section.heading_line,
+            format!(
+                "no inspection depth: write `Inspection depth: <level>` with one of {}, \
+                 or `Inspection depth: unknown. Reason: …`",
+                DEPTHS.join(", ")
+            ),
+        );
+    }
+    level
 }
 
 /// The work's type when the entry states it in plain words; `paper` for an
@@ -1108,6 +1150,50 @@ Inspection depth: skimmed.
     }
 
     #[test]
+    fn a_depth_left_unstated_is_reported_unless_unknown_has_a_reason() {
+        let catalogue = "\
+## Reference 1
+
+[1] Doe, Jane. **Unknown With A Reason**. Example Venue, 2025. [Original](https://example.org/1).
+
+Inspection depth: unknown. Reason (12 November 2026): only a historical record is kept.
+
+## Reference 2
+
+[2] Doe, Jane. **Unknown Without One**. Example Venue, 2025. [Original](https://example.org/2).
+
+**Inspection depth:** unknown.
+
+## Reference 3
+
+[3] Doe, Jane. **No Depth Line**. Example Venue, 2025. [Original](https://example.org/3).
+
+Inspection: the page was opened.
+
+## Reference 4
+
+[4] Doe, Jane. **A Stated Level**. Example Venue, 2025. [Original](https://example.org/4).
+
+Inspection depth: abstract.
+";
+        let p = parse(catalogue, "docs/references.md");
+        for key in ["1", "2", "3"] {
+            assert_eq!(get(&p, key).depth, None, "key {key}");
+        }
+        assert_eq!(get(&p, "4").depth.as_deref(), Some("abstract"));
+        let reported: Vec<(&str, &str, usize)> = p
+            .issues
+            .iter()
+            .map(|i| (i.rule, i.key.as_str(), i.line))
+            .collect();
+        assert_eq!(
+            reported,
+            [("depth-missing", "2", 11), ("depth-missing", "3", 13)],
+            "an unknown depth needs its reason; a missing line is reported at the heading"
+        );
+    }
+
+    #[test]
     fn only_a_depth_label_is_explicit_and_its_markup_is_tolerated() {
         let catalogue = "\
 ## Reference 1
@@ -1206,7 +1292,7 @@ Inspection depth: original page fetched; abstract only.
         let text = "## Reference 1\n\n[1] **A**.\n\n## Reference 1\n\n[1] **B**.\n";
         let p = parse(text, "r.md");
         assert_eq!(p.records.len(), 1);
-        assert_eq!(p.issues[0].rule, "duplicate-key");
+        assert!(p.issues.iter().any(|i| i.rule == "duplicate-key"));
     }
 
     #[test]
