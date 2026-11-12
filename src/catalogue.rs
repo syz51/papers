@@ -863,8 +863,12 @@ static EXPLICIT_DEPTH: LazyLock<Regex> = LazyLock::new(|| {
 
 // `Inspection depth: unknown`, then the reason, if any: `unknown. Reason: …`.
 re!(STATED_UNKNOWN, r"(?i)^unknown\b[\s*_`.;,:()\-–—]*(.*)$");
-// The reason's label, then its text.
-re!(REASON, r"(?i)^reason\b[\s*_`.;,:()\-–—]*(.*)$");
+// The reason's label, an optional note such as its date in parentheses, then
+// its text: `Reason (12 November 2026): …`.
+re!(
+    REASON,
+    r"(?i)^reason\b\s*(?:\([^)]*\))?[\s*_`.;,:\-–—]*(.*)$"
+);
 
 /// The inspection depth. A line `Inspection depth: <level>` naming one
 /// `rf.reference/1` level states it outright and wins over prose; a one-word
@@ -901,7 +905,8 @@ fn depth(
                 _ if rest.is_empty() => {
                     bare_unknown.get_or_insert(n);
                 }
-                Some(r) if r[1].trim().is_empty() => {
+                // No word after the label, as in `Reason:` or a copied `Reason: …`.
+                Some(r) if !r[1].chars().any(char::is_alphanumeric) => {
                     bare_unknown.get_or_insert(n);
                 }
                 Some(_) => explained = true,
@@ -1253,9 +1258,21 @@ Inspection depth: unknown. Reason:
 [10] Doe, Jane. **A Reason After A Dash**. Example Venue, 2025. [Original](https://example.org/10).
 
 **Inspection depth:** Unknown — reason: the publisher page is paywalled.
+
+## Reference 11
+
+[11] Doe, Jane. **A Dated Empty Reason**. Example Venue, 2025. [Original](https://example.org/11).
+
+Inspection depth: unknown. Reason (12 November 2026):
+
+## Reference 12
+
+[12] Doe, Jane. **A Copied Placeholder Reason**. Example Venue, 2025. [Original](https://example.org/12).
+
+Inspection depth: unknown. Reason: …
 ";
         let p = parse(catalogue, "docs/references.md");
-        for key in ["1", "2", "3", "5", "7", "9", "10"] {
+        for key in ["1", "2", "3", "5", "7", "9", "10", "11", "12"] {
             assert_eq!(get(&p, key).depth, None, "key {key}");
         }
         assert_eq!(get(&p, "4").depth.as_deref(), Some("abstract"));
@@ -1275,6 +1292,8 @@ Inspection depth: unknown. Reason:
                 ("depth-unparsed", "5", 29),
                 ("depth-unparsed", "8", 48),
                 ("depth-missing", "9", 55),
+                ("depth-missing", "11", 67),
+                ("depth-missing", "12", 73),
             ],
             "an unknown depth needs its reason or a level; prose after unknown is reported \
              where it is written; a missing line is reported at the heading; an alias needs \
