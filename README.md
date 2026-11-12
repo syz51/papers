@@ -313,7 +313,7 @@ The sidecar holds, as raw line ranges of the text:
 
 - the pages, from the form feeds the extractor wrote, or a Markdown text's `<!-- page -->` lines;
 - the section spans: `front`, `abstract`, `body`, `references`, `appendix` or `unknown`, each with its heading and level;
-- the reference list, divided into references where they are numbered, separated by blank lines or Markdown list items, or start with authors' names and hold a year;
+- the reference list, divided into references where they are numbered, separated by blank lines or Markdown list items, or start with authors' names and hold a year. A long paragraph of a blank-line list also divides at authors' names;
 - for each reference, the registry key it cites, matched by DOI, arXiv id or normalised title;
 - in a Markdown text, each pipe table with its header row's line and column labels. A plain text gives `unknown`.
 

@@ -138,7 +138,7 @@ The file is one JSON object, pretty-printed, with a final LF.
 | `sections[].level` | 1 for a top heading, 2 for `2.1`, 3 for `2.1.1`. 0 for a span without a heading. In a Markdown text, a heading with a section number has the number's depth, and any other heading has its count of `#`. |
 | `references` | The reference list, or the string `unknown` when no reference heading is detected. |
 | `references.first_line`, `last_line` | The list without its heading line and without blank lines or page marks at its ends. It lies inside the `references` section. It ends at its last reference: see [Where the list ends](#where-the-list-ends). |
-| `references.split` | How the list divides into references: `numbered` (`[1]`, `- [1]` or `1.` marks), `blank` (blank lines between references, at least half of them with a year; in a Markdown text, each list item also starts a reference), `author-year` (no marks and no blank lines; see [Author-year lists](#author-year-lists)) or `unknown`. |
+| `references.split` | How the list divides into references: `numbered` (`[1]`, `- [1]` or `1.` marks), `blank` (blank lines between references, at least half of them with a year; in a Markdown text, each list item also starts a reference; see [Long paragraphs](#long-paragraphs-of-a-blank-line-list)), `author-year` (no marks and no blank lines; see [Author-year lists](#author-year-lists)) or `unknown`. |
 | `references.entries` | With `numbered`, `blank` or `author-year`: every reference in order, each with its line range. With `unknown`: only the matches, each with the lines of the id or title that matched. |
 | `entries[].key` | The registry key the reference cites. `null` when no entry matches. |
 | `entries[].by` | What matched: `doi`, `arxiv` or `title`. `null` when `key` is `null`. |
@@ -184,6 +184,13 @@ A list without `[n]` or `n.` marks and without blank lines between references sp
 - A line of digits only, such as a page number, and a page mark are skipped.
 
 The split is `author-year` only when the first line begins with a name, there are 3 references or more, and they average at most 8 lines. Otherwise the list is `unknown`.
+
+### Long paragraphs of a blank-line list
+
+Some lists stop putting blank lines between references partway through. In a `blank` list, a paragraph splits again when it has at least twice the median number of filled lines. It splits at each line that reads as a name after a line that ends a reference, as in an author-year list. A split needs a year in the parts on both sides. These lines are not split points:
+
+- a line after a line that ends in an initial, such as `Noah A.`: the author list goes on;
+- a line that starts with a month, such as `December 2021.`: it ends the reference before it.
 
 ### Where the list ends
 

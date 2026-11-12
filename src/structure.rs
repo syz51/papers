@@ -1048,6 +1048,11 @@ static YEAR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|[^\d/:.])(?:19|20)\d{2}[a-z]?(?:$|[^\d.]|\.(?:$|\D))").unwrap()
 });
 /// A Markdown list item.
+static INITIAL_END: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|\s)\p{Lu}\.\s*$").unwrap());
+static MONTH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*(?:January|February|March|April|May|June|July|August|September|October|November|December)\b").unwrap()
+});
 static ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*[-*+]\s").unwrap());
 static ARXIV: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:arxiv:\s*|arxiv\.org/(?:abs|pdf)/|abs/)(\d{4}\.\d{4,5}|[a-z\-]+(?:\.[a-z]{2})?/\d{7})")
@@ -1199,9 +1204,53 @@ fn entry_starts(
         && (end + 1 - first) <= paragraphs.len() * 8
         && dated * 2 >= paragraphs.len()
     {
-        return Some(("blank", paragraphs, end));
+        return Some(("blank", resplit(lines, paragraphs, end), end));
     }
     author_year(lines, first, last, markdown).map(|(starts, end)| ("author-year", starts, end))
+}
+
+/// A blank-line list can stop putting blank lines between references partway
+/// through. A paragraph with at least twice the median count of filled lines
+/// then splits at each line that reads as a name (see [`AUTHOR`]) after a line
+/// that ends a reference, when the parts on both sides hold a year. A line
+/// that ends in an initial (`Noah A.`) is inside an author list, and a line
+/// that starts with a month (`December 2021.`) ends a reference.
+fn resplit(lines: &[&str], paragraphs: Vec<usize>, end: usize) -> Vec<usize> {
+    let filled = |i: &usize| listed(lines[*i]) && !is_page_number(lines[*i]);
+    let stop = |n: usize| paragraphs.get(n + 1).map_or(end, |next| next - 1);
+    let sizes: Vec<usize> = (0..paragraphs.len())
+        .map(|n| (paragraphs[n]..=stop(n)).filter(filled).count())
+        .collect();
+    let mut sorted = sizes.clone();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    let mut out = Vec::new();
+    for (n, &start) in paragraphs.iter().enumerate() {
+        out.push(start);
+        if sizes[n] < 2 * median.max(1) {
+            continue;
+        }
+        let rows: Vec<usize> = (start..=stop(n)).filter(filled).collect();
+        let cuts: Vec<usize> = rows
+            .windows(2)
+            .filter(|pair| {
+                ends_reference(lines[pair[0]])
+                    && !INITIAL_END.is_match(lines[pair[0]])
+                    && AUTHOR.is_match(lines[pair[1]])
+                    && !MONTH.is_match(lines[pair[1]])
+            })
+            .map(|pair| pair[1])
+            .collect();
+        let mut from = start;
+        for (c, &cut) in cuts.iter().enumerate() {
+            let to = cuts.get(c + 1).map_or(stop(n), |next| next - 1);
+            if has_year(lines, from, cut - 1) && has_year(lines, cut, to) {
+                out.push(cut);
+                from = cut;
+            }
+        }
+    }
+    out
 }
 
 /// `starts` without its last references that have no year, and the last
@@ -1908,16 +1957,20 @@ Claude 0.95
 - Smith, A. 2024. One. Journal.
 - Jones, B. 2023. Two. Journal.
 
-- Lee, C. 2022. Three. Journal.
+- Lee, C. 2022. Three.
+Journal.
 
-- Kim, D. 2021. Four. Journal.
+- Kim, D. 2021. Four.
+Journal.
 ";
+        // The other references have two lines too, so the first paragraph is
+        // not long enough to be split again at its second name.
         let s = structure(text, false, &Targets::default());
         let list = s.references.known().unwrap();
         assert_eq!(list.split, "blank");
         assert_eq!(
             entry_spans(list),
-            vec![(2, 3, None, None), (5, 5, None, None), (7, 7, None, None)]
+            vec![(2, 3, None, None), (5, 6, None, None), (8, 9, None, None)]
         );
     }
 
@@ -2118,5 +2171,49 @@ Markets, pages 1–9.
         let s = structure(&text, false, &Targets::new(&records, &[]));
         assert!(s.no_heading());
         assert_eq!(s.references, Known::Unknown("unknown"));
+    }
+
+    #[test]
+    fn a_long_paragraph_of_a_blank_line_list_splits_at_names_with_years() {
+        let text = [
+            "Title",
+            "",
+            "References",
+            "",
+            "Ann Lee. 2020. First title.",
+            "Journal One.",
+            "",
+            "Bob Kim. 2021. Second title.",
+            "Journal Two.",
+            "",
+            "Cy Park. 2019. Third title.",
+            "Journal Three.",
+            // Three references without blank lines between them.
+            "Dee Moe and Eve Roe. Fourth title. In Proceedings,",
+            "pages 1-9, 2017.",
+            "Fay Hu, Gil Yu. Fifth title. Journal Five, 2018.",
+            "Gus Li, Hal Wu, and Noah A.",
+            "Smith. 2016. Sixth title. https://arxiv.org/abs/1234.5678,",
+            "December 2016.",
+            "",
+            // One long reference: its name and month lines are not starts.
+            "Ian Fox, Jo Day, Kim Ray, and Lu S.",
+            "Weld, Mo Tan. 2015. A seventh title that runs on.",
+            "Journal Seven. https://example.org/seven,",
+            "December 2015.",
+            "",
+            "Ned Orr. 2014. Eighth title.",
+            "Journal Eight.",
+            "",
+        ]
+        .join("\n");
+        let records = vec![];
+        let s = structure(&text, false, &Targets::new(&records, &[]));
+        let Known::Known(list) = &s.references else {
+            panic!("no list")
+        };
+        assert_eq!(list.split, "blank");
+        let starts: Vec<usize> = list.entries.iter().map(|e| e.first_line).collect();
+        assert_eq!(starts, [5, 8, 11, 13, 15, 16, 20, 25]);
     }
 }
