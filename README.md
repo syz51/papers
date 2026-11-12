@@ -70,7 +70,7 @@ Paths that `papers` prints (a result's `note`, a written stub, and registry `tex
 
 - `papers read <ref>` prints the same block. When a recorded text still has its recorded sha256, `read` prints its path and manifest and downloads nothing. `--force` downloads.
 - `papers search`, `refs` and `cited-by` start each result that the archive holds with `seen: key 87`. They match by DOI, arXiv id, OpenAlex id, URL and normalised title.
-- `papers search` prints the time and result count of the last run of the same query and source, from the search log, on stderr: `papers: searched before: last run 2026-11-07T03:00:00Z, 20 results (1 run of this arxiv query in .research/papers/search.jsonl)`.
+- `papers search` prints the time and result count of the last run of the same search, from the search log, on stderr. The same search has the same source, query and `--since`, and for arXiv the same `--category`: `papers: searched before: last run 2026-11-07T03:00:00Z, 20 results (1 run of this arxiv query in .research/papers/search.jsonl)`.
 
 ### Exit codes
 

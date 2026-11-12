@@ -33,7 +33,8 @@ text: <path>
 - `read <ref>` for a registered paper prints the block first. `read --key <key>` prints the block of that entry first.
 - Without `--key`, when a recorded text has its recorded sha256, `read` prints `already have <path> (sha256 matches); not downloading (--force to fetch again)` and then the text's manifest. It makes no request and writes no file. The exit code is 0.
 - `--force` downloads. `--extraction <mode>` downloads or extracts again when the recorded text has another mode; a text with no recorded mode counts as plain.
-- When no recorded text can be reused, `read` prints a line that names `papers read --key <key> --record` and then reads the paper as before.
+- When no text recorded in the entry answers the run, `read` prints a line that names `papers read --key <key> --record` and then reads the paper as before. With `--force` it prints no such line.
+- A registry that cannot be loaded is reported on stderr and does not stop `read <ref>`.
 - The last stdout line of a successful `read` stays the text's manifest as one JSON object.
 
 ### `search`, `refs` and `cited-by`
@@ -41,4 +42,6 @@ text: <path>
 - A result that the archive (registry or notes) holds starts with the line `seen: key <key>`. With several keys the line is `seen: key <key>, key <key>`, in key order.
 - A result matches by DOI, arXiv id, OpenAlex id, URL or normalised title. A normalised title is lower case, without accents, punctuation or spaces.
 - With `--json`, each result has a `seen` array of keys, empty when the archive does not hold it.
-- When the search log holds a `search` with the same source and the same normalised query, `search` prints this line on stderr before it searches: `papers: searched before: last run <RFC 3339 time>, <n> results (<m> runs of this <source> query in <log path>)`. `<n>` is the number of results the last run logged. A normalised query is lower case, without accents, with single spaces. The search still runs.
+- When the search log holds the same search, `search` prints this line on stderr before it searches: `papers: searched before: last run <RFC 3339 time>, <n> results (<m> runs of this <source> query in <log path>)`. `<n>` is the number of results the last run logged. The search still runs.
+- Two searches are the same when they have the same source and the same normalised query. For arXiv the query is the one sent, which holds the words, `--category` and `--since`. For the other sources it is the words, and `--since` must be equal too. `--max` and `--sort` do not count. A normalised query is lower case, without accents, with single spaces.
+- A search log that cannot be read is reported on stderr and does not stop the search.

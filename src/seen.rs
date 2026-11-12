@@ -89,6 +89,18 @@ impl Index {
         Ok(index)
     }
 
+    /// An index of registry entries only.
+    pub fn of_registry(records: Vec<Reference>) -> Index {
+        let mut index = Index {
+            loaded: true,
+            ..Index::default()
+        };
+        for r in records {
+            index.add_registered(r);
+        }
+        index
+    }
+
     /// The first note (not the registry) filed under an index key such as
     /// `arxiv:<id>` or `doi:<doi>`, by its path.
     pub fn note(&self, key: &str) -> Option<&str> {

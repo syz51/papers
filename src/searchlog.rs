@@ -116,26 +116,47 @@ fn normal_query(query: &str) -> String {
     crate::text::squash(&crate::text::fold(query).to_lowercase())
 }
 
-/// The logged `search` runs with the same source and normalized query; `None`
+/// What makes a logged search the same as this one.
+#[derive(Debug, Clone, Copy)]
+pub struct Same<'a> {
+    pub source: &'a str,
+    /// The user's words.
+    pub query: &'a str,
+    /// For arXiv: the query sent, which also holds `--category` and `--since`.
+    /// It is compared instead of the words.
+    pub arxiv_query: Option<&'a str>,
+    /// For the other sources: `--since`, which must be equal too.
+    pub since: Option<&'a str>,
+}
+
+/// The logged `search` runs that are the same search as `same`: the source,
+/// then for arXiv the normalized query sent, and for the other sources the
+/// normalized words and `--since`. `--max` and `--sort` do not count. `None`
 /// when there are none or no log. Lines that are not log entries are skipped,
 /// as are `fetch`, `refs` and `cited-by` entries, which record a `command`.
-pub fn earlier(path: &Path, source: &str, query: &str) -> Result<Option<Earlier>, String> {
+pub fn earlier(path: &Path, same: &Same) -> Result<Option<Earlier>, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("search log {}: {e}", path.display())),
     };
-    let wanted = normal_query(query);
+    let wanted = normal_query(same.arxiv_query.unwrap_or(same.query));
     let mut last: Option<Earlier> = None;
     for line in text.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
             continue;
         };
         let field = |name: &str| entry.get(name).and_then(Value::as_str);
+        let param = |name: &str| entry.pointer(&format!("/params/{name}"));
+        let logged = match same.arxiv_query {
+            Some(_) => param("arxiv_query").and_then(Value::as_str),
+            None => field("query"),
+        };
         if field("schema") != Some(SCHEMA)
-            || field("source") != Some(source)
-            || entry.pointer("/params/command").is_some()
-            || field("query").map(normal_query).as_deref() != Some(wanted.as_str())
+            || field("source") != Some(same.source)
+            || param("command").is_some()
+            || logged.map(normal_query).as_deref() != Some(wanted.as_str())
+            || (same.arxiv_query.is_none() && param("since").and_then(Value::as_str) != same.since)
         {
             continue;
         }
@@ -243,7 +264,13 @@ mod tests {
     fn earlier_finds_the_last_run_of_the_same_query_and_source() {
         let dir = std::env::temp_dir().join(format!("papers-log-earlier-{}", std::process::id()));
         let path = dir.join("search.jsonl");
-        assert_eq!(earlier(&path, "arxiv", "widgets"), Ok(None));
+        let same = |source: &'static str, query: &'static str| Same {
+            source,
+            query,
+            arxiv_query: None,
+            since: None,
+        };
+        assert_eq!(earlier(&path, &same("openalex", "widgets")), Ok(None));
         std::fs::create_dir_all(&dir).unwrap();
         let line = |at: &str, source: &str, query: &str, params: &str, n: usize| {
             let results = vec![r#"{"id":"x","title":null,"year":null}"#; n].join(",");
@@ -254,7 +281,7 @@ mod tests {
         let log = [
             line(
                 "2026-11-01T00:00:00Z",
-                "arxiv",
+                "openalex",
                 "Synthetic  Widgets",
                 "{}",
                 3,
@@ -262,45 +289,82 @@ mod tests {
             "not json".to_owned(),
             line(
                 "2026-11-03T00:00:00Z",
-                "arxiv",
+                "openalex",
                 "synthetic widgets",
                 "{}",
                 2,
             ),
             line(
                 "2026-11-02T00:00:00Z",
-                "arxiv",
+                "openalex",
                 "synthétic widgets",
                 "{}",
                 5,
             ),
-            line(
-                "2026-11-04T00:00:00Z",
-                "openalex",
-                "synthetic widgets",
-                "{}",
-                7,
-            ),
+            line("2026-11-04T00:00:00Z", "dblp", "synthetic widgets", "{}", 7),
             line(
                 "2026-11-05T00:00:00Z",
-                "arxiv",
+                "openalex",
                 "synthetic widgets",
                 r#"{"command":"fetch"}"#,
                 1,
             ),
-            line("2026-11-06T00:00:00Z", "arxiv", "synthetic widget", "{}", 1),
+            line(
+                "2026-11-06T00:00:00Z",
+                "openalex",
+                "synthetic widget",
+                "{}",
+                1,
+            ),
+            line(
+                "2026-11-07T00:00:00Z",
+                "openalex",
+                "synthetic widgets",
+                r#"{"since":"2024-01-01"}"#,
+                4,
+            ),
+            // arXiv: the query sent decides, not the words.
+            line(
+                "2026-11-08T00:00:00Z",
+                "arxiv",
+                "",
+                r#"{"arxiv_query":"cat:cs.LG"}"#,
+                6,
+            ),
+            line(
+                "2026-11-09T00:00:00Z",
+                "arxiv",
+                "",
+                r#"{"arxiv_query":"cat:q-fin.TR"}"#,
+                8,
+            ),
         ]
         .join("\n");
         std::fs::write(&path, log).unwrap();
         assert_eq!(
-            earlier(&path, "arxiv", " synthetic WIDGETS "),
+            earlier(&path, &same("openalex", " synthetic WIDGETS ")),
             Ok(Some(Earlier {
                 at: "2026-11-03T00:00:00Z".into(),
                 results: 2,
                 runs: 3,
             }))
         );
-        assert_eq!(earlier(&path, "dblp", "synthetic widgets"), Ok(None));
+        assert_eq!(earlier(&path, &same("s2", "synthetic widgets")), Ok(None));
+        let since = Same {
+            since: Some("2024-01-01"),
+            ..same("openalex", "synthetic widgets")
+        };
+        assert_eq!(earlier(&path, &since).unwrap().unwrap().results, 4);
+        let category = Same {
+            arxiv_query: Some("cat:cs.LG"),
+            ..same("arxiv", "")
+        };
+        assert_eq!(
+            earlier(&path, &category)
+                .unwrap()
+                .map(|e| (e.results, e.runs)),
+            Some((6, 1))
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

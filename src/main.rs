@@ -71,7 +71,8 @@ struct Cli {
     /// (default: [papers] notes, else research/papers).
     #[arg(long, global = true, value_name = "DIR")]
     papers: Option<PathBuf>,
-    /// Ignore cached API responses and fetch them again ([papers] cache_dir).
+    /// Ignore cached API responses and fetch them again ([papers] cache_dir);
+    /// `fetch` also looks up a paper that the registry already holds.
     #[arg(long, global = true)]
     refresh: bool,
     #[command(subcommand)]
@@ -837,11 +838,10 @@ fn main() -> ExitCode {
                 with_abstract,
                 json,
                 log: !no_log,
-                refresh: cli.refresh,
             };
             match title {
-                Some(title) => fetch_title(&http, &config, &title, out),
-                None => fetch(&Client::new(&http), &http, &config, &refs, out),
+                Some(title) => fetch_title(&http, &config, &title, out, cli.refresh),
+                None => fetch(&Client::new(&http), &http, &config, &refs, out, cli.refresh),
             }
         }
         Command::Search {
@@ -859,7 +859,6 @@ fn main() -> ExitCode {
                 with_abstract,
                 json,
                 log: !no_log,
-                refresh: cli.refresh,
             };
             if !categories.is_empty() || sort.is_some() {
                 Err(format!(
@@ -902,7 +901,6 @@ fn main() -> ExitCode {
                     with_abstract,
                     json,
                     log: !no_log,
-                    refresh: cli.refresh,
                 },
             )
         }
@@ -1454,12 +1452,15 @@ fn earlier_line(e: &searchlog::Earlier, source: &str, log: &str) -> String {
     )
 }
 
-fn report_earlier(config: &config::Config, source: &str, query: &str) -> Result<(), String> {
-    if let Some(e) = searchlog::earlier(&config.search_log, source, query)? {
-        let log = config.display(&config.search_log);
-        eprintln!("{}", earlier_line(&e, source, &log));
+/// Says when the log holds the same search. A log that cannot be read is
+/// said and does not stop the search.
+fn report_earlier(config: &config::Config, same: &searchlog::Same) {
+    let log = config.display(&config.search_log);
+    match searchlog::earlier(&config.search_log, same) {
+        Ok(Some(e)) => eprintln!("{}", earlier_line(&e, same.source, &log)),
+        Ok(None) => {}
+        Err(e) => eprintln!("papers: earlier runs not checked: {e}"),
     }
-    Ok(())
 }
 
 /// Unified DOI metadata: bibliographic fields from Crossref when it has the
@@ -1617,8 +1618,6 @@ struct Output {
     with_abstract: bool,
     json: bool,
     log: bool,
-    /// `--refresh`: fetch a registered paper too.
-    refresh: bool,
 }
 
 fn paper_found(p: &Paper) -> searchlog::Found {
@@ -1658,13 +1657,14 @@ fn log_searches(
 }
 
 /// Prints metadata for `inputs`. A registered input prints the registered
-/// block first and, unless `--refresh`, is not fetched.
+/// block first and, unless `refresh` (`--refresh`), is not fetched.
 fn fetch(
     arxiv: &Client,
     http: &Http,
     config: &config::Config,
     inputs: &[String],
     out: Output,
+    refresh: bool,
 ) -> Result<bool, String> {
     let (with_abstract, json) = (out.with_abstract, out.json);
     let index = seen::Index::load(config)?;
@@ -1677,7 +1677,7 @@ fn fetch(
             Err(_) => Vec::new(),
         })
         .collect();
-    let skip = |i: usize| !out.refresh && !registered[i].is_empty();
+    let skip = |i: usize| !refresh && !registered[i].is_empty();
     let arxiv_ids: Vec<ArxivId> = parsed
         .iter()
         .enumerate()
@@ -1773,6 +1773,7 @@ fn fetch_title(
     config: &config::Config,
     title: &str,
     out: Output,
+    refresh: bool,
 ) -> Result<bool, String> {
     let (with_abstract, json) = (out.with_abstract, out.json);
     let index = seen::Index::load(config)?;
@@ -1785,7 +1786,7 @@ fn fetch_title(
         },
     );
     print_registered(title, &registered, json);
-    if !out.refresh && !registered.is_empty() {
+    if !refresh && !registered.is_empty() {
         eprintln!("papers: {title:?}: registered; not looked up (--refresh to look it up)");
         return Ok(true);
     }
@@ -1873,7 +1874,15 @@ fn search(
     if query.is_empty() {
         return Err("empty search query".to_owned());
     }
-    report_earlier(config, "arxiv", words)?;
+    report_earlier(
+        config,
+        &searchlog::Same {
+            source: "arxiv",
+            query: words,
+            arxiv_query: Some(query),
+            since: None,
+        },
+    );
     let (total, results) = client.search(query, sort, max)?;
     let index = seen::Index::load(config)?;
     log_searches(config, out, &index, |index| {
@@ -1910,8 +1919,16 @@ fn search_source(
     if query.trim().is_empty() {
         return Err("empty search query".to_owned());
     }
-    report_earlier(config, source.name(), query)?;
     let since_text = since.map(|d| d.to_string());
+    report_earlier(
+        config,
+        &searchlog::Same {
+            source: source.name(),
+            query,
+            arxiv_query: None,
+            since: since_text.as_deref(),
+        },
+    );
     let since_year = since.map(|d| i64::from(d.year()));
     let (total, hits) = match source {
         Source::Openalex => sources::openalex(http, query, since_text.as_deref(), max)?,
@@ -1970,7 +1987,6 @@ fn citations(
         with_abstract: false,
         json: args.json,
         log: !args.no_log,
-        refresh: false,
     };
     let mut in_archive = 0;
     for (hit, f) in hits.iter().zip(&found) {
@@ -2199,9 +2215,6 @@ fn read(
                     config.display(&config.registry)
                 )
             })?;
-            if let Some(target) = &r.duplicate_of {
-                println!("note: entry {key} is a duplicate of {target}");
-            }
             let input = match (&r.ids.arxiv, &r.ids.doi, &r.ids.url) {
                 (Some(id), _, _) => format!("{id}{}", r.version.as_deref().unwrap_or("")),
                 (None, Some(doi), _) => doi.clone(),
@@ -2226,11 +2239,19 @@ fn read(
     let registered: Vec<registry::Reference> = match &entry {
         Some(r) => vec![r.clone()],
         None => match seen::parse_input(&input) {
-            Ok(query) => seen::Index::load(config)?
-                .registered(&query)
-                .into_iter()
-                .cloned()
-                .collect(),
+            // A registry that does not load is said and does not stop the read,
+            // which does not need it.
+            Ok(query) => match registry::load(&config.registry) {
+                Ok(records) => seen::Index::of_registry(records.unwrap_or_default())
+                    .registered(&query)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+                Err(e) => {
+                    eprintln!("papers: registry not checked for this paper: {e}");
+                    Vec::new()
+                }
+            },
             Err(_) => Vec::new(),
         },
     };
@@ -2242,17 +2263,24 @@ fn read(
     if entry.is_none()
         && let Some(first) = registered.first()
     {
-        let texts: Vec<registry::Text> = registered.iter().flat_map(|r| r.texts.clone()).collect();
+        // Only texts in the asked mode answer the run.
+        let texts: Vec<registry::Text> = registered
+            .iter()
+            .flat_map(|r| r.texts.clone())
+            .filter(|t| keeps_mode(o.extraction, t))
+            .collect();
         let kept = match o.force {
             true => None,
-            false => existing_text(config, &texts).filter(|t| keeps_mode(o.extraction, t)),
+            false => existing_text(config, &texts),
         };
         let Some(text) = kept else {
-            println!(
-                "no recorded text to reuse; downloading (`papers read --key {} --record` \
-                 records the text in the entry)",
-                first.key
-            );
+            if !o.force {
+                println!(
+                    "no text recorded in the entry answers this run \
+                     (`papers read --key {} --record` records one)",
+                    first.key
+                );
+            }
             return read_from(http, config, o, pdftotext, out_dir, input, entry);
         };
         println!(
@@ -3074,6 +3102,8 @@ mod tests {
         r.title = Some("Rebalancing Costs of a Synthetic Market Maker".into());
         r.depth = Some("full".into());
         r.ids.arxiv = Some("2601.99901".into());
+        r.ids.doi = Some("10.1234/Synthetic.87".into());
+        r.ids.url = Some("https://example.org/papers/87/".into());
         r.texts = vec![registry::Text {
             path: "texts/87.txt".into(),
             sha256: http::sha256_hex(b"the recorded text"),
@@ -3090,7 +3120,6 @@ mod tests {
         with_abstract: false,
         json: false,
         log: false,
-        refresh: false,
     };
 
     const ARXIV_FEED: &str = include_str!("../tests/fixtures/arxiv-entries.xml");
@@ -3112,17 +3141,23 @@ mod tests {
         let (base, server) = http::serve(Vec::new());
         let endpoint = format!("{base}/api/query");
         let arxiv = Client::at(&http, &endpoint);
-        assert_eq!(fetch(&arxiv, &http, &config, &ids, QUIET), Ok(true));
+        assert_eq!(fetch(&arxiv, &http, &config, &ids, QUIET, false), Ok(true));
         assert!(server.join().unwrap().is_empty());
+        // By DOI and by URL too: a lookup of this DOI would not find it, and a
+        // URL is not an id that `fetch` can look up.
+        let other = [
+            "https://doi.org/10.1234/synthetic.87".to_owned(),
+            "http://example.org/papers/87".to_owned(),
+        ];
+        assert_eq!(
+            fetch(&arxiv, &http, &config, &other, QUIET, false),
+            Ok(true)
+        );
         // `--refresh` asks arXiv.
         let (base, server) = http::serve(vec![arxiv_feed()]);
         let endpoint = format!("{base}/api/query");
         let arxiv = Client::at(&http, &endpoint);
-        let refresh = Output {
-            refresh: true,
-            ..QUIET
-        };
-        assert_eq!(fetch(&arxiv, &http, &config, &ids, refresh), Ok(true));
+        assert_eq!(fetch(&arxiv, &http, &config, &ids, QUIET, true), Ok(true));
         let heads = server.join().unwrap();
         assert_eq!(heads.len(), 1);
         assert!(heads[0].contains("id_list=2601.99901v4"), "{}", heads[0]);
@@ -3131,7 +3166,7 @@ mod tests {
         let endpoint = format!("{base}/api/query");
         let arxiv = Client::at(&http, &endpoint);
         let both = ["2601.99901".to_owned(), "2601.99902".to_owned()];
-        assert_eq!(fetch(&arxiv, &http, &config, &both, QUIET), Ok(true));
+        assert_eq!(fetch(&arxiv, &http, &config, &both, QUIET, false), Ok(true));
         let heads = server.join().unwrap();
         assert!(heads[0].contains("id_list=2601.99902&"), "{}", heads[0]);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -3146,6 +3181,7 @@ mod tests {
             &config,
             "rebalancing costs of a synthetic market-maker",
             QUIET,
+            false,
         );
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(got, Ok(true));
@@ -3180,6 +3216,37 @@ mod tests {
             Ok(true)
         );
         assert!(!out.exists());
+        // A registry that does not load does not stop a read; this one then
+        // stops at the missing pdftotext, before any request.
+        let registry = std::fs::read_to_string(&config.registry).unwrap();
+        std::fs::write(&config.registry, "not json\n").unwrap();
+        let err = read(
+            &Http::new(),
+            &config,
+            &options(Some(registry::Extraction::Layout)),
+            &absent,
+        )
+        .unwrap_err();
+        assert!(err.contains("layout extraction needs pdftotext"), "{err}");
+        // A later recorded text in the asked mode is the one reused.
+        std::fs::write(dir.join("texts/87-layout.txt"), "the  layout  text").unwrap();
+        let mut entries = registry::parse(&registry, "registry").unwrap();
+        let mut layout = entries[0].texts[0].clone();
+        layout.path = "texts/87-layout.txt".into();
+        layout.sha256 = http::sha256_hex(b"the  layout  text");
+        layout.set_extraction(registry::Extraction::Layout);
+        entries[0].texts.push(layout);
+        std::fs::write(&config.registry, registry::render(&entries)).unwrap();
+        assert_eq!(
+            read(
+                &Http::new(),
+                &config,
+                &options(Some(registry::Extraction::Layout)),
+                &absent
+            ),
+            Ok(true)
+        );
+        std::fs::write(&config.registry, registry).unwrap();
         // Another mode is not answered by the recorded text: the run goes on to
         // extract, and stops at the missing pdftotext before any request.
         let err = read(
@@ -3207,18 +3274,21 @@ mod tests {
                 ("Synthetic  Market", "all:synthetic AND all:market"),
                 Sort::Submitted,
                 3,
-                serde_json::json!({}),
+                serde_json::json!({"arxiv_query": "all:synthetic AND all:market"}),
                 logging,
             );
             server.join().unwrap();
             got
         };
-        assert_eq!(
-            searchlog::earlier(&config.search_log, "arxiv", "synthetic market"),
-            Ok(None)
-        );
+        let same = searchlog::Same {
+            source: "arxiv",
+            query: "synthetic market",
+            arxiv_query: Some("all:synthetic AND all:market"),
+            since: None,
+        };
+        assert_eq!(searchlog::earlier(&config.search_log, &same), Ok(None));
         assert_eq!(run(), Ok(true));
-        let first = searchlog::earlier(&config.search_log, "arxiv", "synthetic market")
+        let first = searchlog::earlier(&config.search_log, &same)
             .unwrap()
             .unwrap();
         assert_eq!((first.results, first.runs), (3, 1));
@@ -3231,7 +3301,7 @@ mod tests {
             )
         );
         assert_eq!(run(), Ok(true));
-        let second = searchlog::earlier(&config.search_log, "arxiv", "synthetic market")
+        let second = searchlog::earlier(&config.search_log, &same)
             .unwrap()
             .unwrap();
         assert_eq!(second.runs, 2);
