@@ -167,7 +167,23 @@ pub struct Verified {
     pub status: String,
 }
 
+/// The optional entry field with the work's abstract, with single spaces. It
+/// is kept in [`Reference::extra`], so `registry build` carries it over.
+const ABSTRACT: &str = "abstract";
+/// Where the abstract is from: `arxiv:<id>v<n>` or `openalex:<W id>`.
+const ABSTRACT_SOURCE: &str = "abstract_source";
+
 impl Reference {
+    /// The recorded abstract; `None` when none is recorded.
+    pub fn abstract_text(&self) -> Option<&str> {
+        self.extra.get(ABSTRACT).and_then(Value::as_str)
+    }
+
+    pub fn set_abstract(&mut self, text: String, source: String) {
+        self.extra.insert(ABSTRACT.to_owned(), text.into());
+        self.extra.insert(ABSTRACT_SOURCE.to_owned(), source.into());
+    }
+
     pub fn new(key: String) -> Self {
         Reference {
             schema: SCHEMA.to_owned(),
@@ -469,5 +485,20 @@ mod tests {
         fresh.title = Some("Another Title".into());
         let (out, _) = merge(vec![fresh], vec![prev]);
         assert!(out[0].verified.is_none());
+    }
+
+    #[test]
+    fn merge_keeps_the_abstract() {
+        let mut prev = parse(LINE, "r").unwrap().remove(0);
+        let fresh = prev.clone();
+        assert_eq!(prev.abstract_text(), None);
+        prev.set_abstract("Words.".into(), "arxiv:2601.99901v4".into());
+        let (out, _) = merge(vec![fresh], vec![prev]);
+        assert_eq!(out[0].abstract_text(), Some("Words."));
+        let line = serde_json::to_string(&out[0]).unwrap();
+        assert!(
+            line.contains(r#""abstract":"Words.","abstract_source":"arxiv:2601.99901v4""#),
+            "{line}"
+        );
     }
 }

@@ -3,6 +3,7 @@
 //! archive. Requests are throttled per host across processes (arXiv ≤1 per 3 s,
 //! other hosts ≤1 per second).
 
+mod abstracts;
 mod arxiv;
 mod atom;
 mod bib;
@@ -26,6 +27,7 @@ mod registry_cmd;
 mod searchlog;
 mod seen;
 mod sources;
+mod structure;
 mod text;
 mod verify;
 mod work;
@@ -250,7 +252,27 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Build or check the reference registry (rf.reference/1 JSONL), or attach a text to an entry.
+    /// Write the structure sidecar (rf.paper-structure/1) of texts that exist:
+    /// `<text file name>.structure.json` beside each text, with its pages,
+    /// section spans, reference list and the registry entries that list cites.
+    /// Downloads nothing and never changes a text.
+    Structure {
+        /// Registry keys (all texts of the entry) or text files.
+        #[arg(
+            required_unless_present = "all",
+            conflicts_with = "all",
+            value_name = "KEY|PATH"
+        )]
+        targets: Vec<String>,
+        /// Every text the registry records.
+        #[arg(long)]
+        all: bool,
+        /// Print what each sidecar would hold; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Build or check the reference registry (rf.reference/1 JSONL), attach a
+    /// text to an entry, or fill abstracts.
     Registry {
         #[command(subcommand)]
         action: RegistryAction,
@@ -360,6 +382,23 @@ enum RegistryAction {
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
         /// Print what would be recorded; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Registry file (overrides [papers] registry).
+        #[arg(long, value_name = "PATH")]
+        registry: Option<PathBuf>,
+    },
+    /// Fill the `abstract` field of entries that have none, from arXiv (by
+    /// arXiv id) and OpenAlex (by DOI or OpenAlex id), with the response cache.
+    /// Sends only those ids; downloads no PDF. Changes no other field.
+    Abstracts {
+        /// Only these entries (repeatable; default: every entry).
+        #[arg(long = "key", value_name = "KEY")]
+        keys: Vec<String>,
+        /// Look up at most this many entries.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+        /// Print what would be added; write nothing.
         #[arg(long)]
         dry_run: bool,
         /// Registry file (overrides [papers] registry).
@@ -663,7 +702,7 @@ fn record_pdfs(
         .map(|entry| entry.map(|e| e.path()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| at(dir, e))?;
-    manifests.retain(|p| p.extension().is_some_and(|e| e == "json"));
+    manifests.retain(|p| p.extension().is_some_and(|e| e == "json") && !structure::is_sidecar(p));
     manifests.sort();
     let known = registry::load(&config.registry)?.unwrap_or_default();
     // Started once, and only when a text needs it.
@@ -972,7 +1011,12 @@ fn main() -> ExitCode {
                 json,
             },
         ),
-        Command::Registry { action } => registry(config, action),
+        Command::Structure {
+            targets,
+            all,
+            dry_run,
+        } => structure_cmd(&config, &targets, all, dry_run),
+        Command::Registry { action } => registry(config, action, &http),
         Command::Config { json } => {
             show_config(&config, json);
             Ok(true)
@@ -1221,7 +1265,141 @@ fn seen(
     Ok(!hits.is_empty())
 }
 
-fn registry(mut config: config::Config, action: RegistryAction) -> Result<bool, String> {
+/// The structure of the text at the root-relative `path`, read from its file.
+/// The text's own entries are those that record the path.
+fn structure_of(
+    config: &config::Config,
+    records: &[registry::Reference],
+    path: &str,
+) -> Result<structure::Structure, String> {
+    let file = config.root.join(path);
+    let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let sha256 = http::sha256_hex(&bytes);
+    let own: Vec<String> = records
+        .iter()
+        .filter(|r| r.texts.iter().any(|t| t.path == path))
+        .map(|r| r.key.clone())
+        .collect();
+    let recorded: Vec<&registry::Text> = records
+        .iter()
+        .flat_map(|r| &r.texts)
+        .filter(|t| t.path == path)
+        .collect();
+    let extraction = recorded
+        .iter()
+        .find(|t| t.sha256 == sha256)
+        .or(recorded.first())
+        .and_then(|t| t.extra.get("extraction"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_owned();
+    let markdown = file
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"));
+    let mut built = structure::build(
+        &String::from_utf8_lossy(&bytes),
+        structure::TextInfo {
+            path: path.to_owned(),
+            sha256: sha256.clone(),
+            lines: 0,
+            extraction,
+        },
+        markdown,
+        &structure::Targets::new(records, &own),
+        format!("papers {}", env!("CARGO_PKG_VERSION")),
+    );
+    if !recorded.is_empty() && recorded.iter().all(|t| t.sha256 != sha256) {
+        built
+            .warnings
+            .push("the file's sha256 is not the one the registry records".to_owned());
+    }
+    Ok(built)
+}
+
+/// Writes the sidecar beside the text unless it already holds `built`; gives
+/// the sidecar's path.
+fn write_structure(
+    config: &config::Config,
+    built: &structure::Structure,
+) -> Result<PathBuf, String> {
+    let sidecar = structure::sidecar(&config.root.join(&built.text.path));
+    let rendered = built.render();
+    if std::fs::read_to_string(&sidecar).ok().as_deref() != Some(rendered.as_str()) {
+        std::fs::write(&sidecar, rendered).map_err(|e| format!("{}: {e}", sidecar.display()))?;
+    }
+    Ok(sidecar)
+}
+
+/// `papers structure`: one line per text, then its warnings. False when a
+/// text could not be read.
+fn structure_cmd(
+    config: &config::Config,
+    targets: &[String],
+    all: bool,
+    dry_run: bool,
+) -> Result<bool, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+    let records = registry::load(&config.registry)?.unwrap_or_default();
+    let mut paths: Vec<String> = Vec::new();
+    let mut add = |path: String| {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    if all {
+        records
+            .iter()
+            .flat_map(|r| &r.texts)
+            .for_each(|t| add(t.path.clone()));
+    }
+    for target in targets {
+        match records.iter().find(|r| &r.key == target) {
+            Some(r) if r.texts.is_empty() => {
+                return Err(format!("entry {target} records no text"));
+            }
+            Some(r) => r.texts.iter().for_each(|t| add(t.path.clone())),
+            None => add(config.display(&config::normalize(&cwd.join(target)))),
+        }
+    }
+    let mut ok = true;
+    let (mut with_refs, mut with_abstract) = (0, 0);
+    for path in &paths {
+        let built = match structure_of(config, &records, path) {
+            Ok(built) => built,
+            Err(e) => {
+                eprintln!("papers: {e}");
+                ok = false;
+                continue;
+            }
+        };
+        if !dry_run {
+            write_structure(config, &built)?;
+        }
+        println!("{}", built.summary());
+        for w in &built.warnings {
+            println!("  warning: {w}");
+        }
+        with_refs += usize::from(built.references.known().is_some());
+        with_abstract += usize::from(
+            built
+                .sections
+                .iter()
+                .any(|s| s.kind == structure::Kind::Abstract),
+        );
+    }
+    println!(
+        "{} texts{}: {with_refs} with a reference list, {with_abstract} with an abstract span",
+        paths.len(),
+        if dry_run { " (nothing written)" } else { "" }
+    );
+    Ok(ok)
+}
+
+fn registry(
+    mut config: config::Config,
+    action: RegistryAction,
+    http: &Http,
+) -> Result<bool, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
     let set_registry = |config: &mut config::Config, path: Option<PathBuf>| {
         if let Some(path) = path {
@@ -1284,6 +1462,50 @@ fn registry(mut config: config::Config, action: RegistryAction) -> Result<bool, 
             }
             println!("{}", serde_json::to_string(&text).expect("texts serialize"));
             Ok(true)
+        }
+        RegistryAction::Abstracts {
+            keys,
+            limit,
+            dry_run,
+            registry,
+        } => {
+            set_registry(&mut config, registry);
+            let client = openalex::Client::new(http);
+            let lookup = |r: &registry::Reference| -> Result<Option<abstracts::Found>, String> {
+                let work = match (&r.ids.openalex, &r.ids.doi) {
+                    (Some(id), _) => client.by_id(id)?,
+                    (None, Some(doi)) => {
+                        let doi = Doi::parse(doi).ok_or_else(|| format!("not a DOI: {doi}"))?;
+                        client.by_doi(&doi)?
+                    }
+                    (None, None) => None,
+                };
+                Ok(work.and_then(|w| {
+                    let source = format!("openalex:{}", w.id);
+                    w.abstract_text.map(|text| (text, source))
+                }))
+            };
+            let got =
+                abstracts::backfill(&config, &Client::new(http), &lookup, &keys, limit, dry_run)?;
+            for line in &got.failed {
+                eprintln!("papers: {line}");
+            }
+            println!(
+                "{} abstracts {} ({} from arXiv, {} from OpenAlex), {} without an abstract at the \
+                 source, {} failed, {} without an arXiv id, DOI or OpenAlex id, {} had one before",
+                got.arxiv.len() + got.openalex.len(),
+                if dry_run { "to add" } else { "added" },
+                got.arxiv.len(),
+                got.openalex.len(),
+                got.without.len(),
+                got.failed.len(),
+                got.no_id,
+                got.already
+            );
+            if !got.without.is_empty() {
+                println!("without an abstract: {}", got.without.join(" "));
+            }
+            Ok(got.failed.is_empty())
         }
         RegistryAction::RecordPdfs {
             dir,
@@ -2476,6 +2698,8 @@ fn finish_read(
     let line = serde_json::to_string(&text).expect("texts serialize");
     std::fs::write(sidecar, format!("{line}\n"))
         .map_err(|e| format!("{}: {e}", sidecar.display()))?;
+    let path = text.path.clone();
+    let saved = text.clone();
     if o.record
         && let Some(entry) = entry
     {
@@ -2488,6 +2712,35 @@ fn finish_read(
             config.display(&config.registry),
             entry.key
         );
+    }
+    // The structure sidecar, from the registry as it is now. A registry that
+    // does not load gives no citation edges, which is said. The sidecar can be
+    // built again, so a failure here does not fail the read.
+    let mut records = registry::load(&config.registry)
+        .unwrap_or_else(|e| {
+            eprintln!("papers: registry not read for the structure's citations: {e}");
+            None
+        })
+        .unwrap_or_default();
+    // The text as read, also where the registry does not record it (yet).
+    if let Some(entry) = entry
+        && let Some(r) = records.iter_mut().find(|r| r.key == entry.key)
+    {
+        r.texts.retain(|t| t.path != path);
+        r.texts.push(saved);
+    } else if !records
+        .iter()
+        .any(|r| r.texts.iter().any(|t| t.path == path))
+    {
+        let mut unregistered = registry::Reference::new(String::new());
+        unregistered.texts.push(saved);
+        records.push(unregistered);
+    }
+    match structure_of(config, &records, &path).and_then(|b| write_structure(config, &b)) {
+        Ok(written) => println!("structure: {}", config.display(&written)),
+        Err(e) => eprintln!(
+            "papers: structure sidecar not written (`papers structure {path}` builds it): {e}"
+        ),
     }
     println!("{line}");
     Ok(true)
@@ -3475,6 +3728,20 @@ mod tests {
         assert_eq!(text.sha256, http::sha256_hex(saved.as_bytes()));
         let pdf_sha256 = http::sha256_hex(pdf.as_bytes());
         assert_eq!(text.pdf_sha256(), Some(pdf_sha256.as_str()));
+        // The structure sidecar lies beside the text and names its sha256.
+        let name = text.path.rsplit('/').next().unwrap();
+        let sidecar = std::fs::read_to_string(dir.join(format!("{name}.structure.json"))).unwrap();
+        let sidecar: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
+        assert_eq!(sidecar["schema"], structure::SCHEMA);
+        assert_eq!(sidecar["text"]["sha256"], text.sha256.as_str());
+        assert_eq!(sidecar["text"]["path"], text.path.as_str());
+        // The mode `read` used, though no registry entry records the text.
+        assert_eq!(sidecar["text"]["extraction"], "plain");
+        assert_eq!(
+            sidecar["warnings"].as_array().unwrap().len(),
+            1,
+            "{sidecar}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
