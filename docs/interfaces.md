@@ -59,7 +59,7 @@ text: <path>
 
 A derivative is a file `papers` makes from a text or a PDF: a structure sidecar, a Docling text or a paper card. Each records the sha256 of its input: a sidecar and a card in `text.sha256`, a Docling text in `pdf_sha256`.
 
-- A derivative is written to `<file>.tmp` and renamed into place. A Docling text is renamed only after its registry record and its manifest are written, so a reader never finds the file without its record.
+- A derivative is written to `<file>.tmp` and renamed into place. A Docling text is renamed only after its registry record and its manifest are written, so a reader never finds the file without its record. `read` writes a plain or layout text the same way.
 - `papers registry check` reports the rule `derivative-stale` (warn) for a derivative whose input now has another sha256. The message names the command that makes it again. An input that is not in the checkout is skipped.
 
 ### `search`, `refs` and `cited-by`

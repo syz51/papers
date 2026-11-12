@@ -4,11 +4,14 @@
 //! | --- | --- | --- |
 //! | `duplicate-doi`, `duplicate-arxiv`, `duplicate-url`, `duplicate-title` | warn; info when annotated | keys that share a DOI, an arXiv id (any version), a normalized URL, or a normalized title plus first-author surname |
 //! | `duplicate-target-missing` | error | `duplicate_of` names a key the registry lacks |
+//! | `duplicate-cycle` | error | following `duplicate_of` from a key comes back to it |
+//! | `duplicate-chain` | warn | `duplicate_of` names a key that is itself a duplicate |
+//! | `verified-mismatch` | warn | `verify --record` found the entry's metadata differs from its index, or not there |
 //! | `no-identifier` | warn | no DOI, arXiv id, or URL |
 //! | `malformed-date` | error (warn for reported dates) | an access or reported date that is not a calendar date |
-//! | `invalid-value` | error | `type` or `depth` outside the `rf.reference/1` vocabulary |
+//! | `invalid-value` | error | `type`, `depth` or `verified.status` outside the `rf.reference/1` vocabulary |
 //! | `key-mismatch` | error | the heading number and the `[N]` entry number differ |
-//! | plus the parser's `entry-unnumbered`, `entry-missing`, `duplicate-key`, `duplicate-annotation-conflict`, `ambiguous-id`, `authors-unparsed`, `frontmatter-invalid`, `depth-invalid` |
+//! | plus the parser's `entry-unnumbered`, `entry-missing`, `duplicate-key`, `duplicate-annotation-conflict`, `ambiguous-id`, `authors-unparsed`, `frontmatter-invalid`, `depth-invalid`, `depth-unparsed`, `depth-missing` |
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,7 +21,7 @@ use crate::catalogue::Issue;
 use crate::finding::{Finding, Severity};
 use crate::id::ArxivId;
 use crate::refs::{Doi, Ref};
-use crate::registry::{DEPTHS, Reference, TYPES, key_order};
+use crate::registry::{DEPTHS, Reference, TYPES, VERIFIED_STATUSES, key_order};
 use crate::text::{normalize_url, title_author_key};
 
 /// Turns parse issues into findings located in their files.
@@ -100,6 +103,7 @@ pub fn check(records: &[Reference]) -> Vec<Finding> {
         found.sort_by(|a, b| key_order(&a.subject, &b.subject));
         out.extend(found);
     }
+    out.extend(duplicate_chains(records));
     for r in records {
         if let Some(target) = &r.duplicate_of
             && !keys.contains(target.as_str())
@@ -143,6 +147,40 @@ pub fn check(records: &[Reference]) -> Vec<Finding> {
                 ));
             }
         }
+        if let Some(v) = &r.verified {
+            let finding = if !VERIFIED_STATUSES.contains(&v.status.as_str()) {
+                Some(Finding::new(
+                    "invalid-value",
+                    Severity::Error,
+                    r.key.clone(),
+                    format!(
+                        "verified.status {:?} is not one of {}",
+                        v.status,
+                        VERIFIED_STATUSES.join(", ")
+                    ),
+                ))
+            } else if !valid_iso_date(&v.at) {
+                Some(Finding::new(
+                    "malformed-date",
+                    Severity::Error,
+                    r.key.clone(),
+                    format!("verified.at {:?} is not a YYYY-MM-DD calendar date", v.at),
+                ))
+            } else if v.status != "match" {
+                Some(Finding::new(
+                    "verified-mismatch",
+                    Severity::Warn,
+                    r.key.clone(),
+                    format!(
+                        "papers verify recorded {} against {} on {}; check the entry, then run papers verify --keys {} --record",
+                        v.status, v.against, v.at, r.key
+                    ),
+                ))
+            } else {
+                None
+            };
+            out.extend(finding.map(|f| with_source(f, r)));
+        }
         if let Some(date) = &r.accessed
             && !valid_iso_date(date)
         {
@@ -155,6 +193,81 @@ pub fn check(records: &[Reference]) -> Vec<Finding> {
                 ),
                 r,
             ));
+        }
+    }
+    out
+}
+
+/// `duplicate_of` links followed from each key: a cycle once per cycle, at
+/// its least key, and a chain at each key whose target is itself a
+/// duplicate, naming the key the chain ends at. Missing targets are left to
+/// `duplicate-target-missing`.
+fn duplicate_chains(records: &[Reference]) -> Vec<Finding> {
+    let by_key: BTreeMap<&str, &Reference> = records.iter().map(|r| (r.key.as_str(), r)).collect();
+    let next = |k: &str| by_key.get(k).and_then(|r| r.duplicate_of.as_deref());
+    let mut out = Vec::new();
+    let mut cycles: BTreeSet<Vec<&str>> = BTreeSet::new();
+    let mut members: Vec<&Reference> = records.iter().collect();
+    members.sort_by(|a, b| key_order(&a.key, &b.key));
+    for r in members {
+        let Some(target) = r.duplicate_of.as_deref() else {
+            continue;
+        };
+        // The path from `r` until it ends, leaves the registry, or repeats.
+        let mut path = vec![r.key.as_str()];
+        let mut at = target;
+        let repeat = loop {
+            if let Some(i) = path.iter().position(|k| *k == at) {
+                break Some(i);
+            }
+            if !by_key.contains_key(at) {
+                break None;
+            }
+            path.push(at);
+            match next(at) {
+                Some(n) => at = n,
+                None => break None,
+            }
+        };
+        match repeat {
+            Some(i) => {
+                let mut cycle = path[i..].to_vec();
+                let least = (0..cycle.len())
+                    .min_by(|a, b| key_order(cycle[*a], cycle[*b]))
+                    .unwrap_or(0);
+                cycle.rotate_left(least);
+                if i == 0 && cycles.insert(cycle.clone()) {
+                    let mut shown = cycle.clone();
+                    shown.push(cycle[0]);
+                    out.push(with_source(
+                        Finding::new(
+                            "duplicate-cycle",
+                            Severity::Error,
+                            cycle[0].to_owned(),
+                            format!(
+                                "duplicate_of links form a cycle: {}; one key must be the survivor, with no duplicate_of",
+                                shown.join(" → ")
+                            ),
+                        )
+                        .data(json!({ "keys": cycle })),
+                        by_key[cycle[0]],
+                    ));
+                }
+            }
+            // Only a chain that ends at a surviving entry: the end is named.
+            None if path.len() > 2 && by_key.contains_key(at) => out.push(with_source(
+                Finding::new(
+                    "duplicate-chain",
+                    Severity::Warn,
+                    r.key.clone(),
+                    format!(
+                        "duplicate_of names {target}, which is itself a duplicate: {}; point it at {at}",
+                        path.join(" → ")
+                    ),
+                ),
+                r,
+            )),
+            None => {}
         }
     }
     out
@@ -337,5 +450,82 @@ mod tests {
         assert!(got.contains(&("duplicate-target-missing", Severity::Error, "700")));
         assert!(got.contains(&("malformed-date", Severity::Error, "700")));
         assert!(got.contains(&("invalid-value", Severity::Error, "700")));
+    }
+
+    #[test]
+    fn duplicate_cycles_and_chains_are_reported() {
+        let link = |key: &str, to: Option<&str>| {
+            let mut r = rec(key);
+            r.ids.url = Some(format!("https://example.org/{key}"));
+            r.duplicate_of = to.map(str::to_owned);
+            r
+        };
+        let records = [
+            link("1", Some("2")),
+            link("2", Some("3")),
+            link("3", Some("1")),
+            link("4", Some("1")),
+            link("5", Some("5")),
+            link("6", None),
+            link("7", Some("8")),
+            link("8", Some("6")),
+            link("9", Some("6")),
+        ];
+        let found = check(&records);
+        let got = rules(&found);
+        let cycles: Vec<_> = got.iter().filter(|g| g.0 == "duplicate-cycle").collect();
+        assert_eq!(
+            cycles,
+            [
+                &("duplicate-cycle", Severity::Error, "1"),
+                &("duplicate-cycle", Severity::Error, "5")
+            ],
+            "each cycle once, at its least key; 4 leads into one"
+        );
+        let cycle = found.iter().find(|f| f.rule == "duplicate-cycle").unwrap();
+        assert!(cycle.message.contains("1 → 2 → 3 → 1"), "{}", cycle.message);
+        let chains: Vec<_> = found
+            .iter()
+            .filter(|f| f.rule == "duplicate-chain")
+            .collect();
+        assert_eq!(chains.len(), 1, "{got:?}");
+        assert_eq!(chains[0].subject, "7");
+        assert!(
+            chains[0].message.contains("7 → 8 → 6; point it at 6"),
+            "{}",
+            chains[0].message
+        );
+    }
+
+    #[test]
+    fn recorded_verification_is_checked() {
+        let verified = |key: &str, at: &str, status: &str| {
+            let mut r = rec(key);
+            r.ids.url = Some(format!("https://example.org/{key}"));
+            r.verified = Some(crate::registry::Verified {
+                at: at.into(),
+                against: "crossref".into(),
+                status: status.into(),
+            });
+            r
+        };
+        let records = [
+            verified("1", "2026-11-12", "match"),
+            verified("2", "2026-11-12", "mismatch"),
+            verified("3", "2026-11-12", "not-found"),
+            verified("4", "2026-11-12", "checked"),
+            verified("5", "12 November", "match"),
+        ];
+        let found = check(&records);
+        let got = rules(&found);
+        assert_eq!(
+            got,
+            [
+                ("verified-mismatch", Severity::Warn, "2"),
+                ("verified-mismatch", Severity::Warn, "3"),
+                ("invalid-value", Severity::Error, "4"),
+                ("malformed-date", Severity::Error, "5"),
+            ]
+        );
     }
 }

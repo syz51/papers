@@ -21,6 +21,8 @@ pub const DEPTHS: [&str; 6] = [
     "artifact",
     "reproduced",
 ];
+/// The `verified.status` values `verify --record` writes.
+pub const VERIFIED_STATUSES: [&str; 3] = ["match", "mismatch", "not-found"];
 pub const TYPES: [&str; 6] = ["paper", "dataset", "software", "web", "standard", "other"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

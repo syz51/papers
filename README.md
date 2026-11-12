@@ -145,7 +145,7 @@ Fields that `papers` does not know are kept when it rewrites the registry, in en
 `registry build` reads one of two sources:
 
 - **A catalogue.** A numbered Markdown file with one `## Reference N` section per work. The entry line reads `[N] Authors. **Title**. Venue … [Original](url). Accessed <date>.`
-  An entry's reading depth comes from a line `Inspection depth: <level>`, where the level is one of `metadata`, `abstract`, `method`, `full`, `artifact` or `reproduced`. That line wins over any prose in the entry. Without one, the depth comes from `Inspection:` lines that name exactly one level in plain words, such as "abstract only" or "read in full"; when they name none or several, it stays `null`.
+  An entry's reading depth comes from a line `Inspection depth: <level>`, where the level is one of `metadata`, `abstract`, `method`, `full`, `artifact` or `reproduced`. That line wins over any prose in the entry. Without one, the depth comes from `Inspection:` lines that name exactly one level in plain words, such as "abstract only" or "read in full"; when they name none or several, it stays `null`. `Inspection depth: unknown` followed by a reason, such as `Inspection depth: unknown. Reason: only a historical record is kept.`, records that the depth is not known: the depth is `null` and nothing is reported. Any other entry left with a `null` depth is reported as `depth-missing`.
 - **Notes.** One Markdown file per paper, with YAML frontmatter.
   An entry's reading depth comes from the note's `status`: `read` gives `method` and `skimmed` gives `abstract`. `read` does not give `full`, because the status does not show that the whole text was read. `[papers] status_depth` replaces these values or maps other statuses. A `depth` field in the frontmatter wins over the status. It must be one of `metadata`, `abstract`, `method`, `full`, `artifact` or `reproduced`; otherwise the parse issue `depth-invalid` is reported and the entry keeps the depth already in the registry. A note with another status or no status keeps the depth already in the registry, or `null`.
 
@@ -159,9 +159,12 @@ Every write (`registry build`, `registry attach`, `registry record-pdfs`, `regis
 | --- | --- | --- |
 | `duplicate-doi`, `duplicate-arxiv`, `duplicate-url`, `duplicate-title` | warn; info when annotated | Keys share a DOI, an arXiv id (any version), a normalized URL, or a normalized title plus first-author surname. arXiv ids and DOIs also come from arxiv.org, doi.org, SSRN and NBER URLs, and an arXiv DOI (`10.48550/arXiv.<id>`) counts as the arXiv id; such URLs are not compared as URLs. |
 | `duplicate-target-missing` | error | `duplicate_of` names a key the registry lacks. |
+| `duplicate-cycle` | error | Following `duplicate_of` from a key comes back to it, such as `1 → 2 → 1`. It is reported once, at the cycle's least key. |
+| `duplicate-chain` | warn | `duplicate_of` names a key that is itself a duplicate. The message names the key the chain ends at, which `duplicate_of` should name. |
+| `verified-mismatch` | warn | `verify --record` recorded `mismatch` or `not-found` in `verified.status`. Check the entry, then run `verify --keys <key> --record` again. |
 | `no-identifier` | warn | The entry has no DOI, arXiv id or URL. |
-| `malformed-date` | error (warn for reported dates) | An access or reported date is not a calendar date. |
-| `invalid-value` | error | `type` or `depth` is outside the `rf.reference/1` vocabulary. |
+| `malformed-date` | error (warn for reported dates) | An access date, a reported date or `verified.at` is not a calendar date. |
+| `invalid-value` | error | `type` or `depth` is outside the `rf.reference/1` vocabulary, or `verified.status` is not `match`, `mismatch` or `not-found`. |
 | `key-mismatch` | error | The heading number and the `[N]` entry number differ, or a note's id and its file name differ. |
 | `key-missing-from-source` | warn | A registry key is no longer in the source. |
 | `registry-stale` | warn | The registry differs from a fresh parse of the source. |
@@ -178,12 +181,13 @@ These parse issues are also reported:
 | `ambiguous-id` | info | The entry names several DOIs or arXiv ids, so none is recorded. |
 | `authors-unparsed` | info | The author text does not split into names unambiguously. |
 | `depth-unparsed` | warn | An `Inspection depth:` line names a single word outside the vocabulary, or two such lines name different levels; the depth stays `null`. A longer value is read as prose. |
+| `depth-missing` | warn | A catalogue entry has no depth and does not state `Inspection depth: unknown` with a reason, or states `unknown` without one. It is reported at the heading, or at the `unknown` line. Notes are not checked: a note's depth comes from its status. |
 | `frontmatter-invalid` | error | A note's frontmatter does not parse. The entry keeps its recorded values. |
 | `depth-invalid` | error | A note's `depth` field is outside the vocabulary. The entry keeps the depth already in the registry. |
 
 ### `verify` rules
 
-`verify` checks every registry entry, or the notes when there is no registry. Use `--keys`, `--unverified` or `--limit` to choose fewer. Responses are cached, so a rerun costs no requests. `--record` writes `verified{at, against, status}` back to the registry. An entry whose only DOI is an arXiv DOI is checked against arXiv. An entry with neither a title nor authors is skipped: there is nothing to compare, so it is never recorded as a match.
+`verify` checks every registry entry, or the notes when there is no registry. Use `--keys`, `--unverified` or `--limit` to choose fewer. Responses are cached, so a rerun costs no requests. `--record` writes `verified{at, against, status}` back to the registry: `at` is the date, `against` the index, and `status` is `match`, `mismatch` or `not-found`. Only `verify --record` sets the field, and `registry build` keeps it while the checked metadata is unchanged. `registry check` checks its values and reports a recorded `mismatch` or `not-found` as `verified-mismatch`. An entry never checked has `verified: null`. An entry whose only DOI is an arXiv DOI is checked against arXiv. An entry with neither a title nor authors is skipped: there is nothing to compare, so it is never recorded as a match.
 
 | Rule | Severity | Meaning |
 | --- | --- | --- |
@@ -208,6 +212,8 @@ When an index's metadata is wrong rather than the note, record why in the note's
 - `plain`, the default, gives the text in reading order, as described below.
 - `layout` runs `pdftotext -layout`, which keeps columns and table alignment. It needs Poppler's `pdftotext` on `PATH`; without it, `read` stops with an error before it downloads or extracts anything. When `pdftotext` fails on the PDF, the PDF is kept and no text is written. There is no fallback to `pdf-extract`.
 - `docling` converts the PDF with [Docling](#docling-a-second-text) into a second text, `<name>.docling.md`. The plain or layout text stays as it is.
+
+Write order: a plain or layout text is first written to `<name>.txt.tmp`. `read` then records it in the registry (with `--record`), writes the `<name>.json` manifest, and only then renames the text into place. When a step fails, the steps before it are undone, as for a [Docling text](#docling-a-second-text): a reader never finds a new text without its record.
 
 Without `--extraction`, `read` uses the mode recorded for the text it would replace: the stored text that still has its recorded hash, else a text recorded at the same path in the sidecar or the registry entry. So a layout text stays layout when it is extracted again. Other texts of the entry do not set the mode. In plain mode the text comes from the `pdf-extract` crate. When it fails, panics or finds no text, `papers read` runs Poppler's `pdftotext` on the saved PDF, if it is on `PATH`. It also runs `pdftotext` when the paper's title is missing from `pdf-extract`'s text, as when that text is garbled. It then keeps `pdftotext`'s text only if that text contains the title; otherwise it keeps `pdf-extract`'s text and prints the title warning. A `pdftotext` run that takes longer than 60 seconds, or prints more than 64 MiB, is stopped and reported. The `text:` line names the extractor that produced the text. When neither extractor gives text, the PDF is kept, no text is written, and the `text:` line gives both reasons, such as `pdftotext is not on PATH`.
 
