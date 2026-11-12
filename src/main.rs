@@ -150,11 +150,13 @@ enum Command {
         /// or landing page.
         reference: Option<String>,
         /// Read the registry entry with this key (its arXiv version, DOI, or URL);
-        /// files are named after the key.
+        /// files are named after the key, or after the entry's plain text when
+        /// that has another name (`coral.txt` gives `coral.pdf`).
         #[arg(long, value_name = "KEY")]
         key: Option<String>,
         /// Directory for <name>.pdf, <name>.txt and the <name>.json manifest
-        /// (default: sources/text under the project root).
+        /// (default: the directory of the entry's texts, else the one with most
+        /// of the registry's texts, else sources/text under the project root).
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
         /// Add the text to the registry entry's texts (with --key).
@@ -402,8 +404,9 @@ enum RegistryAction {
     /// registry, only when that gives the recorded text sha256. Other texts are
     /// left unchanged and listed as `not reproduced`. Makes no network request.
     RecordPdfs {
-        /// Directory of the texts, their PDFs and manifests (default:
-        /// sources/text under the project root).
+        /// Directory of the texts, their PDFs and manifests (default: the one
+        /// with most of the registry's texts, else sources/text under the
+        /// project root).
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
         /// Print what would be recorded; write nothing.
@@ -512,16 +515,21 @@ fn local_text(
 }
 
 /// The manifest `read` left beside the text at `file` (`<name>.json` beside
-/// `<name>.txt`), with its path. `None` when there is none, or when the JSON
-/// file there is not a manifest of the text at `path`, which is said.
+/// `<name>.txt`, `<name>.docling.json` beside `<name>.docling.md`), with its
+/// path. `None` when there is none, or when the JSON file there is not a
+/// manifest of the text at `path`, which is said.
 fn sidecar_manifest(file: &Path, path: &str) -> Result<Option<(PathBuf, registry::Text)>, String> {
-    if !file
+    let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let sidecar = if let Some(stem) = name.strip_suffix(docling::TEXT_SUFFIX) {
+        file.with_file_name(format!("{stem}{}", docling::MANIFEST_SUFFIX))
+    } else if file
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("txt"))
     {
+        file.with_extension("json")
+    } else {
         return Ok(None);
-    }
-    let sidecar = file.with_extension("json");
+    };
     let bytes = match std::fs::read(&sidecar) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1562,7 +1570,10 @@ fn registry(
             set_registry(&mut config, registry);
             let dir = match dir {
                 Some(dir) => config::normalize(&cwd.join(dir)),
-                None => config.root.join("sources/text"),
+                None => {
+                    let records = registry::load(&config.registry)?.unwrap_or_default();
+                    default_text_dir(&config, &records, None)
+                }
             };
             let found = record_pdfs(&config, &dir, dry_run, pdf::PDFTOTEXT)?;
             println!(
@@ -2422,6 +2433,60 @@ fn url_file_name(url: &str) -> Option<String> {
     Some(file_name_key(&format!("{host}_{stem}_{hash}")))
 }
 
+/// Where `read` and `registry record-pdfs` keep texts when no directory is
+/// given: the directory of `entry`'s first text, else the one that holds most
+/// of the registry's texts (the first by name on a tie), else `sources/text`
+/// under the project root. So a project that keeps its texts elsewhere, such
+/// as `docs/research/sources/text`, needs no `--out` or `--dir`.
+fn default_text_dir(
+    config: &config::Config,
+    records: &[registry::Reference],
+    entry: Option<&registry::Reference>,
+) -> PathBuf {
+    let dir_of = |t: &registry::Text| t.path.rsplit_once('/').map(|(dir, _)| dir.to_owned());
+    if let Some(dir) = entry.into_iter().flat_map(|r| &r.texts).find_map(dir_of) {
+        return config.root.join(dir);
+    }
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for dir in records.iter().flat_map(|r| &r.texts).filter_map(dir_of) {
+        *counts.entry(dir).or_default() += 1;
+    }
+    let most = counts
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)));
+    config
+        .root
+        .join(most.map_or_else(|| "sources/text".to_owned(), |(dir, _)| dir))
+}
+
+/// The name `read --key` gives entry `r`'s files in `dir`: the key's (see
+/// `file_name_key`), unless the entry's only plain or layout text in `dir` has
+/// another name, such as `coral.txt`, and no `<key>.txt` or `<key>.json` is
+/// there; then that name, so the PDF and the Docling text sit beside it as
+/// `coral.pdf` and `coral.docling.md`.
+fn entry_file_name(config: &config::Config, r: &registry::Reference, dir: &Path) -> String {
+    let key = file_name_key(&r.key);
+    let names: Vec<String> = r
+        .texts
+        .iter()
+        .filter(|t| !is_docling(t))
+        .map(|t| config.root.join(&t.path))
+        .filter(|p| p.parent() == Some(dir))
+        .filter_map(|p| {
+            let name = p.file_name()?.to_str()?;
+            name.strip_suffix(".txt").map(str::to_owned)
+        })
+        .collect();
+    let keyed = names.contains(&key)
+        || ["txt", "json"]
+            .iter()
+            .any(|ext| dir.join(format!("{key}.{ext}")).exists());
+    match names.as_slice() {
+        [name] if !keyed => name.clone(),
+        _ => key,
+    }
+}
+
 /// A file-name-safe form of a registry key.
 fn file_name_key(key: &str) -> String {
     let safe: String = key
@@ -2473,11 +2538,7 @@ fn read(
         return Err("--record adds the text to a registry entry; name it with --key".to_owned());
     }
     let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
-    let out_dir = match &o.out {
-        Some(dir) => config::normalize(&cwd.join(dir)),
-        None => config.root.join("sources/text"),
-    };
-    let (input, entry) = match &o.key {
+    let (input, entry, records) = match &o.key {
         Some(key) => {
             let all = registry::load(&config.registry)?.ok_or_else(|| {
                 format!(
@@ -2499,7 +2560,7 @@ fn read(
                     return Err(format!("entry {key} has no arXiv id, DOI, or URL to read"));
                 }
             };
-            (input, Some(r))
+            (input, Some(r), Some(all))
         }
         None => (
             o.reference
@@ -2508,7 +2569,23 @@ fn read(
                 .trim()
                 .to_owned(),
             None,
+            None,
         ),
+    };
+    let out_dir = match &o.out {
+        Some(dir) => config::normalize(&cwd.join(dir)),
+        // Without `--key`, a registry that does not load is said below, where
+        // the paper is looked up; the texts then go to `sources/text`.
+        None => {
+            let records = match records {
+                Some(records) => records,
+                None => registry::load(&config.registry)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
+            };
+            default_text_dir(config, &records, entry.as_ref())
+        }
     };
     // The registry's entries for the paper come first: the one `--key` names,
     // else those with the reference's arXiv id, DOI or URL.
@@ -2610,7 +2687,7 @@ fn read_from(
         }
     };
     let name = match (&entry, &reference) {
-        (Some(r), _) => file_name_key(&r.key),
+        (Some(r), _) => entry_file_name(config, r, &out_dir),
         (None, Some(Ref::Arxiv(id))) => id.to_string().replace('/', "_"),
         (None, Some(Ref::Doi(doi))) => doi.file_key(),
         (None, None) => url_file_name(&input).expect("normalize_url accepted the input"),
@@ -4243,6 +4320,94 @@ mod tests {
             std::fs::read_to_string(root.join("sources/text/k.txt")).unwrap(),
             layout
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A project that keeps its texts in `docs/research/sources/text`, as
+    /// masters does: `read --key` without `--out` uses that directory, and
+    /// names the files of an entry whose text has a slug name after the slug.
+    #[test]
+    fn read_by_key_uses_the_registry_text_directory_and_the_slug_name() {
+        let root =
+            std::env::temp_dir().join(format!("papers-read-text-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("docs/research/sources/text");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            root.join("research.toml"),
+            "[papers]\nregistry = \"refs.jsonl\"\n",
+        )
+        .unwrap();
+        let body = "Synthetic coral text\n";
+        std::fs::write(dir.join("coral.txt"), body).unwrap();
+        let text = |path: &str, sha256: String| registry::Text {
+            path: path.into(),
+            sha256,
+            origin: Some("https://example.org/coral.pdf".into()),
+            retrieved: None,
+            extra: Default::default(),
+        };
+        let coral = text(
+            "docs/research/sources/text/coral.txt",
+            http::sha256_hex(body.as_bytes()),
+        );
+        let mut entry = registry::Reference::new("36".into());
+        // Never fetched: the recorded text is reused.
+        entry.ids.url = Some("https://example.invalid/coral.pdf".into());
+        entry.texts.push(coral.clone());
+        let mut other = registry::Reference::new("2".into());
+        other
+            .texts
+            .push(text("docs/research/sources/text/2.txt", "0".repeat(64)));
+        let mut bare = registry::Reference::new("3".into());
+        bare.ids.url = Some("https://example.invalid/3.pdf".into());
+        let records = vec![entry.clone(), other, bare.clone()];
+        std::fs::write(
+            root.join("refs.jsonl"),
+            records
+                .iter()
+                .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let config = config::Config::load(None, &root).unwrap();
+
+        // An entry without texts takes the directory of most registry texts.
+        assert_eq!(default_text_dir(&config, &records, Some(&bare)), dir);
+        assert_eq!(
+            default_text_dir(&config, &[], None),
+            root.join("sources/text")
+        );
+        assert_eq!(entry_file_name(&config, &entry, &dir), "coral");
+        assert_eq!(entry_file_name(&config, &bare, &dir), "3");
+        // Files already named after the key keep the key.
+        std::fs::write(dir.join("36.json"), "{}").unwrap();
+        assert_eq!(entry_file_name(&config, &entry, &dir), "36");
+        std::fs::remove_file(dir.join("36.json")).unwrap();
+
+        let options = ReadOptions {
+            reference: None,
+            key: Some("36".into()),
+            out: None,
+            record: false,
+            force: false,
+            extraction: None,
+            browser: false,
+        };
+        assert_eq!(
+            read(
+                &Http::new(),
+                &config,
+                &options,
+                &pdf::tests::fake_program("absent")
+            ),
+            Ok(true)
+        );
+        let json = std::fs::read_to_string(dir.join("coral.json")).unwrap();
+        let written: registry::Text = serde_json::from_str(&json).unwrap();
+        assert_eq!(written, coral);
+        assert!(!root.join("sources").exists());
+        assert!(!dir.join("36.json").exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

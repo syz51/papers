@@ -18,9 +18,26 @@ fn papers(dir: &Path, args: &[&str]) -> Output {
 
 #[test]
 fn record_pdfs_lists_a_text_its_pdf_does_not_reproduce_and_changes_nothing() {
-    let dir = std::env::temp_dir().join(format!("papers-record-pdfs-cli-{}", std::process::id()));
+    lists_a_text_not_reproduced("sources/text");
+}
+
+/// Without `--dir`, the directory is the one that holds the registry's texts,
+/// as in masters, which has no `sources/text`.
+#[test]
+fn record_pdfs_finds_the_registry_text_directory() {
+    lists_a_text_not_reproduced("docs/research/sources/text");
+}
+
+fn lists_a_text_not_reproduced(layout: &str) {
+    let dir = std::env::temp_dir().join(format!(
+        "papers-record-pdfs-cli-{}-{}",
+        layout.replace('/', "-"),
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
-    let texts = dir.join("sources/text");
+    let texts = dir.join(layout);
+    let text = TEXT.replace("sources/text", layout);
+    let text = text.as_str();
     std::fs::create_dir_all(&texts).unwrap();
     std::fs::write(
         dir.join("research.toml"),
@@ -28,35 +45,29 @@ fn record_pdfs_lists_a_text_its_pdf_does_not_reproduce_and_changes_nothing() {
     )
     .unwrap();
     let entry = format!(
-        r#"{{"schema":"rf.reference/1","key":"12","type":"paper","title":"A Synthetic Title","authors":["Ann Lee"],"year":2026,"venue":null,"ids":{{"doi":null,"arxiv":null,"dblp":null,"openalex":null,"url":null}},"version":null,"accessed":null,"depth":null,"texts":[{TEXT}],"duplicate_of":null,"source":null,"verified":null}}"#
+        r#"{{"schema":"rf.reference/1","key":"12","type":"paper","title":"A Synthetic Title","authors":["Ann Lee"],"year":2026,"venue":null,"ids":{{"doi":null,"arxiv":null,"dblp":null,"openalex":null,"url":null}},"version":null,"accessed":null,"depth":null,"texts":[{text}],"duplicate_of":null,"source":null,"verified":null}}"#
     );
     std::fs::write(dir.join("refs.jsonl"), format!("{entry}\n")).unwrap();
     std::fs::write(texts.join("1.txt"), "a text").unwrap();
-    std::fs::write(texts.join("1.json"), TEXT).unwrap();
+    std::fs::write(texts.join("1.json"), text).unwrap();
     std::fs::write(texts.join("1.pdf"), "%PDF-1.4\nnot the paper").unwrap();
 
     for args in [
         &["registry", "record-pdfs"][..],
-        &[
-            "registry",
-            "record-pdfs",
-            "--dir",
-            "sources/text",
-            "--dry-run",
-        ],
+        &["registry", "record-pdfs", "--dir", layout, "--dry-run"],
     ] {
         let out = papers(&dir, args);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(out.status.success(), "{stdout}{:?}", out.stderr);
         // Named by the key of the entry that lists the text.
         assert!(
-            stdout.contains("not reproduced: 12 (sources/text/1.txt): "),
+            stdout.contains(&format!("not reproduced: 12 ({layout}/1.txt): ")),
             "{stdout}"
         );
         assert!(stdout.contains("pdftotext is not on PATH"), "{stdout}");
         assert!(stdout.contains(", 1 not reproduced, "), "{stdout}");
         assert_eq!(stdout.lines().last(), Some("not reproduced: 12"));
-        assert_eq!(std::fs::read_to_string(texts.join("1.json")).unwrap(), TEXT);
+        assert_eq!(std::fs::read_to_string(texts.join("1.json")).unwrap(), text);
         assert_eq!(
             std::fs::read_to_string(dir.join("refs.jsonl")).unwrap(),
             format!("{entry}\n")
