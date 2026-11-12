@@ -717,7 +717,12 @@ fn record_pdfs(
         .map(|entry| entry.map(|e| e.path()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| at(dir, e))?;
-    manifests.retain(|p| p.extension().is_some_and(|e| e == "json") && !structure::is_sidecar(p));
+    // A Docling manifest records its PDF's sha256 when it is written.
+    manifests.retain(|p| {
+        p.extension().is_some_and(|e| e == "json")
+            && !structure::is_sidecar(p)
+            && !p.to_string_lossy().ends_with(docling::MANIFEST_SUFFIX)
+    });
     manifests.sort();
     let known = registry::load(&config.registry)?.unwrap_or_default();
     // Started once, and only when a text needs it.
@@ -2877,7 +2882,9 @@ fn read_docling(
             None if o.force => None,
             None => {
                 return Err(format!(
-                    "{} has no sha256 recorded for this paper's texts, so it may not be the                      PDF they were read from; `papers registry record-pdfs` records it when it                      reproduces the text, or --force downloads the PDF again",
+                    "{} has no sha256 recorded for this paper's texts, so it may not be the \
+                     PDF they were read from; `papers registry record-pdfs` records it when it \
+                     reproduces the text, or --force downloads the PDF again",
                     config.display(&pdf_path)
                 ));
             }
@@ -2887,7 +2894,8 @@ fn read_docling(
     // Checked before any download.
     let version = docling::version(&config.docling).map_err(|e| {
         format!(
-            "Docling extraction needs Docling ({e}); install uv, or set [papers] docling              to a command that runs Python with Docling"
+            "Docling extraction needs Docling ({e}); install uv, or set [papers] docling \
+             to a command that runs Python with Docling"
         )
     })?;
     println!("docling: {version}");
@@ -2936,7 +2944,9 @@ fn read_docling(
 
 /// Records a Docling text, writes its manifest, then moves the staged text
 /// into place (when `staged`): a reader never finds the text without its
-/// record. The structure sidecar comes last.
+/// record. When a step fails, the steps before it are undone: the staged text
+/// is removed, the old manifest is put back, and the entry gets back the
+/// Docling text it had. The structure sidecar comes last.
 fn finish_docling(
     config: &config::Config,
     o: &ReadOptions,
@@ -2947,13 +2957,18 @@ fn finish_docling(
     staged: bool,
 ) -> Result<bool, String> {
     let line = serde_json::to_string(&text).expect("texts serialize");
+    let old_manifest = std::fs::read(manifest).ok();
+    let mut recorded = None;
+    let mut manifest_written = false;
     let written = (|| {
         if o.record
             && let Some(entry) = entry
         {
             record_read(config, entry, text.clone())?;
+            recorded = Some(entry);
         }
         derivative::write(manifest, format!("{line}\n").as_bytes())?;
+        manifest_written = true;
         if staged {
             derivative::commit(md_path)?;
         }
@@ -2963,7 +2978,22 @@ fn finish_docling(
         if staged {
             derivative::discard(md_path);
         }
-        return Err(e);
+        let mut undo = Vec::new();
+        if manifest_written {
+            let restored = match &old_manifest {
+                Some(bytes) => derivative::write(manifest, bytes),
+                None => std::fs::remove_file(manifest)
+                    .map_err(|e| format!("{}: {e}", manifest.display())),
+            };
+            undo.extend(restored.err());
+        }
+        if let Some(entry) = recorded {
+            undo.extend(unrecord_docling(config, entry, &text).err());
+        }
+        return Err(match undo.is_empty() {
+            true => e,
+            false => format!("{e}; undoing it also failed: {}", undo.join("; ")),
+        });
     }
     if staged {
         println!("text: {}", config.display(md_path));
@@ -2971,6 +3001,30 @@ fn finish_docling(
     structure_after_read(config, entry, text);
     println!("{line}");
     Ok(true)
+}
+
+/// Takes the Docling text `text` out of `entry` in the registry and puts back
+/// the Docling text the entry had when `read` started, if any.
+fn unrecord_docling(
+    config: &config::Config,
+    entry: &registry::Reference,
+    text: &registry::Text,
+) -> Result<(), String> {
+    let previous = entry.texts.iter().find(|t| is_docling(t)).cloned();
+    registry::update(&config.registry, |records| {
+        if let Some(r) = records.iter_mut().find(|r| r.key == entry.key)
+            && let Some(at) = r
+                .texts
+                .iter()
+                .position(|t| t.path == text.path && t.sha256 == text.sha256)
+        {
+            r.texts.remove(at);
+            if let Some(previous) = previous {
+                r.texts.insert(at, previous);
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Retries JavaScript check pages in a browser: `try_in_browser`, or a

@@ -240,7 +240,7 @@ Unless `--no-browser` is given, a candidate retries in headless Chromium only wh
 
 Docling runs as an external program, like `pdftotext`. `[papers] docling` is the command that runs Python with Docling importable; `papers` appends `-c <script> <pdf> <out>`. The default runs Docling 2.150.0 through `uv`, which installs it on first use; Docling then downloads its layout and table models (about 0.5 GB). Without a working command, `read` stops with an error that names Docling before it downloads anything. A conversion that takes longer than 30 minutes is stopped. Docling is MIT-licensed; its models are Apache-2.0 and CDLA-Permissive-2.0.
 
-Write order: Docling writes to `<name>.docling.md.tmp`. `read` then records the text in the registry (with `--record`), writes the manifest, and only then renames the text into place. When the record or the manifest fails, the temporary file is removed and no Docling text is left. Structure sidecars are written the same way, through a temporary file and a rename.
+Write order: Docling writes to `<name>.docling.md.tmp`. `read` then records the text in the registry (with `--record`), writes the manifest, and only then renames the text into place. When a step fails, the steps before it are undone: the temporary file is removed, the old manifest is put back, and the entry gets back the Docling text it had. Structure sidecars are written the same way, through a temporary file and a rename.
 
 ### `registry record-pdfs`
 

@@ -264,6 +264,44 @@ fn a_failed_record_leaves_no_docling_text_or_manifest() {
 }
 
 #[test]
+fn a_failed_manifest_write_undoes_the_record() {
+    // A directory where the manifest goes: the record is written, then the
+    // manifest fails, so the record is taken back.
+    let p = project(
+        "undo",
+        r#"["sh", "STUB"]"#,
+        r#"mkdir -p "$(dirname "$4")/4.docling.json/x""#,
+    );
+    let out = p.papers(&["read", "--key", "4", "--extraction", "docling", "--record"]);
+    let text = stdout(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("4.docling.json"), "{text}");
+    assert!(!text.contains("undoing it also failed"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(p.dir.join("refs.jsonl")).unwrap(),
+        format!("{}\n", p.entry)
+    );
+    for gone in [
+        "sources/text/4.docling.md",
+        "sources/text/4.docling.md.tmp",
+        "sources/text/4.docling.md.structure.json",
+    ] {
+        assert!(p.file(gone).is_none(), "{gone} was written");
+    }
+}
+
+#[test]
+fn record_pdfs_leaves_docling_manifests_alone() {
+    let p = project("record-pdfs", r#"["sh", "STUB"]"#, "");
+    let out = p.papers(&["read", "--key", "4", "--extraction", "docling", "--record"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    let out = p.papers(&["registry", "record-pdfs"]);
+    let text = stdout(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(!text.contains("skipped"), "{text}");
+}
+
+#[test]
 fn registry_check_reports_stale_derivatives() {
     let p = project("stale", r#"["sh", "STUB"]"#, "");
     let out = p.papers(&["read", "--key", "4", "--extraction", "docling", "--record"]);
@@ -295,9 +333,9 @@ fn registry_check_reports_stale_derivatives() {
     let stale = check();
     assert_eq!(stale.len(), 2, "{stale:?}");
     assert!(
-        stale
-            .iter()
-            .any(|f| f.contains("--extraction docling --record")),
+        stale.iter().any(
+            |f| f.contains("--extraction docling --record") && f.contains("texts[].pdf_sha256")
+        ),
         "{stale:?}"
     );
 }

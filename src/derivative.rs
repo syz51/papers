@@ -63,7 +63,16 @@ fn recorded_input(path: &Path) -> Option<(String, String)> {
     Some((field("path")?, field("sha256")?))
 }
 
-fn stale(key: &str, derivative: &Path, input: &Path, was: &str, now: &str, fix: String) -> Finding {
+/// A stale derivative; `evidence` is the file and field that record `was`.
+fn stale(
+    key: &str,
+    derivative: &Path,
+    input: &Path,
+    was: &str,
+    now: &str,
+    fix: String,
+    evidence: (String, &str),
+) -> Finding {
     Finding::new(
         STALE,
         Severity::Warn,
@@ -76,7 +85,7 @@ fn stale(key: &str, derivative: &Path, input: &Path, was: &str, now: &str, fix: 
             &now[..now.len().min(12)],
         ),
     )
-    .evidence(&derivative.display().to_string(), "text.sha256".to_owned())
+    .evidence(&evidence.0, evidence.1.to_owned())
 }
 
 /// Stale derivatives of the registry's texts and the extra derivative files
@@ -111,6 +120,7 @@ pub fn check(
                     &was,
                     &now,
                     format!("run papers structure {}", t.path),
+                    (config.display(&sidecar), "text.sha256"),
                 ));
             }
             // A Docling text is made from the PDF saved beside the plain text.
@@ -132,6 +142,7 @@ pub fn check(
                             "run papers read --key {} --extraction docling --record",
                             r.key
                         ),
+                        (config.display(&config.registry), "texts[].pdf_sha256"),
                     ));
                 }
             }
@@ -151,6 +162,7 @@ pub fn check(
                     &was,
                     &now,
                     fix,
+                    (config.display(&derivative), "text.sha256"),
                 ));
             }
         }
