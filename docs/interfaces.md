@@ -187,10 +187,19 @@ The split is `author-year` only when the first line begins with a name, there ar
 
 ### Long paragraphs of a blank-line list
 
-Some lists stop putting blank lines between references partway through. In a `blank` list, a paragraph splits again when it has at least twice the median number of filled lines. It splits at each line that reads as a name after a line that ends a reference, as in an author-year list. A split needs a year in the parts on both sides. These lines are not split points:
+Some lists stop putting blank lines between references partway through. In a `blank` list, a paragraph splits again when it has at least twice the median number of filled lines. It splits at each line that reads as a name after a line that ends a reference. A Markdown `- ` may come before the name. The name ends in one of these ways:
+
+- a comma, then a capital, `and` or the line end, such as `Asai, A.` or `Akari Asai, Zeqiu Wu`;
+- a full stop, then a year, such as `Meta AI. 2025.`;
+- `and`, then a capital, such as `Dee Moe and Eve Roe.`
+
+A split needs a year in the parts on both sides. These lines are not split points:
 
 - a line after a line that ends in an initial, such as `Noah A.`: the author list goes on;
-- a line that starts with a month, such as `December 2021.`: it ends the reference before it.
+- a line that starts with `In`, such as `In CVPR, 2016.`: it is the venue of the reference before it;
+- a line that starts with a date, such as `December 2021.`, `Dec. 2016.` or `July 14, 2021.`: it ends the reference before it.
+
+A reference that ends in a capital and a full stop, such as `Series B.`, also looks like the end of an initial. The paragraph does not split after it.
 
 ### Where the list ends
 

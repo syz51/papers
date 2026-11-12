@@ -1047,12 +1047,33 @@ static AUTHOR: LazyLock<Regex> = LazyLock::new(|| {
 static YEAR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|[^\d/:.])(?:19|20)\d{2}[a-z]?(?:$|[^\d.]|\.(?:$|\D))").unwrap()
 });
-/// A Markdown list item.
+/// A line that ends in an initial (`Noah A.`): inside an author list.
 static INITIAL_END: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:^|\s)\p{Lu}\.\s*$").unwrap());
+/// A line that starts with a date (`December 2021.`, `Dec. 2016.`,
+/// `July 14, 2021.`): the end of a reference.
 static MONTH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\s*(?:January|February|March|April|May|June|July|August|September|October|November|December)\b").unwrap()
+    Regex::new(
+        r"^\s*(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?[ \t]+(?:\d{1,2},?[ \t]+)?(?:19|20)\d{2}",
+    )
+    .unwrap()
 });
+/// A line that starts a reference inside a long paragraph: [`AUTHOR`] with a
+/// stricter end, since a venue line (`In CVPR, 2016.`, `Nature, 591:1-9,
+/// 2021.`, `In EMNLP 2020.`) can follow a line that ends in a full stop. The
+/// comma comes before a capital, `and` or the line end; the year comes after a
+/// full stop.
+static NAMES: LazyLock<Regex> = LazyLock::new(|| {
+    let name = r"\p{Lu}[\p{L}\p{M}'’\-]*\.?";
+    let part = format!(r"(?:{name}|van|von|der|den|de|del|della|da|di|du|dos|le|la|ten|ter)");
+    Regex::new(&format!(
+        r"^\s*(?:[-*+]\s+)?{name}(?:[ \t]+{part}){{0,4}}(?:,[ \t]*(?:\p{{Lu}}|and\b|$)|\.[ \t]+(?:19|20)\d{{2}}|[ \t]+and[ \t]+\p{{Lu}})"
+    ))
+    .unwrap()
+});
+/// A venue line: `In Proceedings of ...`.
+static VENUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(?:[-*+]\s+)?In\s").unwrap());
+/// A Markdown list item.
 static ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*[-*+]\s").unwrap());
 static ARXIV: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:arxiv:\s*|arxiv\.org/(?:abs|pdf)/|abs/)(\d{4}\.\d{4,5}|[a-z\-]+(?:\.[a-z]{2})?/\d{7})")
@@ -1211,10 +1232,10 @@ fn entry_starts(
 
 /// A blank-line list can stop putting blank lines between references partway
 /// through. A paragraph with at least twice the median count of filled lines
-/// then splits at each line that reads as a name (see [`AUTHOR`]) after a line
+/// then splits at each line that reads as a name (see [`NAMES`]) after a line
 /// that ends a reference, when the parts on both sides hold a year. A line
 /// that ends in an initial (`Noah A.`) is inside an author list, and a line
-/// that starts with a month (`December 2021.`) ends a reference.
+/// that starts with a date (`December 2021.`) or `In` ends a reference.
 fn resplit(lines: &[&str], paragraphs: Vec<usize>, end: usize) -> Vec<usize> {
     let filled = |i: &usize| listed(lines[*i]) && !is_page_number(lines[*i]);
     let stop = |n: usize| paragraphs.get(n + 1).map_or(end, |next| next - 1);
@@ -1236,7 +1257,8 @@ fn resplit(lines: &[&str], paragraphs: Vec<usize>, end: usize) -> Vec<usize> {
             .filter(|pair| {
                 ends_reference(lines[pair[0]])
                     && !INITIAL_END.is_match(lines[pair[0]])
-                    && AUTHOR.is_match(lines[pair[1]])
+                    && NAMES.is_match(lines[pair[1]])
+                    && !VENUE.is_match(lines[pair[1]])
                     && !MONTH.is_match(lines[pair[1]])
             })
             .map(|pair| pair[1])
@@ -1957,20 +1979,23 @@ Claude 0.95
 - Smith, A. 2024. One. Journal.
 - Jones, B. 2023. Two. Journal.
 
-- Lee, C. 2022. Three.
-Journal.
+- Lee, C. 2022. Three. Journal.
 
-- Kim, D. 2021. Four.
-Journal.
+- Kim, D. 2021. Four. Journal.
 ";
-        // The other references have two lines too, so the first paragraph is
-        // not long enough to be split again at its second name.
+        // The list splits at blank lines, not at dashes. The first paragraph
+        // is twice the median length, so it splits again at its second name.
         let s = structure(text, false, &Targets::default());
         let list = s.references.known().unwrap();
         assert_eq!(list.split, "blank");
         assert_eq!(
             entry_spans(list),
-            vec![(2, 3, None, None), (5, 6, None, None), (8, 9, None, None)]
+            vec![
+                (2, 2, None, None),
+                (3, 3, None, None),
+                (5, 5, None, None),
+                (7, 7, None, None)
+            ]
         );
     }
 
@@ -2215,5 +2240,45 @@ Markets, pages 1–9.
         assert_eq!(list.split, "blank");
         let starts: Vec<usize> = list.entries.iter().map(|e| e.first_line).collect();
         assert_eq!(starts, [5, 8, 11, 13, 15, 16, 20, 25]);
+    }
+
+    #[test]
+    fn a_long_reference_keeps_its_venue_and_date_lines() {
+        let text = [
+            "References",
+            "",
+            "Ann Lee. 2020. First title.",
+            "",
+            "Bob Kim. 2021. Second title.",
+            "",
+            // Each long reference has a line that ends in a full stop, then a
+            // venue or date line that reads almost as a name.
+            "Cy Park, Dee Moe, and Eve Roe. 2019. Third title.",
+            "In CVPR, 2016.",
+            "Journal note.",
+            "",
+            "Fay Hu. 2018. Fourth title. Second line.",
+            "In EMNLP 2020.",
+            "Journal note.",
+            "",
+            "Gil Yu. 2017. Fifth title. Second line.",
+            "Nature, 591:1-9, 2021.",
+            "Journal note.",
+            "",
+            "Hal Wu. 2016. Sixth title. https://arxiv.org/abs/1234.5678.",
+            "Dec. 2016.",
+            "Journal note.",
+            "",
+            "Ian Fox. 2015. Seventh title.",
+            "",
+        ]
+        .join("\n");
+        let s = structure(&text, false, &Targets::default());
+        let Known::Known(list) = &s.references else {
+            panic!("no list")
+        };
+        assert_eq!(list.split, "blank");
+        let starts: Vec<usize> = list.entries.iter().map(|e| e.first_line).collect();
+        assert_eq!(starts, [3, 5, 7, 11, 15, 19, 23]);
     }
 }
