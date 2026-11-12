@@ -251,6 +251,8 @@ pub fn parse_search(json: &str) -> Result<Vec<Work>, String> {
 pub struct Client<'a> {
     http: &'a Http,
     headers: Vec<(&'static str, String)>,
+    /// The works endpoint: [`ENDPOINT`], or a test server's.
+    endpoint: &'a str,
 }
 
 impl<'a> Client<'a> {
@@ -259,7 +261,21 @@ impl<'a> Client<'a> {
         let headers = api_key()
             .map(|k| vec![("authorization", format!("Bearer {k}"))])
             .unwrap_or_default();
-        Client { http, headers }
+        Client {
+            http,
+            headers,
+            endpoint: ENDPOINT,
+        }
+    }
+
+    /// A client for a test server's works endpoint, without an API key.
+    #[cfg(test)]
+    pub(crate) fn at(http: &'a Http, endpoint: &'a str) -> Self {
+        Client {
+            http,
+            headers: Vec::new(),
+            endpoint,
+        }
     }
 
     fn get(&self, url: &str) -> Result<Option<String>, String> {
@@ -309,7 +325,7 @@ impl<'a> Client<'a> {
 
     /// Looks up a work by DOI; `Ok(None)` when OpenAlex has no record.
     pub fn by_doi(&self, doi: &Doi) -> Result<Option<Work>, String> {
-        let url = format!("{ENDPOINT}/doi:{}", encode(doi.as_str(), b"/"));
+        let url = format!("{}/doi:{}", self.endpoint, encode(doi.as_str(), b"/"));
         self.get(&url)?.map(|json| parse_work(&json)).transpose()
     }
 
@@ -321,7 +337,7 @@ impl<'a> Client<'a> {
         since: Option<&str>,
         max: usize,
     ) -> Result<(Option<u64>, Vec<Work>), String> {
-        let mut url = format!("{ENDPOINT}?search={}", encode(query.trim(), b""));
+        let mut url = format!("{}?search={}", self.endpoint, encode(query.trim(), b""));
         if let Some(date) = since {
             url += &format!("&filter=from_publication_date:{date}");
         }
@@ -330,7 +346,7 @@ impl<'a> Client<'a> {
 
     /// Works matching a filter such as `cites:W1` or `openalex:W1|W2`.
     pub fn list(&self, filter: &str, max: usize) -> Result<(Option<u64>, Vec<Work>), String> {
-        let url = format!("{ENDPOINT}?filter={}", encode(filter, b":|"));
+        let url = format!("{}?filter={}", self.endpoint, encode(filter, b":|"));
         self.paged(&url, max, true)
     }
 
@@ -346,14 +362,15 @@ impl<'a> Client<'a> {
 
     /// Looks up a work by its OpenAlex id (`W123`); `Ok(None)` when unknown.
     pub fn by_id(&self, id: &str) -> Result<Option<Work>, String> {
-        let url = format!("{ENDPOINT}/{}", encode(short_id(id), b""));
+        let url = format!("{}/{}", self.endpoint, encode(short_id(id), b""));
         self.get(&url)?.map(|json| parse_work(&json)).transpose()
     }
 
     /// Searches works by title text; best matches first.
     pub fn search_title(&self, title: &str, per_page: usize) -> Result<Vec<Work>, String> {
         let url = format!(
-            "{ENDPOINT}?search={}&per_page={per_page}",
+            "{}?search={}&per_page={per_page}",
+            self.endpoint,
             encode(title.trim(), b"")
         );
         match self.get(&url)? {

@@ -1551,20 +1551,7 @@ fn registry(
         } => {
             set_registry(&mut config, registry);
             let client = openalex::Client::new(http);
-            let lookup = |r: &registry::Reference| -> Result<Option<abstracts::Found>, String> {
-                let work = match (&r.ids.openalex, &r.ids.doi) {
-                    (Some(id), _) => client.by_id(id)?,
-                    (None, Some(doi)) => {
-                        let doi = Doi::parse(doi).ok_or_else(|| format!("not a DOI: {doi}"))?;
-                        client.by_doi(&doi)?
-                    }
-                    (None, None) => None,
-                };
-                Ok(work.and_then(|w| {
-                    let source = format!("openalex:{}", w.id);
-                    w.abstract_text.map(|text| (text, source))
-                }))
-            };
+            let lookup = |r: &registry::Reference| abstracts::from_openalex(&client, r);
             let got =
                 abstracts::backfill(&config, &Client::new(http), &lookup, &keys, limit, dry_run)?;
             for line in &got.failed {
