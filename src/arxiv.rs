@@ -9,6 +9,12 @@ use crate::http::{ATTEMPTS, Get, Http};
 use crate::id::ArxivId;
 
 const ENDPOINT: &str = "https://export.arxiv.org/api/query";
+/// arXiv's OAI-PMH interface: the only machine-readable source of each
+/// version's withdrawal flag (the Atom API keeps the withdrawn version's comment
+/// and abstract).
+pub const OAI_ENDPOINT: &str = "https://oaipmh.arxiv.org/oai";
+const OAI: &str = "http://www.openarchives.org/OAI/2.0/";
+const ARXIV_RAW: &str = "http://arxiv.org/OAI/arXivRaw/";
 /// Attempts per request while splitting a batch whose response could not be
 /// read, to isolate the id behind it.
 const SPLIT_ATTEMPTS: u32 = 2;
@@ -239,6 +245,81 @@ impl<'a> Client<'a> {
     }
 }
 
+/// One version in arXiv's version history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Version {
+    pub version: u32,
+    /// Submission date, `YYYY-MM-DD` (UTC).
+    pub date: String,
+    /// arXiv withdrew this version: its source flag is `I` or it has no content.
+    pub withdrawn: bool,
+}
+
+/// The version history of a versionless arXiv id; `Ok(None)` when arXiv has no
+/// such record.
+pub fn versions(http: &Http, endpoint: &str, id: &str) -> Result<Option<Vec<Version>>, String> {
+    let url = format!(
+        "{endpoint}?verb=GetRecord&identifier=oai:arXiv.org:{}&metadataPrefix=arXivRaw",
+        encode(id)
+    );
+    let reply = http.get(&Get::api(&url, &[200]))?;
+    parse_versions(&reply.text()).map_err(|e| format!("{e} ({url})"))
+}
+
+/// Parses an OAI-PMH `GetRecord` reply in the `arXivRaw` format.
+pub fn parse_versions(xml: &str) -> Result<Option<Vec<Version>>, String> {
+    let doc = roxmltree::Document::parse(xml)
+        .map_err(|e| format!("invalid OAI-PMH XML from arXiv: {e}"))?;
+    let root = doc.root_element();
+    if !root.has_tag_name((OAI, "OAI-PMH")) {
+        return Err("arXiv OAI-PMH response is not an OAI-PMH document".to_owned());
+    }
+    if let Some(error) = root.children().find(|n| n.has_tag_name((OAI, "error"))) {
+        let code = error.attribute("code").unwrap_or_default();
+        if code == "idDoesNotExist" {
+            return Ok(None);
+        }
+        return Err(format!(
+            "arXiv OAI-PMH error {code}: {}",
+            error.text().unwrap_or_default().trim()
+        ));
+    }
+    let raw = root
+        .descendants()
+        .find(|n| n.has_tag_name((ARXIV_RAW, "arXivRaw")))
+        .ok_or("arXiv OAI-PMH reply has no arXivRaw record")?;
+    let child = |n: roxmltree::Node, name: &str| {
+        n.children()
+            .find(|c| c.has_tag_name((ARXIV_RAW, name)))
+            .and_then(|c| c.text())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    raw.children()
+        .filter(|n| n.has_tag_name((ARXIV_RAW, "version")))
+        .map(|v| {
+            let label = v.attribute("version").unwrap_or_default();
+            let version = label
+                .strip_prefix('v')
+                .and_then(|n| n.parse().ok())
+                .ok_or_else(|| format!("arXivRaw version {label:?} is not vN"))?;
+            let date_text = child(v, "date");
+            let date = jiff::fmt::rfc2822::parse(&date_text)
+                .map_err(|e| format!("arXivRaw {label} date {date_text:?}: {e}"))?
+                .with_time_zone(jiff::tz::TimeZone::UTC)
+                .date()
+                .to_string();
+            Ok(Version {
+                version,
+                date,
+                withdrawn: child(v, "source_type").contains('I') || child(v, "size") == "0kb",
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map(Some)
+}
+
 fn describe_errors(feed: &Feed, url: &str) -> String {
     if feed.errors.is_empty() {
         format!("HTTP 400 from {url}")
@@ -319,6 +400,32 @@ pub fn build_query(query: &str, categories: &[String], since: Option<Date>) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oai_versions_mark_withdrawals() {
+        let xml = include_str!("../tests/fixtures/arxiv-oai-withdrawn.xml");
+        let versions = parse_versions(xml).unwrap().unwrap();
+        assert_eq!(
+            versions,
+            [
+                Version {
+                    version: 1,
+                    date: "2026-01-06".into(),
+                    withdrawn: false
+                },
+                Version {
+                    version: 2,
+                    date: "2026-02-12".into(),
+                    withdrawn: true
+                },
+            ]
+        );
+        let missing = include_str!("../tests/fixtures/arxiv-oai-error.xml");
+        assert_eq!(parse_versions(missing).unwrap(), None);
+        let bad = missing.replace("idDoesNotExist", "badArgument");
+        assert!(parse_versions(&bad).unwrap_err().contains("badArgument"));
+        assert!(parse_versions("<feed/>").is_err());
+    }
 
     #[test]
     fn failing_requests_are_not_split_and_stop_the_lookup() {

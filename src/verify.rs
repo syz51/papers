@@ -8,16 +8,21 @@
 //! | `verify-author-count` | error | author counts differ (skipped for "et al." lists) |
 //! | `verify-year` | error | notes: not the arXiv v1 year, or after the earliest Crossref/OpenAlex date; registry: outside the years the source reports |
 //! | `verify-venue` | warn | our venue does not name the source's journal (journal articles only) |
+//! | `verify-withdrawn` | warn | arXiv withdrew a version (OAI-PMH version history), or the arXiv comment says the paper is withdrawn |
+//! | `verify-retracted` | warn | Crossref lists a retraction, withdrawal, or removal notice for the DOI (`updated-by`) |
+//! | `verify-notice` | warn | the DOI is itself a notice (`update-to`), such as a retraction; cite the work it changes |
+//! | `verify-updated` | info | Crossref lists another notice for the DOI, such as a correction or expression of concern |
 //! | `verify-not-found` | error (warn for title searches) | the source has no record for our identifier |
-//! | `verify-failed` | error | the lookup failed (network or API error); the run exits 2 |
+//! | `verify-failed` | error | a lookup failed (network or API error), including the arXiv version history; the run exits 2 |
 //! | `verify-manual` | info | no index lists the work; a note's `checked` date records a hand check |
 //! | `verify-skipped` | info | nothing to look up: a non-paper without DOI or arXiv id, or a duplicate |
 //! | `frontmatter-invalid` | error | a note's frontmatter does not parse |
 
 use serde_json::json;
 
-use crate::arxiv::Client;
+use crate::arxiv::{self, Client};
 use crate::atom::Paper;
+use crate::crossref::{Direction, Work};
 use crate::finding::{Finding, Severity};
 use crate::http::Http;
 use crate::id::ArxivId;
@@ -45,6 +50,8 @@ pub struct Subject {
     pub doi: Option<Doi>,
     /// Versionless arXiv id.
     pub arxiv: Option<String>,
+    /// The version the registry pins, such as `v1`.
+    pub version: Option<String>,
     /// Other spellings of the first author that a source may use.
     pub author_variants: Vec<String>,
     /// A note's hand-check date.
@@ -74,6 +81,7 @@ impl Subject {
                 let doi = Doi::parse(r.ids.doi.as_deref()?)?;
                 Some(doi.arxiv()?.id)
             }),
+            version: r.version.clone(),
             author_variants: r.author_variants.clone(),
             checked: None,
             duplicate_of: r.duplicate_of.clone(),
@@ -97,6 +105,7 @@ impl Subject {
             kind: Some("paper".to_owned()),
             doi: None,
             arxiv: None,
+            version: None,
             author_variants: vec![],
             checked: None,
             duplicate_of: None,
@@ -308,13 +317,100 @@ pub fn compare_record(s: &Subject, rec: &Record) -> Vec<Diff> {
     diffs
 }
 
+/// Withdrawn versions of an arXiv paper. Only a paper with more than one
+/// version can have one (withdrawing adds a version), so a v1-only paper costs
+/// no lookup.
+fn withdrawals(http: &Http, oai: &str, s: &Subject, p: &Paper) -> Vec<Diff> {
+    let pinned = s
+        .version
+        .as_deref()
+        .map(|v| format!("; ours pins {v}"))
+        .unwrap_or_default();
+    let mut notices = Vec::new();
+    if p.version > 1 {
+        match arxiv::versions(http, oai, &p.id) {
+            Ok(versions) => {
+                for v in versions.iter().flatten().filter(|v| v.withdrawn) {
+                    notices.push(Diff {
+                        rule: "verify-withdrawn",
+                        severity: Severity::Warn,
+                        message: format!("arXiv v{} withdrawn {}{pinned}", v.version, v.date),
+                    });
+                }
+            }
+            Err(message) => notices.push(Diff {
+                rule: "verify-failed",
+                severity: Severity::Error,
+                message: format!("arXiv version history: {message}"),
+            }),
+        }
+    }
+    let comment = p.comment.as_deref().unwrap_or_default();
+    if notices.is_empty() && comment.to_lowercase().contains("withdrawn") {
+        notices.push(Diff {
+            rule: "verify-withdrawn",
+            severity: Severity::Warn,
+            message: format!("arXiv v{} comment: {comment:?}{pinned}", p.version),
+        });
+    }
+    notices
+}
+
+/// Retraction and correction notices Crossref links to a work.
+fn update_notices(w: &Work) -> Vec<Diff> {
+    w.updates
+        .iter()
+        .map(|u| {
+            let doi = u
+                .doi
+                .as_deref()
+                .map_or_else(String::new, |d| format!(" doi:{d}"));
+            let when = u
+                .date
+                .as_deref()
+                .map_or_else(String::new, |d| format!(" {d}"));
+            let source = u
+                .source
+                .as_deref()
+                .map_or_else(String::new, |s| format!(" (source {s})"));
+            let kind = u.kind.replace('_', " ");
+            let (rule, severity, message) = match u.direction {
+                Direction::UpdateTo => (
+                    "verify-notice",
+                    Severity::Warn,
+                    format!("this DOI is a {kind} notice{when} for{doi}; cite that work{source}"),
+                ),
+                Direction::UpdatedBy if u.is_retraction() => (
+                    "verify-retracted",
+                    Severity::Warn,
+                    format!("{kind}{when} by notice{doi}{source}"),
+                ),
+                Direction::UpdatedBy => (
+                    "verify-updated",
+                    Severity::Info,
+                    format!("{kind}{when} by notice{doi}{source}"),
+                ),
+            };
+            Diff {
+                rule,
+                severity,
+                message,
+            }
+        })
+        .collect()
+}
+
 /// The result of checking one entry.
 #[derive(Debug)]
 pub enum Outcome {
     Checked {
         against: &'static str,
         used: String,
+        /// Metadata differences: they decide `match` or `mismatch`.
         diffs: Vec<Diff>,
+        /// Withdrawal, retraction, and correction notices, and a failed
+        /// version-history lookup. They leave the metadata status alone.
+        notices: Vec<Diff>,
     },
     NotFound {
         against: &'static str,
@@ -343,6 +439,15 @@ impl Outcome {
             Outcome::Manual(_) => "manual",
             Outcome::Skipped(_) => "skipped",
             Outcome::Invalid(_) => "invalid",
+        }
+    }
+
+    /// A lookup failed, so the run exits 2.
+    pub fn failed(&self) -> bool {
+        match self {
+            Outcome::Failed { .. } => true,
+            Outcome::Checked { notices, .. } => notices.iter().any(|n| n.rule == "verify-failed"),
+            _ => false,
         }
     }
 
@@ -378,8 +483,10 @@ impl Outcome {
                 against,
                 used,
                 diffs,
+                notices,
             } => diffs
                 .iter()
+                .chain(notices)
                 .map(|d| {
                     one(
                         d.rule,
@@ -425,6 +532,11 @@ impl Outcome {
 
 /// Checks every subject; arXiv ids are looked up in batches first.
 pub fn run(http: &Http, subjects: &[Subject]) -> Vec<Outcome> {
+    run_with(http, arxiv::OAI_ENDPOINT, subjects)
+}
+
+/// [`run`] with arXiv's OAI-PMH endpoint given, for tests.
+fn run_with(http: &Http, oai: &str, subjects: &[Subject]) -> Vec<Outcome> {
     let wanted = arxiv_wanted(subjects);
     let mut found = if wanted.is_empty() {
         Vec::new()
@@ -440,7 +552,7 @@ pub fn run(http: &Http, subjects: &[Subject]) -> Vec<Outcome> {
             if i > 0 && i % 25 == 0 {
                 eprintln!("papers: verify {i}/{total}");
             }
-            check(http, s, &mut found)
+            check(http, oai, s, &mut found)
         })
         .collect()
 }
@@ -477,6 +589,7 @@ fn precheck(s: &Subject) -> Option<Outcome> {
 
 fn check(
     http: &Http,
+    oai: &str,
     s: &Subject,
     arxiv_results: &mut impl Iterator<Item = Result<Paper, String>>,
 ) -> Outcome {
@@ -490,6 +603,7 @@ fn check(
                 against: "arXiv",
                 used,
                 diffs: compare_paper(s, &paper),
+                notices: withdrawals(http, oai, s, &paper),
             },
             Err(message) if message.starts_with("not found") => Outcome::NotFound {
                 against: "arXiv",
@@ -528,6 +642,7 @@ fn check_doi(http: &Http, s: &Subject, doi: &Doi, via: &str) -> Outcome {
             return Outcome::Checked {
                 against: "Crossref",
                 diffs: compare_record(s, &(&w).into()),
+                notices: update_notices(&w),
                 used,
             };
         }
@@ -544,6 +659,7 @@ fn check_doi(http: &Http, s: &Subject, doi: &Doi, via: &str) -> Outcome {
         Ok(Some(w)) => Outcome::Checked {
             against: "OpenAlex",
             diffs: compare_record(s, &(&w).into()),
+            notices: vec![],
             used,
         },
         Ok(None) => Outcome::NotFound {
@@ -597,6 +713,7 @@ fn check_by_title(http: &Http, s: &Subject) -> Outcome {
         None => Outcome::Checked {
             against: "OpenAlex",
             diffs: compare_record(s, &hit.into()),
+            notices: vec![],
             used: format!("title search → {}", hit.id),
         },
     }
@@ -617,6 +734,7 @@ mod tests {
             kind: Some("paper".into()),
             doi: None,
             arxiv: None,
+            version: None,
             author_variants: vec![],
             checked: None,
             duplicate_of: None,
@@ -704,7 +822,7 @@ mod tests {
         bare.titles.clear();
         bare.authors = None;
         bare.arxiv = Some("2601.00001".into());
-        let outcome = check(&Http::new(), &bare, &mut std::iter::empty());
+        let outcome = check(&Http::new(), "", &bare, &mut std::iter::empty());
         assert_eq!(outcome.label(), "skipped");
         assert!(outcome.verified().is_none());
         let mut titled = subject("Synthetic Widgets", &[], 2022, false);
@@ -941,9 +1059,132 @@ mod tests {
             against: "Crossref",
             used: "doi:10.1/x".into(),
             diffs: vec![],
+            notices: vec![],
         };
         assert!(ok.findings(&s).is_empty());
         assert_eq!(ok.verified(), Some(("Crossref", "match")));
         assert_eq!(Outcome::Skipped("x".into()).verified(), None);
+    }
+
+    fn served(body: &str) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        crate::http::serve(vec![crate::http::response(
+            "200 OK",
+            &["Content-Type: text/xml"],
+            body,
+        )])
+    }
+
+    #[test]
+    fn withdrawn_arxiv_versions_are_notices() {
+        let mut s = subject(
+            "Synthetic Widgets Rewrite Their Own Queries",
+            &["Ena Morrow", "Fitz Calder"],
+            2026,
+            false,
+        );
+        s.version = Some("v1".into());
+        let mut p = paper(&s.titles[0], &["Ena Morrow", "Fitz Calder"]);
+        p.id = "2601.99977".into();
+        p.version = 2;
+        p.published = "2026-01-06".into();
+        p.updated = "2026-02-12".into();
+        p.comment = Some("The paper is about to undergo significant revisions".into());
+        let (base, server) = served(include_str!("../tests/fixtures/arxiv-oai-withdrawn.xml"));
+        let http = Http::new();
+        let notices = withdrawals(&http, &format!("{base}/oai"), &s, &p);
+        let requests = server.join().unwrap();
+        assert!(
+            requests[0].contains("identifier=oai:arXiv.org:2601.99977&metadataPrefix=arXivRaw"),
+            "{requests:?}"
+        );
+        assert_eq!(rules(&notices), ["verify-withdrawn"]);
+        assert_eq!(notices[0].severity, Severity::Warn);
+        assert_eq!(
+            notices[0].message,
+            "arXiv v2 withdrawn 2026-02-12; ours pins v1"
+        );
+        let outcome = Outcome::Checked {
+            against: "arXiv",
+            used: p.id.clone(),
+            diffs: compare_paper(&s, &p),
+            notices,
+        };
+        assert_eq!(
+            outcome.label(),
+            "match",
+            "a withdrawal is not a metadata mismatch"
+        );
+        assert_eq!(outcome.verified(), Some(("arXiv", "match")));
+        assert!(!outcome.failed());
+        let f = outcome.findings(&s);
+        assert_eq!(
+            (f[0].rule, f[0].severity),
+            ("verify-withdrawn", Severity::Warn)
+        );
+
+        // A v1-only paper needs no lookup: withdrawing always adds a version.
+        p.version = 1;
+        assert!(withdrawals(&http, "http://127.0.0.1:9/unused", &s, &p).is_empty());
+        // An old-style withdrawal says so in the comment.
+        p.comment = Some("This paper has been withdrawn by the author".into());
+        let notices = withdrawals(&http, "http://127.0.0.1:9/unused", &s, &p);
+        assert_eq!(rules(&notices), ["verify-withdrawn"]);
+        assert!(
+            notices[0].message.contains("withdrawn by the author"),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn failed_version_history_fails_the_run() {
+        let s = subject("T", &["A B"], 2026, false);
+        let mut p = paper("T", &["A B"]);
+        p.version = 2;
+        let bad = include_str!("../tests/fixtures/arxiv-oai-error.xml")
+            .replace("idDoesNotExist", "badArgument");
+        let (base, server) = served(&bad);
+        let notices = withdrawals(&Http::new(), &format!("{base}/oai"), &s, &p);
+        server.join().unwrap();
+        assert_eq!(rules(&notices), ["verify-failed"]);
+        let outcome = Outcome::Checked {
+            against: "arXiv",
+            used: "2208.06046".into(),
+            diffs: vec![],
+            notices,
+        };
+        assert!(outcome.failed());
+        assert_eq!(outcome.verified(), Some(("arXiv", "match")));
+    }
+
+    #[test]
+    fn crossref_retractions_and_notices_are_reported() {
+        let retracted =
+            crossref::parse_work(include_str!("../tests/fixtures/crossref-retracted.json"))
+                .unwrap();
+        let notices = update_notices(&retracted);
+        assert_eq!(rules(&notices), ["verify-updated", "verify-retracted"]);
+        assert_eq!(
+            (notices[0].severity, notices[1].severity),
+            (Severity::Info, Severity::Warn)
+        );
+        assert_eq!(
+            notices[1].message,
+            "retraction 2021-03-09 by notice doi:10.5555/synth.2019.0042.retr (source retraction-watch)"
+        );
+        let notice = crossref::parse_work(include_str!(
+            "../tests/fixtures/crossref-retraction-notice.json"
+        ))
+        .unwrap();
+        let notices = update_notices(&notice);
+        assert_eq!(rules(&notices), ["verify-notice"]);
+        assert!(
+            notices[0]
+                .message
+                .starts_with("this DOI is a retraction notice 2021-03-09 for doi:10.5555/synth.2019.0042; cite that work"),
+            "{notices:?}"
+        );
+        let journal =
+            crossref::parse_work(include_str!("../tests/fixtures/crossref-journal.json")).unwrap();
+        assert!(update_notices(&journal).is_empty());
     }
 }

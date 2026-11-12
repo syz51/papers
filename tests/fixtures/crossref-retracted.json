@@ -1,0 +1,42 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message-version": "1.0.0",
+  "message": {
+    "DOI": "10.5555/synth.2019.0042",
+    "type": "journal-article",
+    "title": ["Synthetic order books settle faster under widget auctions"],
+    "author": [
+      {"given": "Cass", "family": "Penrow", "sequence": "first", "affiliation": []},
+      {"given": "Dov", "family": "Ilsley", "sequence": "additional", "affiliation": []}
+    ],
+    "container-title": ["Journal of Synthetic Finance"],
+    "volume": "11",
+    "issue": "2",
+    "page": "45-67",
+    "publisher": "Example Academic Press",
+    "published-online": {"date-parts": [[2019, 4, 2]]},
+    "published": {"date-parts": [[2019, 4, 2]]},
+    "issued": {"date-parts": [[2019, 4, 2]]},
+    "updated-by": [
+      {
+        "DOI": "10.5555/synth.2019.0042.corr",
+        "type": "correction",
+        "label": "Correction",
+        "source": "retraction-watch",
+        "updated": {"date-parts": [[2020, 1, 14]], "date-time": "2020-01-14T00:00:00Z", "timestamp": 1578960000000},
+        "record-id": "90001"
+      },
+      {
+        "DOI": "10.5555/SYNTH.2019.0042.RETR",
+        "type": "retraction",
+        "label": "Retraction",
+        "source": "retraction-watch",
+        "updated": {"date-parts": [[2021, 3, 9]], "date-time": "2021-03-09T00:00:00Z", "timestamp": 1615248000000},
+        "record-id": "90002"
+      }
+    ],
+    "update-to": null,
+    "URL": "https://doi.org/10.5555/synth.2019.0042"
+  }
+}

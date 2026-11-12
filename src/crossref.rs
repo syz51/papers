@@ -53,6 +53,59 @@ struct Message {
     published_print: Option<DateParts>,
     published: Option<DateParts>,
     issued: Option<DateParts>,
+    #[serde(default, deserialize_with = "null_as_empty")]
+    updated_by: Vec<RawUpdate>,
+    #[serde(default, deserialize_with = "null_as_empty")]
+    update_to: Vec<RawUpdate>,
+}
+
+/// Crossref sends `null` for an absent update list.
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<RawUpdate>, D::Error> {
+    Ok(Option::deserialize(d)?.unwrap_or_default())
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUpdate {
+    #[serde(rename = "DOI")]
+    doi: Option<String>,
+    #[serde(rename = "type", default)]
+    kind: String,
+    source: Option<String>,
+    updated: Option<DateParts>,
+}
+
+/// Which way an update notice points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Direction {
+    /// `updated-by`: a later notice changes this work.
+    UpdatedBy,
+    /// `update-to`: this work is the notice; it changes another work.
+    UpdateTo,
+}
+
+/// A Crossmark or Retraction Watch notice: a retraction, correction, and so on.
+#[derive(Debug, Clone, Serialize)]
+pub struct Update {
+    pub direction: Direction,
+    /// Crossref's `type`, such as `retraction`, `correction`, or `withdrawal`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The other work: the notice for `updated-by`, the changed work for `update-to`.
+    pub doi: Option<String>,
+    pub date: Option<String>,
+    /// `publisher` or `retraction-watch`.
+    pub source: Option<String>,
+}
+
+impl Update {
+    /// A notice that takes the work back: retraction, withdrawal, or removal.
+    pub fn is_retraction(&self) -> bool {
+        matches!(
+            self.kind.as_str(),
+            "retraction" | "partial_retraction" | "withdrawal" | "removal"
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +167,9 @@ pub struct Work {
     pub series: Option<String>,
     #[serde(rename = "abstract")]
     pub abstract_text: Option<String>,
+    /// Notices that change this work, or that this work is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub updates: Vec<Update>,
 }
 
 impl Work {
@@ -223,6 +279,21 @@ pub fn parse_work(json: &str) -> Result<Work, String> {
             .as_deref()
             .and_then(clean)
             .map(|a| a.strip_prefix("Abstract ").map(str::to_owned).unwrap_or(a)),
+        updates: [
+            (Direction::UpdatedBy, m.updated_by),
+            (Direction::UpdateTo, m.update_to),
+        ]
+        .into_iter()
+        .flat_map(|(direction, list)| {
+            list.into_iter().map(move |u| Update {
+                direction,
+                kind: u.kind,
+                doi: u.doi.map(|d| d.to_lowercase()),
+                date: u.updated.as_ref().and_then(DateParts::render),
+                source: u.source,
+            })
+        })
+        .collect(),
     })
 }
 
@@ -244,6 +315,26 @@ mod tests {
     const JOURNAL: &str = include_str!("../tests/fixtures/crossref-journal.json");
     const SSRN: &str = include_str!("../tests/fixtures/crossref-ssrn.json");
     const NBER: &str = include_str!("../tests/fixtures/crossref-nber.json");
+    const RETRACTED: &str = include_str!("../tests/fixtures/crossref-retracted.json");
+    const NOTICE: &str = include_str!("../tests/fixtures/crossref-retraction-notice.json");
+
+    #[test]
+    fn parses_update_notices() {
+        let w = parse_work(RETRACTED).unwrap();
+        let kinds: Vec<_> = w.updates.iter().map(|u| u.kind.as_str()).collect();
+        assert_eq!(kinds, ["correction", "retraction"]);
+        let r = &w.updates[1];
+        assert_eq!(r.direction, Direction::UpdatedBy);
+        assert!(r.is_retraction() && !w.updates[0].is_retraction());
+        assert_eq!(r.doi.as_deref(), Some("10.5555/synth.2019.0042.retr"));
+        assert_eq!(r.date.as_deref(), Some("2021-03-09"));
+        assert_eq!(r.source.as_deref(), Some("retraction-watch"));
+        let n = parse_work(NOTICE).unwrap();
+        assert_eq!(n.updates.len(), 1);
+        assert_eq!(n.updates[0].direction, Direction::UpdateTo);
+        assert_eq!(n.updates[0].doi.as_deref(), Some("10.5555/synth.2019.0042"));
+        assert!(parse_work(JOURNAL).unwrap().updates.is_empty());
+    }
 
     #[test]
     fn parses_journal_article() {

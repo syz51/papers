@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <responseDate>2026-11-12T05:20:00Z</responseDate>
+  <request verb="GetRecord" identifier="oai:arXiv.org:2601.99999" metadataPrefix="arXivRaw">http://oaipmh.arxiv.org/oai</request>
+  <error code="idDoesNotExist">Malformed identifier or record does not exist</error>
+</OAI-PMH>
