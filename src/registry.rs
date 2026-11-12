@@ -135,11 +135,14 @@ pub enum Extraction {
     Plain,
     /// `pdftotext -layout`, which keeps the page's columns and table alignment.
     Layout,
+    /// Docling's Markdown, with headings and tables: a second text beside the
+    /// plain one, `<name>.docling.md`.
+    Docling,
 }
 
 impl Extraction {
     fn parse(s: &str) -> Option<Self> {
-        [Extraction::Plain, Extraction::Layout]
+        [Extraction::Plain, Extraction::Layout, Extraction::Docling]
             .into_iter()
             .find(|m| m.name() == s)
     }
@@ -148,6 +151,7 @@ impl Extraction {
         match self {
             Extraction::Plain => "plain",
             Extraction::Layout => "layout",
+            Extraction::Docling => "docling",
         }
     }
 }

@@ -46,6 +46,9 @@ struct RawPapers {
     cite_patterns: Vec<String>,
     /// Replacement for each citation in renumbered copies (`{n}`, `{key}`, `{citekey}`).
     cite_replace: Option<String>,
+    /// The command that runs Python with Docling importable; `read
+    /// --extraction docling` appends `-c <script> <args>`.
+    docling: Option<Vec<String>>,
 }
 
 /// Resolved settings; every path is absolute or relative to the current directory.
@@ -69,6 +72,8 @@ pub struct Config {
     /// `[papers] cite_patterns`; empty means the built-in patterns.
     pub cite_patterns: Vec<String>,
     pub cite_replace: Option<String>,
+    /// `[papers] docling`, else [`DEFAULT_DOCLING`].
+    pub docling: Vec<String>,
 }
 
 /// Default notes directory (relative to the project root).
@@ -77,6 +82,18 @@ pub const DEFAULT_NOTES: &str = "research/papers";
 pub const DEFAULT_TEMPLATE: &str = "../_templates/paper.md";
 pub const DEFAULT_REGISTRY: &str = "references.jsonl";
 pub const DEFAULT_STATE_DIR: &str = ".research";
+/// The command that runs Python with Docling: the version the extractor
+/// comparison of November 2026 measured, in a uv-managed environment.
+pub const DEFAULT_DOCLING: [&str; 8] = [
+    "uv",
+    "run",
+    "--quiet",
+    "--no-project",
+    "--with",
+    "docling==2.150.0",
+    "python",
+    "-I",
+];
 /// Note status → registry depth unless `[papers] status_depth` says otherwise.
 /// `read` is `method`, not `full`: the status does not prove a full-text read.
 pub const DEFAULT_STATUS_DEPTH: [(&str, &str); 2] = [("read", "method"), ("skimmed", "abstract")];
@@ -142,6 +159,9 @@ impl Config {
                 .collect(),
             cite_patterns: p.cite_patterns,
             cite_replace: p.cite_replace,
+            docling: p
+                .docling
+                .unwrap_or_else(|| DEFAULT_DOCLING.map(str::to_owned).to_vec()),
             file,
             root,
             notes,

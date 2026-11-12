@@ -111,56 +111,13 @@ pub fn pdftotext(
     timeout: Duration,
     max_output: u64,
 ) -> Result<String, String> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(layout.then_some("-layout"))
         .args(["-enc", "UTF-8"])
         .arg(path)
-        .arg("-")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| match e.kind() {
-            ErrorKind::NotFound => format!("{program} is not on PATH"),
-            _ => format!("{program} could not start: {e}"),
-        })?;
-    // Read on other threads so a full pipe cannot block the child. A reader
-    // stops at its limit and closes its pipe, which ends a runaway child.
-    let stdout = read_limited(child.stdout.take(), max_output + 1);
-    let stderr = read_limited(child.stderr.take(), STDERR_LIMIT);
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) => {
-                return Err(format!(
-                    "{program} timed out after {timeout:?}{}",
-                    stop(&mut child)
-                ));
-            }
-            Err(e) => return Err(format!("{program}: {e}{}", stop(&mut child))),
-        }
-    };
-    let joined = |reader: JoinHandle<std::io::Result<Vec<u8>>>| {
-        reader
-            .join()
-            .expect("a reader thread does not panic")
-            .map_err(|e| format!("{program} output: {e}"))
-    };
-    let (out, err) = (joined(stdout)?, joined(stderr)?);
-    if out.len() as u64 > max_output {
-        return Err(format!("{program} printed more than {max_output} bytes"));
-    }
-    if !status.success() {
-        let err = String::from_utf8_lossy(&err);
-        return Err(match err.lines().rev().find(|l| !l.trim().is_empty()) {
-            Some(reason) => format!("{program} failed ({status}): {}", reason.trim()),
-            None => format!("{program} failed ({status})"),
-        });
-    }
+        .arg("-");
+    let out = run(program, command, timeout, max_output)?;
     let text = String::from_utf8(out)
         .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
     if text.trim().is_empty() {
@@ -242,6 +199,68 @@ pub fn choose_text<'a>(
     }
 }
 
+/// Runs `command` (its program named `program` in messages) with no input
+/// and gives its standard output. A run longer than `timeout` is stopped,
+/// more output than `max_output` bytes is refused, and a non-zero exit is an
+/// error with the last line the program wrote to standard error.
+pub fn run(
+    program: &str,
+    mut command: Command,
+    timeout: Duration,
+    max_output: u64,
+) -> Result<Vec<u8>, String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| match e.kind() {
+            ErrorKind::NotFound => format!("{program} is not on PATH"),
+            _ => format!("{program} could not start: {e}"),
+        })?;
+    // Read on other threads so a full pipe cannot block the child. The output
+    // reader stops at its limit and closes its pipe, which ends a runaway
+    // child. Standard error is read to its end, so a chatty program, such as
+    // Docling with its progress bars, never meets a closed pipe; only its
+    // last `STDERR_LIMIT` bytes are kept.
+    let stdout = read_limited(child.stdout.take(), max_output + 1);
+    let stderr = read_tail(child.stderr.take(), STDERR_LIMIT as usize);
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                return Err(format!(
+                    "{program} timed out after {timeout:?}{}",
+                    stop(&mut child)
+                ));
+            }
+            Err(e) => return Err(format!("{program}: {e}{}", stop(&mut child))),
+        }
+    };
+    let joined = |reader: JoinHandle<std::io::Result<Vec<u8>>>| {
+        reader
+            .join()
+            .expect("a reader thread does not panic")
+            .map_err(|e| format!("{program} output: {e}"))
+    };
+    let (out, err) = (joined(stdout)?, joined(stderr)?);
+    if out.len() as u64 > max_output {
+        return Err(format!("{program} printed more than {max_output} bytes"));
+    }
+    if !status.success() {
+        let err = String::from_utf8_lossy(&err);
+        return Err(match err.lines().rev().find(|l| !l.trim().is_empty()) {
+            Some(reason) => format!("{program} failed ({status}): {}", reason.trim()),
+            None => format!("{program} failed ({status})"),
+        });
+    }
+    Ok(out)
+}
+
 /// Reads at most `limit` bytes of a child's piped output on a new thread.
 fn read_limited(
     pipe: Option<impl Read + Send + 'static>,
@@ -251,6 +270,34 @@ fn read_limited(
     std::thread::spawn(move || {
         let mut out = Vec::new();
         pipe.take(limit).read_to_end(&mut out).map(|_| out)
+    })
+}
+
+/// Reads a child's piped output to its end on a new thread, keeping the last
+/// `limit` bytes.
+fn read_tail(
+    pipe: Option<impl Read + Send + 'static>,
+    limit: usize,
+) -> JoinHandle<std::io::Result<Vec<u8>>> {
+    let mut pipe = pipe.expect("the pipe is set up when the child is spawned");
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut buf = [0; 8192];
+        loop {
+            let n = match pipe.read(&mut buf) {
+                Ok(0) => {
+                    out.drain(..out.len().saturating_sub(limit));
+                    return Ok(out);
+                }
+                Ok(n) => n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            out.extend_from_slice(&buf[..n]);
+            if out.len() > 2 * limit {
+                out.drain(..out.len() - limit);
+            }
+        }
     })
 }
 
@@ -621,6 +668,23 @@ pub(crate) mod tests {
     fn pdftotext_that_prints_too_much_is_refused() {
         let err = run_fake("floods", Duration::from_secs(10)).unwrap_err();
         assert!(err.ends_with("printed more than 1048576 bytes"), "{err}");
+    }
+
+    #[test]
+    fn a_program_that_writes_much_to_stderr_is_read_to_its_end() {
+        // 200 KiB of progress to standard error, then the reason. A reader that
+        // closed the pipe at its limit would end the program with SIGPIPE.
+        let script = "i=0; while [ $i -lt 3200 ]; do \
+                      printf '%064d\\n' $i >&2; i=$((i+1)); done; \
+                      echo done; echo 'the reason' >&2; exit 3";
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        let e = run("sh", command, Duration::from_secs(30), 1 << 20).unwrap_err();
+        assert!(e.ends_with("the reason"), "{e}");
+        let mut command = Command::new("sh");
+        command.args(["-c", &script.replace("exit 3", "exit 0")]);
+        let out = run("sh", command, Duration::from_secs(30), 1 << 20).unwrap();
+        assert_eq!(out, b"done\n");
     }
 
     #[test]

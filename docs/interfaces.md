@@ -36,6 +36,31 @@ text: <path>
 - When no text recorded in the entry answers the run, `read` prints a line that names `papers read --key <key> --record` and then reads the paper as before. With `--force` it prints no such line.
 - A registry that cannot be loaded is reported on stderr and does not stop `read <ref>`.
 - The last stdout line of a successful `read` stays the text's manifest as one JSON object.
+- A run without `--extraction docling` ignores the entry's Docling text: it never answers such a run, and such a run never replaces it.
+
+## The Docling text: a second entry in `texts`
+
+`papers read --key <key> --extraction docling --record` adds a second text to an entry. The entry's plain or layout text, its `<name>.txt` and its `<name>.json` manifest are not changed.
+
+| Field | Value |
+| --- | --- |
+| `path` | `<dir>/<name>.docling.md`, beside `<dir>/<name>.txt`. |
+| `sha256` | The sha256 of the Markdown file. |
+| `origin`, `retrieved` | Those of the PDF it was converted from: the values recorded for the text with the same `pdf_sha256`, or the download's. |
+| `extraction` | `docling`. A reader finds the Docling text by this value, not by its place in `texts`. |
+| `pdf_sha256` | The sha256 of `<dir>/<name>.pdf` that Docling converted. |
+| `extractor` | `docling <version>`, such as `docling 2.150.0`. |
+
+- An entry has at most one text with `extraction` `docling`. Running the command again replaces it in place.
+- The Markdown has `#` headings, Markdown tables, no NUL bytes, and a line `<!-- page -->` between pages. Its structure sidecar is `<name>.docling.md.structure.json`.
+- `<name>.docling.json` holds the same object as one JSON line.
+
+## Derivatives
+
+A derivative is a file `papers` makes from a text or a PDF: a structure sidecar or a Docling text. Each records the sha256 of its input: a sidecar in `text.sha256`, a Docling text in `pdf_sha256`.
+
+- A derivative is written to `<file>.tmp` and renamed into place. A Docling text is renamed only after its registry record and its manifest are written, so a reader never finds the file without its record.
+- `papers registry check` reports the rule `derivative-stale` (warn) for a derivative whose input now has another sha256. The message names the command that makes it again. An input that is not in the checkout is skipped.
 
 ### `search`, `refs` and `cited-by`
 
