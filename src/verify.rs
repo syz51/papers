@@ -541,7 +541,7 @@ fn run_with(http: &Http, oai: &str, subjects: &[Subject]) -> Vec<Outcome> {
     let mut found = if wanted.is_empty() {
         Vec::new()
     } else {
-        Client::new(http).fetch(&wanted)
+        Client::new(http).with_oai(oai).fetch(&wanted)
     }
     .into_iter();
     let total = subjects.len();

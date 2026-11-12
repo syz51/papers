@@ -2,6 +2,11 @@
 //! retries on 429/5xx/transport errors, and redirects followed hop by hop so
 //! each host's throttle applies. The throttle's lock files live in a per-user
 //! cache folder, so every run by the user shares them whatever its `$TMPDIR`.
+//!
+//! A 429 to an API request also starts a cooldown for the host, kept beside its lock file: until
+//! it ends, no papers process sends that host a request. A short cooldown is
+//! waited out; a longer one fails the request at once, so parallel runs stop
+//! adding to a rate limit instead of each retrying into it.
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -22,6 +27,15 @@ pub const ATTEMPTS: u32 = 5;
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// Upper bound on a server-requested `Retry-After` wait.
 const MAX_RETRY_AFTER_S: u64 = 300;
+/// Cooldown after a first 429 without `Retry-After`; it doubles with each
+/// further 429 in a row, up to [`COOLDOWN_MAX_S`].
+const COOLDOWN_BASE_S: u64 = 30;
+const COOLDOWN_MAX_S: u64 = 3600;
+/// The longest cooldown a request waits out; a longer one fails it at once.
+const COOLDOWN_WAIT_S: u64 = 60;
+/// A host that stays quiet this long after its cooldown ends starts again
+/// from [`COOLDOWN_BASE_S`].
+const STRIKE_MEMORY_S: u64 = 3600;
 const MAX_REDIRECTS: u32 = 10;
 /// Cap on API response bodies.
 pub const API_BODY_LIMIT: u64 = 10 << 20;
@@ -105,7 +119,17 @@ impl Reply {
 enum Attempt {
     Done(Reply),
     Redirect(String),
-    Retry { reason: String, after: Option<u64> },
+    Retry {
+        reason: String,
+        after: Option<u64>,
+    },
+    /// HTTP 429 to a request with `retry_429`: starts the host's cooldown.
+    RateLimited {
+        reason: String,
+        after: Option<u64>,
+    },
+    /// The host's cooldown has not ended; no request was sent.
+    Cooling(Cooldown),
     Fail(String),
 }
 
@@ -165,12 +189,55 @@ impl Http {
     /// One URL with retries: `Ok(Ok(reply))`, or `Ok(Err(location))` for a redirect.
     fn get_once(&self, url: &str, req: &Get) -> Result<Result<Reply, String>, String> {
         let host = host(url)?;
+        let site = authority(url)?;
+        let cooldown = cooldown_dir()?.join(cooldown_file_name(&site));
         for attempt in 1..=req.attempts {
-            let (reason, after) = match throttled(&host, || self.attempt(url, &host, req))? {
+            let outcome = throttled(&host, || {
+                let now = now_ms();
+                let current = read_cooldown(&cooldown);
+                if current.until_ms > now {
+                    return Attempt::Cooling(current);
+                }
+                let outcome = self.attempt(url, &host, req);
+                match &outcome {
+                    Attempt::RateLimited { after, .. } => {
+                        write_cooldown(&cooldown, &current.strike(*after, now));
+                    }
+                    Attempt::Done(_) | Attempt::Redirect(_) if current.strikes > 0 => {
+                        let _ = std::fs::remove_file(&cooldown);
+                    }
+                    _ => {}
+                }
+                outcome
+            })?;
+            let (reason, after) = match outcome {
                 Attempt::Done(reply) => return Ok(Ok(reply)),
                 Attempt::Redirect(location) => return Ok(Err(location)),
                 Attempt::Fail(message) => return Err(message),
                 Attempt::Retry { reason, after } => (reason, after),
+                Attempt::RateLimited { reason, .. } => {
+                    if attempt == req.attempts {
+                        return Err(format!(
+                            "{reason} from {url} (gave up after {} attempts)",
+                            req.attempts
+                        ));
+                    }
+                    // The next attempt waits out the cooldown this 429 started.
+                    continue;
+                }
+                Attempt::Cooling(current) => {
+                    let wait_ms = current.until_ms.saturating_sub(now_ms());
+                    if wait_ms > u128::from(COOLDOWN_WAIT_S) * 1000 || attempt == req.attempts {
+                        return Err(current.refusal(&site, url));
+                    }
+                    let notice = format!(
+                        "papers: {site} is rate-limiting (HTTP 429); waiting {}s before {url}",
+                        wait_ms.div_ceil(1000)
+                    );
+                    eprintln!("{}", redact(&notice, url));
+                    sleep(Duration::from_millis(wait_ms as u64));
+                    continue;
+                }
             };
             if attempt == req.attempts {
                 let tries = if req.attempts == 1 {
@@ -227,7 +294,13 @@ impl Http {
                 )),
             };
         }
-        if status >= 500 || (status == 429 && req.retry_429) {
+        if status == 429 && req.retry_429 {
+            return Attempt::RateLimited {
+                reason: format!("HTTP {status}"),
+                after: header("retry-after").and_then(|v| v.trim().parse().ok()),
+            };
+        }
+        if status >= 500 {
             return Attempt::Retry {
                 reason: format!("HTTP {status}"),
                 after: header("retry-after").and_then(|v| v.trim().parse().ok()),
@@ -359,6 +432,108 @@ fn write_cache(path: &Path, url: &str, reply: &Reply) {
         let _ = std::fs::remove_file(&tmp);
         eprintln!(
             "papers: warning: cannot cache {url} at {}: {e}",
+            path.display()
+        );
+    }
+}
+
+/// Whether a [`Http::get`] error means the host is rate-limiting papers: a
+/// 429 after the retries, or a cooldown that stopped the request.
+pub fn is_rate_limited(message: &str) -> bool {
+    message.starts_with("HTTP 429 from ") || message.contains(" is rate-limiting papers (HTTP 429")
+}
+
+/// `host` or `host:port` of an absolute http(s) URL: the cooldown's scope.
+fn authority(url: &str) -> Result<String, String> {
+    let host = host(url)?;
+    let uri: Uri = url
+        .parse()
+        .map_err(|e| format!("invalid URL {url:?}: {e}"))?;
+    Ok(match uri.port_u16() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    })
+}
+
+/// A host's rate-limit state, kept in `<host>.cooldown` beside its lock file.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Cooldown {
+    /// Unix milliseconds before which no request goes to the host.
+    until_ms: u128,
+    /// 429s in a row.
+    strikes: u32,
+}
+
+impl Cooldown {
+    /// The cooldown after another 429 at `now`: the server's `Retry-After`
+    /// when it gives one, else [`COOLDOWN_BASE_S`] doubled for each earlier 429.
+    fn strike(&self, retry_after: Option<u64>, now: u128) -> Cooldown {
+        let fresh = now > self.until_ms + u128::from(STRIKE_MEMORY_S) * 1000;
+        let strikes = if fresh { 1 } else { self.strikes + 1 };
+        let wait_s = match retry_after {
+            Some(s) => s.min(MAX_RETRY_AFTER_S),
+            None => COOLDOWN_BASE_S
+                .saturating_mul(1 << (strikes - 1).min(16))
+                .min(COOLDOWN_MAX_S),
+        };
+        Cooldown {
+            until_ms: now + u128::from(wait_s) * 1000,
+            strikes,
+        }
+    }
+
+    /// The error for a request the cooldown stops.
+    fn refusal(&self, site: &str, url: &str) -> String {
+        let until = i64::try_from(self.until_ms)
+            .ok()
+            .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
+            .map(|t| {
+                t.to_zoned(jiff::tz::TimeZone::system())
+                    .strftime("%H:%M:%S %Z")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let left = self.until_ms.saturating_sub(now_ms()).div_ceil(1000);
+        format!(
+            "{site} is rate-limiting papers (HTTP 429, {} in a row): no requests to it until \
+             {until} (in {left}s); not sent: {url}. Cached responses still work; rerun after then",
+            self.strikes
+        )
+    }
+}
+
+fn cooldown_file_name(site: &str) -> String {
+    let lock = lock_file_name(site);
+    format!("{}.cooldown", lock.trim_end_matches(".lock"))
+}
+
+/// Where cooldown files live: beside the lock files. Tests keep their
+/// loopback servers' cooldowns out of the user's cache folder.
+fn cooldown_dir() -> Result<&'static Path, String> {
+    if cfg!(test) {
+        static DIR: OnceLock<PathBuf> = OnceLock::new();
+        return Ok(DIR.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("papers-cooldown-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("test cooldown folder");
+            dir
+        }));
+    }
+    lock_dir()
+}
+
+/// The recorded cooldown; none when the file is missing or unreadable.
+fn read_cooldown(path: &Path) -> Cooldown {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_cooldown(path: &Path, cooldown: &Cooldown) {
+    let json = serde_json::to_string(cooldown).expect("cooldowns serialize");
+    if let Err(e) = std::fs::write(path, json) {
+        eprintln!(
+            "papers: warning: cannot record a rate-limit cooldown at {}: {e}",
             path.display()
         );
     }
@@ -831,6 +1006,131 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let gap = starts[0].abs_diff(starts[1]);
         assert!(gap >= MIN_MS, "requests only {gap} ms apart");
+    }
+
+    #[test]
+    fn a_429_stops_other_clients_until_the_cooldown_ends() {
+        let ok = || response("200 OK", &[], "ok");
+        let (base, server) = serve(vec![
+            response("429 Too Many Requests", &["Retry-After: 120"], ""),
+            ok(),
+        ]);
+        let site = base.trim_start_matches("http://").to_owned();
+        let path = cooldown_dir().unwrap().join(cooldown_file_name(&site));
+        let get = |p: &str| {
+            Http::new().get(&Get {
+                cache: false,
+                ..Get::api(&format!("{base}/{p}"), &[200])
+            })
+        };
+        // The first client gets the 429 and stops at once: 120 s is too long to wait.
+        let start = std::time::Instant::now();
+        let first = get("a").err().unwrap();
+        // A second client, like a second process, reads the cooldown from disk
+        // and sends nothing.
+        let second = std::thread::scope(|s| s.spawn(|| get("b")).join().unwrap())
+            .err()
+            .unwrap();
+        assert!(start.elapsed() < Duration::from_secs(10));
+        for err in [&first, &second] {
+            assert!(
+                err.contains(&format!("{site} is rate-limiting papers")),
+                "{err}"
+            );
+            assert!(err.contains("no requests to it until"), "{err}");
+        }
+        assert!(
+            second.contains("in 120s") || second.contains("in 119s"),
+            "{second}"
+        );
+        assert_eq!(read_cooldown(&path).strikes, 1);
+        // Once the cooldown ends, a request goes out and its success clears it.
+        write_cooldown(
+            &path,
+            &Cooldown {
+                until_ms: now_ms() - 1,
+                strikes: 1,
+            },
+        );
+        assert_eq!(get("c").unwrap().text(), "ok");
+        assert!(!path.exists());
+        let heads = server.join().unwrap();
+        assert_eq!(heads.len(), 2);
+        assert!(heads[1].starts_with("GET /c "), "{}", heads[1]);
+    }
+
+    #[test]
+    fn a_short_cooldown_is_waited_out() {
+        let (base, server) = serve(vec![
+            response("429 Too Many Requests", &["Retry-After: 1"], ""),
+            response("200 OK", &[], "ok"),
+        ]);
+        let start = std::time::Instant::now();
+        let reply = Http::new()
+            .get(&Get {
+                cache: false,
+                ..Get::api(&format!("{base}/a"), &[200])
+            })
+            .unwrap();
+        assert_eq!(reply.text(), "ok");
+        assert!(start.elapsed() >= Duration::from_millis(900));
+        server.join().unwrap();
+        let site = base.trim_start_matches("http://");
+        assert!(
+            !cooldown_dir()
+                .unwrap()
+                .join(cooldown_file_name(site))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn cooldowns_double_and_reset_after_a_quiet_hour() {
+        let now = 10_000_000_000;
+        let s = |n: u64| u128::from(n) * 1000;
+        let first = Cooldown::default().strike(None, now);
+        assert_eq!(
+            first,
+            Cooldown {
+                until_ms: now + s(30),
+                strikes: 1
+            }
+        );
+        let second = first.strike(None, first.until_ms);
+        assert_eq!(second.until_ms, first.until_ms + s(60));
+        let mut c = second;
+        for _ in 0..10 {
+            c = c.strike(None, c.until_ms);
+        }
+        assert_eq!(c.strikes, 12);
+        assert_eq!(
+            c.strike(None, c.until_ms).until_ms - c.until_ms,
+            s(COOLDOWN_MAX_S)
+        );
+        // Retry-After wins, capped like retries.
+        assert_eq!(first.strike(Some(7), now).until_ms, now + s(7));
+        assert_eq!(
+            first.strike(Some(9999), now).until_ms,
+            now + s(MAX_RETRY_AFTER_S)
+        );
+        // A 429 more than an hour after the last cooldown ended starts over.
+        let later = c.until_ms + s(STRIKE_MEMORY_S) + 1;
+        assert_eq!(
+            c.strike(None, later),
+            Cooldown {
+                until_ms: later + s(30),
+                strikes: 1
+            }
+        );
+        assert_eq!(
+            authority("http://127.0.0.1:8080/x").unwrap(),
+            "127.0.0.1:8080"
+        );
+        assert_eq!(
+            cooldown_file_name("export.arxiv.org"),
+            "export.arxiv.org.cooldown"
+        );
+        assert_eq!(cooldown_file_name("127.0.0.1:80"), "127.0.0.1_80.cooldown");
     }
 
     #[test]
