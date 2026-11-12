@@ -8,6 +8,7 @@ mod arxiv;
 mod atom;
 mod bib;
 mod browser;
+mod card;
 mod catalogue;
 mod check;
 mod cite;
@@ -273,6 +274,26 @@ enum Command {
         /// Print what each sidecar would hold; write nothing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Make the paper card (rf.paper-card/1) of a registered paper: one
+    /// headless Claude call on its local text, then a check of every item.
+    /// An item is kept only when its quote, of at least 8 words, is found in
+    /// the text and every number of its value is in its quote. A card that
+    /// keeps under 80% of its items is not stored (a suspected text-extraction
+    /// fault). Off unless `[papers] cards = true`.
+    Card {
+        /// The registry key.
+        #[arg(long)]
+        key: String,
+        /// Make it from the entry's Docling text (default: its first other text).
+        #[arg(long)]
+        docling: bool,
+        /// Call Claude even when the card matches the text, prompt and model.
+        #[arg(long)]
+        force: bool,
+        /// Only check a saved raw reply: no call, nothing stored.
+        #[arg(long, value_name = "FILE")]
+        reply: Option<PathBuf>,
     },
     /// Build or check the reference registry (rf.reference/1 JSONL), attach a
     /// text to an entry, or fill abstracts.
@@ -1036,6 +1057,12 @@ fn main() -> ExitCode {
             all,
             dry_run,
         } => structure_cmd(&config, &targets, all, dry_run),
+        Command::Card {
+            key,
+            docling,
+            force,
+            reply,
+        } => card::run(&config, &key, docling, force, reply.as_deref()),
         Command::Registry { action } => registry(config, action, &http),
         Command::Config { json } => {
             show_config(&config, json);
@@ -1575,6 +1602,10 @@ fn show_config(c: &config::Config, json: bool) {
         ("search_log", Some(c.display(&c.search_log))),
         ("cache_dir", Some(c.display(&c.cache_dir))),
         ("docling", Some(c.docling.join(" "))),
+        ("cards", Some(c.cards.to_string())),
+        ("card_dir", Some(c.display(&c.card_dir))),
+        ("claude", Some(c.claude.join(" "))),
+        ("card_model", Some(c.card_model.clone())),
     ];
     if json {
         let map: serde_json::Map<String, serde_json::Value> = fields

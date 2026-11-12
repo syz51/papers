@@ -49,6 +49,14 @@ struct RawPapers {
     /// The command that runs Python with Docling importable; `read
     /// --extraction docling` appends `-c <script> <args>`.
     docling: Option<Vec<String>>,
+    /// The paper-card switch (DR043); off unless set.
+    cards: Option<bool>,
+    /// Where `papers card` writes `<key>.json`.
+    card_dir: Option<PathBuf>,
+    /// The command that runs Claude Code in print mode for `papers card`.
+    claude: Option<Vec<String>>,
+    /// The model `papers card` asks for.
+    card_model: Option<String>,
 }
 
 /// Resolved settings; every path is absolute or relative to the current directory.
@@ -74,6 +82,17 @@ pub struct Config {
     pub cite_replace: Option<String>,
     /// `[papers] docling`, else [`DEFAULT_DOCLING`].
     pub docling: Vec<String>,
+    /// `[papers] cards`: whether `papers card` may run (default off).
+    pub cards: bool,
+    /// `[papers] card_dir`, else [`DEFAULT_CARD_DIR`].
+    pub card_dir: PathBuf,
+    /// `[papers] claude`, else [`DEFAULT_CLAUDE`].
+    pub claude: Vec<String>,
+    /// `[papers] card_model`, else [`DEFAULT_CARD_MODEL`].
+    pub card_model: String,
+    /// `<state_dir>/papers`: the replies and the empty working directory of
+    /// `papers card`.
+    pub state: PathBuf,
 }
 
 /// Default notes directory (relative to the project root).
@@ -94,6 +113,13 @@ pub const DEFAULT_DOCLING: [&str; 8] = [
     "python",
     "-I",
 ];
+/// Where paper cards go, relative to the project root.
+pub const DEFAULT_CARD_DIR: &str = "sources/cards";
+/// The command that runs Claude Code; `papers card` appends `-p` and its options.
+pub const DEFAULT_CLAUDE: &str = "claude";
+/// The card model: Haiku 5.5, measured on the twenty pilot papers
+/// (research-factory-213). The pilot of DR043 used a Sonnet model.
+pub const DEFAULT_CARD_MODEL: &str = "claude-haiku-5-5";
 /// Note status → registry depth unless `[papers] status_depth` says otherwise.
 /// `read` is `method`, not `full`: the status does not prove a full-text read.
 pub const DEFAULT_STATUS_DEPTH: [(&str, &str); 2] = [("read", "method"), ("skimmed", "abstract")];
@@ -162,6 +188,13 @@ impl Config {
             docling: p
                 .docling
                 .unwrap_or_else(|| DEFAULT_DOCLING.map(str::to_owned).to_vec()),
+            cards: p.cards.unwrap_or(false),
+            card_dir: at(p.card_dir.as_deref().unwrap_or(Path::new(DEFAULT_CARD_DIR))),
+            claude: p.claude.unwrap_or_else(|| vec![DEFAULT_CLAUDE.to_owned()]),
+            card_model: p
+                .card_model
+                .unwrap_or_else(|| DEFAULT_CARD_MODEL.to_owned()),
+            state: state_dir.join("papers"),
             file,
             root,
             notes,
