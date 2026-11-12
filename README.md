@@ -43,7 +43,7 @@ This needs Rust 1.99 or newer (edition 2024). `papers read` can retry a page tha
 | `registry abstracts` | Fill the `abstract` field of entries that have none, from arXiv and OpenAlex by id; no PDF download | `papers registry abstracts --dry-run` |
 | `structure` | Write the `rf.paper-structure/1` sidecar of texts: pages, section spans, the reference list and the registry entries it cites | `papers structure --all` |
 | `verify` | Compare registry entries (or notes) with arXiv, Crossref, OpenAlex | `papers verify --keys 12,40 --format jsonl` |
-| `read` | Download an open-access PDF and extract its text (plain or layout), with a sha256 manifest | `papers read --key 12 --record --extraction layout` |
+| `read` | Download an open-access PDF and extract its text (plain or layout), with a sha256 manifest; or convert the saved PDF with Docling as a second text | `papers read --key 12 --record --extraction layout` |
 | `refs` | Works a paper cites (OpenAlex, else Semantic Scholar) | `papers refs 2601.00001 --max 50` |
 | `cited-by` | Works citing a paper | `papers cited-by 10.1234/abc --source s2` |
 | `bib` | Export registry entries as BibTeX or CSL-JSON | `papers bib 12 40 --format csl-json` |
@@ -99,6 +99,7 @@ registry = "references.jsonl"       # default
 catalogue = "docs/references.md"    # numbered Markdown catalogue; none by default
 search_log = ".research/papers/search.jsonl"  # default: <state_dir>/papers/search.jsonl
 cache_dir = ".research/papers/cache"          # default: <state_dir>/papers/cache
+docling = ["uv", "run", "--quiet", "--no-project", "--with", "docling==2.150.0", "python", "-I"]  # default: the command that runs Python with Docling
 status_depth = { read = "full" }    # note status -> registry depth; default read = "method", skimmed = "abstract"
 cite_patterns = ['\[@(?P<key>[\w.-]+)\]']    # default: the two patterns under "cite"
 cite_replace = "[{n}]"              # default
@@ -128,8 +129,9 @@ Optional fields that `papers` adds to the contract:
 | `author_variants` | Other spellings of the first author that an index uses when its metadata misspells the name; `verify` accepts any of them. Copied from a note's frontmatter. It is omitted when empty. |
 | `citekey` | A citation key that overrides the generated one in `bib` and `cite`. It is set by hand and kept when the registry is rebuilt. |
 | `texts[].retrieved` | When `read` downloaded the text, as a UTC RFC 3339 time. It is omitted for texts attached by hand without `--retrieved` and for texts recorded before `papers` added it. |
-| `texts[].extraction` | How the text was extracted from its PDF: `plain` or `layout` (`pdftotext -layout`). It is omitted for texts attached by hand without `--extraction` and for texts recorded before `papers` added it; `read` treats those as `plain`. Another value, such as one a later version writes, is kept as it is; `read` does not re-extract such a text without `--extraction`. |
+| `texts[].extraction` | How the text was extracted from its PDF: `plain`, `layout` (`pdftotext -layout`) or `docling` (Docling's Markdown, the entry's second text). It is omitted for texts attached by hand without `--extraction` and for texts recorded before `papers` added it; `read` treats those as `plain`. Another value, such as one a later version writes, is kept as it is; `read` does not re-extract such a text without `--extraction`. |
 | `texts[].pdf_sha256` | The sha256 of the PDF that `read` extracted the text from, saved beside the text as `<name>.pdf`. It is omitted for texts attached by hand and for texts recorded before `papers` added it; `registry record-pdfs` adds it to those whose saved PDF reproduces the text. |
+| `texts[].extractor` | For a Docling text: `docling <version>`, the Docling version that converted the PDF. |
 
 | `abstract`, `abstract_source` | The work's abstract as one string with single spaces, and where it is from (`arxiv:<id>v<n>` or `openalex:<W id>`). Both are absent when no abstract is recorded. [`registry abstracts`](#registry-abstracts) adds them. |
 
@@ -158,6 +160,7 @@ Every write (`registry build`, `registry attach`, `registry record-pdfs`, `regis
 | `key-mismatch` | error | The heading number and the `[N]` entry number differ, or a note's id and its file name differ. |
 | `key-missing-from-source` | warn | A registry key is no longer in the source. |
 | `registry-stale` | warn | The registry differs from a fresh parse of the source. |
+| `derivative-stale` | warn | A file made from a text or PDF records an input sha256 that the input no longer has: a structure sidecar whose text changed, or a Docling text whose `<name>.pdf` changed. The message names the command that makes it again. Inputs that are not in the checkout, such as git-ignored texts in a worktree, are skipped. |
 
 These parse issues are also reported:
 
@@ -199,6 +202,7 @@ When an index's metadata is wrong rather than the note, record why in the note's
 
 - `plain`, the default, gives the text in reading order, as described below.
 - `layout` runs `pdftotext -layout`, which keeps columns and table alignment. It needs Poppler's `pdftotext` on `PATH`; without it, `read` stops with an error before it downloads or extracts anything. When `pdftotext` fails on the PDF, the PDF is kept and no text is written. There is no fallback to `pdf-extract`.
+- `docling` converts the PDF with [Docling](#docling-a-second-text) into a second text, `<name>.docling.md`. The plain or layout text stays as it is.
 
 Without `--extraction`, `read` uses the mode recorded for the text it would replace: the stored text that still has its recorded hash, else a text recorded at the same path in the sidecar or the registry entry. So a layout text stays layout when it is extracted again. Other texts of the entry do not set the mode. In plain mode the text comes from the `pdf-extract` crate. When it fails, panics or finds no text, `papers read` runs Poppler's `pdftotext` on the saved PDF, if it is on `PATH`. It also runs `pdftotext` when the paper's title is missing from `pdf-extract`'s text, as when that text is garbled. It then keeps `pdftotext`'s text only if that text contains the title; otherwise it keeps `pdf-extract`'s text and prints the title warning. A `pdftotext` run that takes longer than 60 seconds, or prints more than 64 MiB, is stopped and reported. The `text:` line names the extractor that produced the text. When neither extractor gives text, the PDF is kept, no text is written, and the `text:` line gives both reasons, such as `pdftotext is not on PATH`.
 
@@ -222,6 +226,21 @@ For a text obtained another way (by hand, or listed in an existing manifest), `p
 - When a `<name>.json` manifest from `read` lies beside a `<name>.txt` text (in any case) and names the same path, `attach` rewrites it with the recorded text, so its sha256, origin, `retrieved` and `extraction` match the registry. It does so under the registry's lock; when the manifest cannot be read or written, `attach` fails and leaves the registry unchanged. Another JSON file there is left alone.
 
 Unless `--no-browser` is given, a candidate retries in headless Chromium only when its plain-HTTP reply was a JavaScript check page: a 202 HTML reply (how AWS WAF serves its challenge, as on figshare) or a small 200 HTML page with a challenge marker. A 403, a 429, any other refusal, and transport errors are reported and never retried in the browser. When a host blocks automated browsers, `papers` reports the block. It does no CAPTCHA solving or fingerprint spoofing.
+
+### Docling: a second text
+
+`papers read --key <key> --extraction docling [--record]` (or `papers read <ref> --extraction docling`) converts the PDF with [Docling](https://github.com/docling-project/docling) into Markdown. Headings are `#` lines, tables are Markdown tables, and pages are separated by `<!-- page -->` lines. OCR is off and table structure is on, as measured in the extractor comparison of November 2026.
+
+- It writes `<name>.docling.md` and its manifest `<name>.docling.json` beside `<name>.txt`, and the text's structure sidecar. `<name>.txt`, `<name>.json` and the entry's plain or layout text are not changed.
+- It converts the saved `<name>.pdf` when its sha256 is the `pdf_sha256` recorded for one of the paper's texts, and makes no network request. The manifest keeps that text's `origin` and `retrieved`. A saved PDF with no recorded sha256 is not converted; `registry record-pdfs` records it when it reproduces the text, or `--force` downloads the PDF again. Only when no PDF is saved does `read` download it.
+- The manifest is `{path, sha256, origin, retrieved, extraction: "docling", pdf_sha256, extractor: "docling <version>"}`. NUL bytes in Docling's output are dropped.
+- `--record` adds it to the entry's `texts` as a second text. An entry keeps one Docling text: running it again replaces that text in place, and the plain text keeps its place too.
+- Running it again does nothing when the Docling text still has its recorded sha256 and the saved PDF, if any, its `pdf_sha256`. `--force` converts again.
+- A run without `--extraction` never reads, replaces or records the Docling text.
+
+Docling runs as an external program, like `pdftotext`. `[papers] docling` is the command that runs Python with Docling importable; `papers` appends `-c <script> <pdf> <out>`. The default runs Docling 2.150.0 through `uv`, which installs it on first use; Docling then downloads its layout and table models (about 0.5 GB). Without a working command, `read` stops with an error that names Docling before it downloads anything. A conversion that takes longer than 30 minutes is stopped. Docling is MIT-licensed; its models are Apache-2.0 and CDLA-Permissive-2.0.
+
+Write order: Docling writes to `<name>.docling.md.tmp`. `read` then records the text in the registry (with `--record`), writes the manifest, and only then renames the text into place. When the record or the manifest fails, the temporary file is removed and no Docling text is left. Structure sidecars are written the same way, through a temporary file and a rename.
 
 ### `registry record-pdfs`
 
@@ -254,16 +273,16 @@ A text is named by the keys of the registry entries that list its path, else by 
 
 ## Structure sidecars: `rf.paper-structure/1`
 
-`papers structure <key|path>…` writes `<text file name>.structure.json` beside each text: `sources/text/87.txt.structure.json` for `sources/text/87.txt`. `papers structure --all` does so for every text the registry records. `papers read` writes it for the text it saves or finds unchanged in `--out`, and prints `structure: <path>`.
+`papers structure <key|path>…` writes `<text file name>.structure.json` beside each text: `sources/text/87.txt.structure.json` for `sources/text/87.txt`, and `sources/text/87.docling.md.structure.json` for its Docling text. `papers structure --all` does so for every text the registry records. `papers read` writes it for the text it saves or finds unchanged in `--out`, and prints `structure: <path>`.
 
 The sidecar holds, as raw line ranges of the text:
 
-- the pages, from the form feeds the extractor wrote;
+- the pages, from the form feeds the extractor wrote, or a Markdown text's `<!-- page -->` lines;
 - the section spans: `front`, `abstract`, `body`, `references`, `appendix` or `unknown`, each with its heading and level;
 - the reference list, divided into references where they are numbered or separated by blank lines;
 - for each reference, the registry key it cites, matched by DOI, arXiv id or normalised title.
 
-The command reads only the text and the registry. It makes no network request, never changes a text, and works for a text of any `extraction` value and for Markdown texts. What detection does not find is `unknown` or a warning, never a guess. It prints one line per text, then the text's warnings, then the counts of texts with a reference list and with an abstract span. `--dry-run` prints the same and writes nothing. A sidecar is rewritten only when its content changes.
+The command reads only the text and the registry. It makes no network request, never changes a text, and works for a text of any `extraction` value and for Markdown texts. What detection does not find is `unknown` or a warning, never a guess. It prints one line per text, then the text's warnings, then the counts of texts with a reference list and with an abstract span. `--dry-run` prints the same and writes nothing. A sidecar is rewritten only when its content changes. It records its text's sha256; `registry check` reports `derivative-stale` when the text no longer has it.
 
 [docs/interfaces.md](docs/interfaces.md) defines the schema, the line numbering and what a search index does with the sidecar.
 
@@ -399,7 +418,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The tests use synthetic records and public metadata fixtures only, and they make no network requests.
+The tests use synthetic records and public metadata fixtures only, and they make no network requests. A shell script stands in for Docling.
 
 Every pull request that changes the tool's behaviour raises the version in `Cargo.toml` and `Cargo.lock`.
 

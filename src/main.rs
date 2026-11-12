@@ -13,6 +13,8 @@ mod check;
 mod cite;
 mod config;
 mod crossref;
+mod derivative;
+mod docling;
 mod finding;
 mod graph;
 mod http;
@@ -160,9 +162,10 @@ enum Command {
         /// Download again even when a copy with the recorded sha256 exists.
         #[arg(long)]
         force: bool,
-        /// How to extract the text: plain (pdf-extract, else pdftotext) or layout
-        /// (`pdftotext -layout`). Default: the mode recorded for the text in its
-        /// manifest or registry entry, else plain.
+        /// How to extract the text: plain (pdf-extract, else pdftotext), layout
+        /// (`pdftotext -layout`), or docling (Docling's Markdown, a second text
+        /// <name>.docling.md beside <name>.txt). Default: the mode recorded for
+        /// the text in its manifest or registry entry, else plain.
         #[arg(long, value_enum, value_name = "MODE")]
         extraction: Option<registry::Extraction>,
         /// Skip the headless-browser retry of pages that answer with a JavaScript
@@ -362,7 +365,8 @@ enum RegistryAction {
         /// When the original was downloaded (RFC 3339, such as 2026-11-07T10:00:00Z).
         #[arg(long, value_name = "TIME", value_parser = parse_timestamp)]
         retrieved: Option<String>,
-        /// How the text was extracted from its PDF: plain or layout (`pdftotext -layout`).
+        /// How the text was extracted from its PDF: plain, layout (`pdftotext
+        /// -layout`) or docling.
         #[arg(long, value_enum, value_name = "MODE")]
         extraction: Option<registry::Extraction>,
         /// Registry file (overrides [papers] registry).
@@ -597,8 +601,16 @@ fn record_text(
             std::fs::write(sidecar, format!("{line}\n"))
                 .map_err(|e| format!("{}: {e}", sidecar.display()))?;
         }
-        r.texts.retain(|t| t.path != text.path);
-        r.texts.push(text.clone());
+        // An entry keeps one Docling text: a new one replaces it, wherever it is.
+        // A text read again keeps its place.
+        let docling = is_docling(&text);
+        let replaced = |t: &registry::Text| t.path == text.path || (docling && is_docling(t));
+        let at = r.texts.iter().position(replaced);
+        r.texts.retain(|t| !replaced(t));
+        match at {
+            Some(at) => r.texts.insert(at.min(r.texts.len()), text.clone()),
+            None => r.texts.push(text.clone()),
+        }
         Ok((text, manifest.map(|(path, _)| path), notes))
     })?;
     for note in notes {
@@ -664,6 +676,9 @@ fn reproduce<'a>(
                 text if same(&text) => Ok(format!("{program} -layout")),
                 _ => Err(format!("{program} -layout gives another text")),
             }
+        }
+        Ok(registry::Extraction::Docling) => {
+            Err("a Docling text has its own <name>.docling.json manifest".to_owned())
         }
         Err(value) => Err(format!(
             "its extraction mode {value} is not known to this version of papers"
@@ -1325,7 +1340,7 @@ fn write_structure(
     let sidecar = structure::sidecar(&config.root.join(&built.text.path));
     let rendered = built.render();
     if std::fs::read_to_string(&sidecar).ok().as_deref() != Some(rendered.as_str()) {
-        std::fs::write(&sidecar, rendered).map_err(|e| format!("{}: {e}", sidecar.display()))?;
+        derivative::write(&sidecar, rendered.as_bytes())?;
     }
     Ok(sidecar)
 }
@@ -1554,6 +1569,7 @@ fn show_config(c: &config::Config, json: bool) {
         ("catalogue", c.catalogue.as_deref().map(|p| c.display(p))),
         ("search_log", Some(c.display(&c.search_log))),
         ("cache_dir", Some(c.display(&c.cache_dir))),
+        ("docling", Some(c.docling.join(" "))),
     ];
     if json {
         let map: serde_json::Map<String, serde_json::Value> = fields
@@ -2336,6 +2352,8 @@ struct Target<'a> {
     extraction: registry::Extraction,
     /// The `pdftotext` program: `pdf::PDFTOTEXT`, or a stand-in in tests.
     pdftotext: &'a str,
+    /// The command that runs Python with Docling: `[papers] docling`.
+    docling: &'a [String],
 }
 
 /// What a successful download produced.
@@ -2515,10 +2533,17 @@ fn read(
     read_from(http, config, o, pdftotext, out_dir, input, entry)
 }
 
+/// True for a text recorded as Docling's Markdown, the entry's second text.
+fn is_docling(text: &registry::Text) -> bool {
+    text.extraction() == Ok(Some(registry::Extraction::Docling))
+}
+
 /// True when a recorded text answers a run that asks for mode `asked`. A text
 /// without a recorded mode counts as plain.
 fn keeps_mode(asked: Option<registry::Extraction>, text: &registry::Text) -> bool {
     match (asked, text.extraction()) {
+        // A Docling text is a second text; only `--extraction docling` asks for it.
+        (None, Ok(Some(registry::Extraction::Docling))) => false,
         (None, _) => true,
         (Some(asked), Ok(mode)) => mode.unwrap_or(registry::Extraction::Plain) == asked,
         (Some(_), Err(_)) => false,
@@ -2554,6 +2579,19 @@ fn read_from(
         (None, Some(Ref::Doi(doi))) => doi.file_key(),
         (None, None) => url_file_name(&input).expect("normalize_url accepted the input"),
     };
+    if o.extraction == Some(registry::Extraction::Docling) {
+        return read_docling(
+            http,
+            config,
+            o,
+            pdftotext,
+            out_dir,
+            &input,
+            reference.as_ref(),
+            name,
+            entry,
+        );
+    }
     let sidecar = out_dir.join(format!("{name}.json"));
     // The sidecar first: it keeps the download time, which a text
     // attached by hand to the entry does not have.
@@ -2563,7 +2601,13 @@ fn read_from(
     {
         recorded.push(t);
     }
-    recorded.extend(entry.iter().flat_map(|r| r.texts.clone()));
+    // The plain or layout text only: a Docling text is a second text.
+    recorded.extend(
+        entry
+            .iter()
+            .flat_map(|r| r.texts.clone())
+            .filter(|t| !is_docling(t)),
+    );
     let current = existing_text(config, &recorded);
     let txt_path = config.display(&out_dir.join(format!("{name}.txt")));
     // The mode of the text this run would replace: the current one, else one
@@ -2660,6 +2704,7 @@ fn read_from(
             .unwrap_or_default(),
         extraction,
         pdftotext,
+        docling: &config.docling,
     };
     if let Some((bytes, t)) = local {
         // The PDF's origin and download time stay those recorded for it.
@@ -2698,24 +2743,44 @@ fn finish_read(
     let line = serde_json::to_string(&text).expect("texts serialize");
     std::fs::write(sidecar, format!("{line}\n"))
         .map_err(|e| format!("{}: {e}", sidecar.display()))?;
-    let path = text.path.clone();
     let saved = text.clone();
     if o.record
         && let Some(entry) = entry
     {
-        // Applied to the registry as it is now, not the copy loaded before the download.
-        record_text(config, &entry.key, text, None, || {
-            format!("entry {} left the registry during the download", entry.key)
-        })?;
-        println!(
-            "recorded in {} (key {})",
-            config.display(&config.registry),
-            entry.key
-        );
+        record_read(config, entry, text)?;
     }
-    // The structure sidecar, from the registry as it is now. A registry that
-    // does not load gives no citation edges, which is said. The sidecar can be
-    // built again, so a failure here does not fail the read.
+    structure_after_read(config, entry, saved);
+    println!("{line}");
+    Ok(true)
+}
+
+/// Records a read text in `entry`, applied to the registry as it is now, not
+/// the copy loaded before the download.
+fn record_read(
+    config: &config::Config,
+    entry: &registry::Reference,
+    text: registry::Text,
+) -> Result<(), String> {
+    record_text(config, &entry.key, text, None, || {
+        format!("entry {} left the registry during the download", entry.key)
+    })?;
+    println!(
+        "recorded in {} (key {})",
+        config.display(&config.registry),
+        entry.key
+    );
+    Ok(())
+}
+
+/// Writes the structure sidecar of a read text, from the registry as it is
+/// now. A registry that does not load gives no citation edges, which is said.
+/// The sidecar can be built again, so a failure here does not fail the read.
+fn structure_after_read(
+    config: &config::Config,
+    entry: Option<&registry::Reference>,
+    saved: registry::Text,
+) {
+    let path = saved.path.clone();
     let mut records = registry::load(&config.registry)
         .unwrap_or_else(|e| {
             eprintln!("papers: registry not read for the structure's citations: {e}");
@@ -2742,6 +2807,168 @@ fn finish_read(
             "papers: structure sidecar not written (`papers structure {path}` builds it): {e}"
         ),
     }
+}
+
+/// `read --extraction docling`: Docling's Markdown of the saved PDF, as a
+/// second text `<name>.docling.md` with its manifest `<name>.docling.json`.
+/// The plain text, its manifest and its entry stay as they are. The PDF is
+/// downloaded only when none is saved (or with `--force`).
+#[allow(clippy::too_many_arguments)]
+fn read_docling(
+    http: &Http,
+    config: &config::Config,
+    o: &ReadOptions,
+    pdftotext: &str,
+    out_dir: PathBuf,
+    input: &str,
+    reference: Option<&Ref>,
+    name: String,
+    entry: Option<registry::Reference>,
+) -> Result<bool, String> {
+    let md_path = out_dir.join(format!("{name}{}", docling::TEXT_SUFFIX));
+    let manifest = out_dir.join(format!("{name}{}", docling::MANIFEST_SUFFIX));
+    let pdf_path = out_dir.join(format!("{name}.pdf"));
+    let read_text = |path: &Path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|json| serde_json::from_str::<registry::Text>(&json).ok())
+    };
+    // The Docling texts recorded for this paper: its manifest first, then the
+    // entry's.
+    let entry_texts = entry.iter().flat_map(|r| r.texts.iter().cloned());
+    let recorded: Vec<registry::Text> = read_text(&manifest)
+        .into_iter()
+        .chain(entry_texts.clone().filter(is_docling))
+        .collect();
+    let saved_pdf = std::fs::read(&pdf_path).ok();
+    let pdf_sha = saved_pdf.as_deref().map(http::sha256_hex);
+    if !o.force
+        && let Some(t) = recorded.iter().find(|t| {
+            sha256_file(&config.root.join(&t.path)).as_deref() == Some(t.sha256.as_str())
+                && (pdf_sha.is_none() || pdf_sha.as_deref() == t.pdf_sha256())
+        })
+    {
+        println!(
+            "already have {} (sha256 matches); not converting (--force to convert again)",
+            t.path
+        );
+        return finish_docling(
+            config,
+            o,
+            entry.as_ref(),
+            &manifest,
+            &md_path,
+            t.clone(),
+            false,
+        );
+    }
+    // Every text that names the PDF it was made from: the PDF's origin and
+    // download time stay those recorded for it.
+    let known: Vec<registry::Text> = recorded
+        .iter()
+        .cloned()
+        .chain(read_text(&out_dir.join(format!("{name}.json"))))
+        .chain(entry_texts)
+        .filter(|t| t.pdf_sha256().is_some())
+        .collect();
+    let local = match (saved_pdf, &pdf_sha) {
+        (Some(bytes), Some(sha)) => match known.iter().find(|t| t.pdf_sha256() == Some(sha)) {
+            Some(t) => Some((bytes, t.origin.clone(), t.retrieved.clone())),
+            None if o.force => None,
+            None => {
+                return Err(format!(
+                    "{} has no sha256 recorded for this paper's texts, so it may not be the                      PDF they were read from; `papers registry record-pdfs` records it when it                      reproduces the text, or --force downloads the PDF again",
+                    config.display(&pdf_path)
+                ));
+            }
+        },
+        _ => None,
+    };
+    // Checked before any download.
+    let version = docling::version(&config.docling).map_err(|e| {
+        format!(
+            "Docling extraction needs Docling ({e}); install uv, or set [papers] docling              to a command that runs Python with Docling"
+        )
+    })?;
+    println!("docling: {version}");
+    let target = Target {
+        config,
+        dir: out_dir,
+        name,
+        title: entry
+            .as_ref()
+            .and_then(|r| r.title.clone())
+            .unwrap_or_default(),
+        extraction: registry::Extraction::Docling,
+        pdftotext,
+        docling: &config.docling,
+    };
+    let saved = match local {
+        Some((bytes, origin, retrieved)) => {
+            println!("converting {} (sha256 matches)", config.display(&pdf_path));
+            Some(extract_pdf(&target, &bytes, origin, retrieved)?)
+        }
+        None => {
+            let mut browse = |pages: &[String], target: &Target| {
+                if o.browser {
+                    try_in_browser(pages, target)
+                } else {
+                    println!(
+                        "not retrying the JavaScript check page(s) in a browser (--no-browser)"
+                    );
+                    Ok(None)
+                }
+            };
+            download(http, input, reference, target, &mut browse)?
+        }
+    };
+    match saved {
+        Some(Saved::Text(t)) => {
+            finish_docling(config, o, entry.as_ref(), &manifest, &md_path, t, true)
+        }
+        Some(Saved::PdfOnly) => Ok(false),
+        None => {
+            println!("no candidate yielded a PDF; open the landing page in a browser");
+            Ok(false)
+        }
+    }
+}
+
+/// Records a Docling text, writes its manifest, then moves the staged text
+/// into place (when `staged`): a reader never finds the text without its
+/// record. The structure sidecar comes last.
+fn finish_docling(
+    config: &config::Config,
+    o: &ReadOptions,
+    entry: Option<&registry::Reference>,
+    manifest: &Path,
+    md_path: &Path,
+    text: registry::Text,
+    staged: bool,
+) -> Result<bool, String> {
+    let line = serde_json::to_string(&text).expect("texts serialize");
+    let written = (|| {
+        if o.record
+            && let Some(entry) = entry
+        {
+            record_read(config, entry, text.clone())?;
+        }
+        derivative::write(manifest, format!("{line}\n").as_bytes())?;
+        if staged {
+            derivative::commit(md_path)?;
+        }
+        Ok::<_, String>(())
+    })();
+    if let Err(e) = written {
+        if staged {
+            derivative::discard(md_path);
+        }
+        return Err(e);
+    }
+    if staged {
+        println!("text: {}", config.display(md_path));
+    }
+    structure_after_read(config, entry, text);
     println!("{line}");
     Ok(true)
 }
@@ -3058,6 +3285,56 @@ fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String>
     extract_pdf(target, body, Some(source.to_owned()), Some(finding::now()))
 }
 
+/// Converts `<dir>/<name>.pdf`, whose bytes are `body`, with Docling into the
+/// staged `<dir>/<name>.docling.md` (see [`derivative::pending`]); the caller
+/// moves it into place once its record is written. NUL bytes are dropped.
+fn docling_text(
+    target: &Target,
+    body: &[u8],
+    origin: Option<String>,
+    retrieved: Option<String>,
+) -> Result<Saved, String> {
+    let pdf_path = target.dir.join(format!("{}.pdf", target.name));
+    let md_path = target
+        .dir
+        .join(format!("{}{}", target.name, docling::TEXT_SUFFIX));
+    let tmp = derivative::pending(&md_path);
+    let staged = docling::convert(target.docling, &pdf_path, &tmp).and_then(|version| {
+        let raw = std::fs::read(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        let text = String::from_utf8_lossy(&raw).replace('\0', "");
+        if text.as_bytes() != raw {
+            std::fs::write(&tmp, &text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        }
+        Ok((version, text))
+    });
+    let (version, text) = staged.map_err(|e| {
+        derivative::discard(&md_path);
+        format!("Docling did not convert {}: {e}", pdf_path.display())
+    })?;
+    println!(
+        "text: {} words, extracted by docling {version}",
+        text.split_whitespace().count()
+    );
+    if !pdf::has_title(&text, &target.title) {
+        println!(
+            "warning: the title does not appear in the extracted text; check this is the right paper"
+        );
+    }
+    let mut saved = registry::Text {
+        path: target.config.display(&md_path),
+        sha256: http::sha256_hex(text.as_bytes()),
+        origin,
+        retrieved,
+        extra: Default::default(),
+    };
+    saved.set_extraction(registry::Extraction::Docling);
+    saved.set_pdf_sha256(http::sha256_hex(body));
+    saved
+        .extra
+        .insert("extractor".to_owned(), format!("docling {version}").into());
+    Ok(Saved::Text(saved))
+}
+
 /// Extracts the text of `<dir>/<name>.pdf`, whose bytes are `body`, into
 /// `<dir>/<name>.txt`, and returns its record with the PDF's `origin`, download
 /// time and sha256.
@@ -3067,9 +3344,13 @@ fn extract_pdf(
     origin: Option<String>,
     retrieved: Option<String>,
 ) -> Result<Saved, String> {
+    if target.extraction == registry::Extraction::Docling {
+        return docling_text(target, body, origin, retrieved);
+    }
     let pdf_path = target.dir.join(format!("{}.pdf", target.name));
     let txt_path = target.dir.join(format!("{}.txt", target.name));
     let chosen = match target.extraction {
+        registry::Extraction::Docling => unreachable!("handled above"),
         registry::Extraction::Plain => pdf::choose_text(
             pdf::extract_text(body),
             &pdf_path,
@@ -3625,6 +3906,7 @@ mod tests {
             title: "X".into(),
             extraction: registry::Extraction::Plain,
             pdftotext: &absent,
+            docling: &[],
         };
         let (mut tried, mut challenged) = (Vec::new(), Vec::new());
         let saved = try_candidates(
@@ -4363,6 +4645,7 @@ mod tests {
             title: String::new(),
             extraction: registry::Extraction::Layout,
             pdftotext: program,
+            docling: &[],
         };
         let pdf = tiny_pdf("Synthetic Layout Paper");
         let saved = save_pdf(
@@ -4557,6 +4840,7 @@ mod tests {
             title: String::new(),
             extraction: registry::Extraction::Plain,
             pdftotext: &absent,
+            docling: &[],
         };
         let mut retried = Vec::new();
         let mut browse = |pages: &[String], _: &Target| {

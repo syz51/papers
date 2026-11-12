@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::catalogue::{self, Issue};
 use crate::check;
 use crate::config::Config;
+use crate::derivative;
 use crate::finding::{self, Finding, Format, Severity};
 use crate::notes;
 use crate::registry::{self, Reference};
@@ -312,6 +313,7 @@ pub fn check(config: &Config, from: Option<From>, format: Format) -> Result<bool
         })?,
     };
     findings.extend(check::check(&records));
+    findings.extend(derivative::check(config, &records, |_| Vec::new()));
     let ok = finding::emit(&findings, format);
     eprintln!(
         "papers: checked {} entries: {} findings{}",
