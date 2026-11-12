@@ -321,8 +321,8 @@ fn preflight_runs_the_card_flags_through_the_command_and_fails_on_its_exit() {
 
     std::fs::write(p.dir.join("exit-code"), "3").unwrap();
     let out = p.papers(&["card", "--preflight", "--cap", "777"]);
-    assert_eq!(out.status.code(), Some(1), "{}", shown(&out));
-    assert!(shown(&out).contains("exit 3"), "{}", shown(&out));
+    assert_eq!(out.status.code(), Some(2), "{}", shown(&out));
+    assert!(shown(&out).contains("exit status: 3"), "{}", shown(&out));
     assert!(shown(&out).contains("start no cards"), "{}", shown(&out));
     assert_eq!(p.read("args").unwrap().lines().nth(2), Some("777"));
     assert_eq!(p.calls(), 2);

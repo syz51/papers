@@ -47,6 +47,8 @@ pub const CHECKER: &str = "claimcheck 0.10.0";
 /// Haiku through `claude-experiment`; Claude Code's environment and account
 /// blocks add about 580. Raise it when the prompt or schema grows.
 pub const PREFLIGHT_CAP: u32 = 1500;
+/// The longest the preflight's canary call may take.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// The longest a call may take.
 const TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// The most a call may print.
@@ -568,8 +570,8 @@ fn call(config: &Config, text: Vec<u8>) -> Result<Vec<u8>, String> {
 
 /// `papers card --preflight`: runs `<[papers] claude> preflight --cap <cap>`
 /// with the card call's flags, as `claude-experiment` takes it, before a batch
-/// of cards. Its report and output pass through. Returns false when it exits
-/// nonzero, such as 3 when a request's prompt tokens exceed `cap`.
+/// of cards. Errs when it fails, with its last line of standard error, such
+/// as its token report when it exits 3 for a prompt over `cap`.
 pub fn preflight(config: &Config, cap: u32) -> Result<bool, String> {
     if !config.cards {
         return Err(
@@ -578,30 +580,16 @@ pub fn preflight(config: &Config, cap: u32) -> Result<bool, String> {
         );
     }
     let before = ["preflight".to_owned(), "--cap".to_owned(), cap.to_string()];
-    let (program, mut command) = command(config, &before)?;
+    let (program, command) = command(config, &before)?;
     println!(
         "preflight: {} preflight --cap {cap} ({} with the card flags)",
         config.claude.join(" "),
         config.card_model
     );
-    let status = command
-        .stdin(std::process::Stdio::null())
-        .status()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => format!("{program} is not on PATH"),
-            _ => format!("{program} could not start: {e}"),
-        })?;
-    if status.success() {
-        println!("preflight passed");
-        return Ok(true);
-    }
-    let code = status
-        .code()
-        .map_or_else(|| "a signal".to_owned(), |c| format!("exit {c}"));
-    println!(
-        "preflight failed ({code}; claude-experiment exits 3 when a prompt exceeds the cap): start no cards"
-    );
-    Ok(false)
+    pdf::run_with_input(program, command, None, PREFLIGHT_TIMEOUT, MAX_REPLY)
+        .map_err(|e| format!("{e}; start no cards"))?;
+    println!("preflight passed");
+    Ok(true)
 }
 
 /// Saves a raw reply under `<state>/card-replies/`, named by key and time.

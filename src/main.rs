@@ -297,8 +297,8 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         reply: Option<PathBuf>,
         /// Make no card: run `<[papers] claude> preflight --cap <cap>` with the
-        /// card call's flags, for `claude-experiment`, and exit 1 when it
-        /// fails. Run it before a batch of cards.
+        /// card call's flags, for `claude-experiment`, and exit 2 when it
+        /// fails or takes over 5 minutes. Run it before a batch of cards.
         #[arg(long, conflicts_with_all = ["key", "docling", "force", "reply"])]
         preflight: bool,
         /// The preflight's cap on a request's prompt tokens (default 1500).
