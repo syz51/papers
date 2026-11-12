@@ -300,7 +300,8 @@ enum Command {
         /// card call's flags, for `claude-experiment`, and exit 2 when it
         /// fails or takes over 5 minutes. Run it before a batch of cards. The
         /// leak check is direct: `claude-experiment` exits 4 when a canary
-        /// request still holds the account or environment block.
+        /// request still holds the account or environment block, or none
+        /// reached its proxy. Its last line of standard error names the cause.
         #[arg(long, conflicts_with_all = ["key", "docling", "force", "reply"])]
         preflight: bool,
         /// The preflight's cap on a request's prompt tokens, a cost check only

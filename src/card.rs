@@ -572,9 +572,10 @@ fn call(config: &Config, text: Vec<u8>) -> Result<Vec<u8>, String> {
 
 /// `papers card --preflight`: runs `<[papers] claude> preflight --cap <cap>`
 /// with the card call's flags, as `claude-experiment` takes it, before a batch
-/// of cards. Errs when it fails, with its last line of standard error: exit 4
-/// when a canary request still holds the account or environment block, exit 3
-/// when a request's prompt tokens exceed `cap`.
+/// of cards. Errs when it fails, with its last line of standard error, which
+/// names the cause: exit 4 when a canary request still holds the account or
+/// environment block or none reached the proxy, exit 3 when a request's prompt
+/// tokens exceed `cap` or no usage was seen.
 pub fn preflight(config: &Config, cap: u32) -> Result<bool, String> {
     if !config.cards {
         return Err(
