@@ -51,6 +51,12 @@ impl<'a> Client<'a> {
         }
     }
 
+    /// A client for a test server's endpoint.
+    #[cfg(test)]
+    pub(crate) fn at(http: &'a Http, endpoint: &'a str) -> Self {
+        Client { http, endpoint }
+    }
+
     /// `cache`: id lookups may come from the response cache; searches never do.
     fn get(&self, url: &str, attempts: u32, cache: bool) -> Result<Reply, String> {
         let reply = self.http.get(&Get {

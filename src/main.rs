@@ -20,6 +20,7 @@ mod notes;
 mod openalex;
 mod pdf;
 mod refs;
+mod registered;
 mod registry;
 mod registry_cmd;
 mod searchlog;
@@ -70,7 +71,8 @@ struct Cli {
     /// (default: [papers] notes, else research/papers).
     #[arg(long, global = true, value_name = "DIR")]
     papers: Option<PathBuf>,
-    /// Ignore cached API responses and fetch them again ([papers] cache_dir).
+    /// Ignore cached API responses and fetch them again ([papers] cache_dir);
+    /// `fetch` also looks up a paper that the registry already holds.
     #[arg(long, global = true)]
     refresh: bool,
     #[command(subcommand)]
@@ -838,8 +840,8 @@ fn main() -> ExitCode {
                 log: !no_log,
             };
             match title {
-                Some(title) => fetch_title(&http, &config, &title, out),
-                None => fetch(&http, &config, &refs, out),
+                Some(title) => fetch_title(&http, &config, &title, out, cli.refresh),
+                None => fetch(&Client::new(&http), &http, &config, &refs, out, cli.refresh),
             }
         }
         Command::Search {
@@ -1356,25 +1358,37 @@ fn doi_note<'a>(index: &'a seen::Index, doi: &Doi) -> Option<&'a str> {
     index.note(&Ref::from_doi(doi.clone()).key())
 }
 
-fn print_paper(paper: &Paper, note: Option<&str>, with_abstract: bool, json: bool) {
+/// An arXiv paper as `fetch` and `search` print it. `seen`: the archive keys
+/// that hold it, which `search` gives and `fetch` (which prints the registered
+/// block instead) does not.
+fn paper_text(
+    paper: &Paper,
+    note: Option<&str>,
+    seen: Option<&[String]>,
+    with_abstract: bool,
+    json: bool,
+) -> String {
     if json {
         #[derive(Serialize)]
         struct Line<'a> {
             #[serde(flatten)]
             paper: &'a Paper,
             note: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            seen: Option<&'a [String]>,
         }
         let line = Line {
             paper,
             note: note.map(str::to_owned),
+            seen,
         };
-        println!(
-            "{}",
-            serde_json::to_string(&line).expect("Paper serializes to JSON")
-        );
-        return;
+        return serde_json::to_string(&line).expect("Paper serializes to JSON");
     }
-    let mut out = format!(
+    let mut out = seen
+        .and_then(registered::seen_line)
+        .map(|line| line + "\n")
+        .unwrap_or_default();
+    out += &format!(
         "{}v{} · published {} · updated {} · {}\n{}\n{}\n{}",
         paper.id,
         paper.version,
@@ -1397,7 +1411,56 @@ fn print_paper(paper: &Paper, note: Option<&str>, with_abstract: bool, json: boo
     if with_abstract {
         out += &format!("\n{}", paper.abstract_text);
     }
-    println!("{out}\n");
+    out + "\n"
+}
+
+/// Prints the registry's entries for `input`, each as the registered block
+/// and a blank line, or as `{"input", "registered"}` in JSON.
+fn print_registered(input: &str, entries: &[registered::Registered], json: bool) {
+    for r in entries {
+        if json {
+            println!("{}", serde_json::json!({ "input": input, "registered": r }));
+        } else {
+            println!("{}\n", r.block());
+        }
+    }
+}
+
+/// The registry's entries that match `query`, as the commands report them.
+fn registered_for(
+    config: &config::Config,
+    index: &seen::Index,
+    query: &seen::Query,
+) -> Vec<registered::Registered> {
+    index
+        .registered(query)
+        .into_iter()
+        .map(|r| registered::Registered::new(config, r))
+        .collect()
+}
+
+/// The line `search` prints when the log holds the same query and source.
+fn earlier_line(e: &searchlog::Earlier, source: &str, log: &str) -> String {
+    format!(
+        "papers: searched before: last run {}, {} results ({} of this {source} query in {log})",
+        e.at,
+        e.results,
+        match e.runs {
+            1 => "1 run".to_owned(),
+            n => format!("{n} runs"),
+        }
+    )
+}
+
+/// Says when the log holds the same search. A log that cannot be read is
+/// said and does not stop the search.
+fn report_earlier(config: &config::Config, same: &searchlog::Same) {
+    let log = config.display(&config.search_log);
+    match searchlog::earlier(&config.search_log, same) {
+        Ok(Some(e)) => eprintln!("{}", earlier_line(&e, same.source, &log)),
+        Ok(None) => {}
+        Err(e) => eprintln!("papers: earlier runs not checked: {e}"),
+    }
 }
 
 /// Unified DOI metadata: bibliographic fields from Crossref when it has the
@@ -1564,6 +1627,7 @@ fn paper_found(p: &Paper) -> searchlog::Found {
         year: p.published.get(..4).and_then(|y| y.parse().ok()),
         doi: p.doi.clone(),
         arxiv: Some(p.id.clone()),
+        openalex: None,
         url: Some(p.abs_url.clone()),
     }
 }
@@ -1574,6 +1638,7 @@ fn work_found(w: &openalex::Work) -> searchlog::Found {
         title: Some(w.title.clone()),
         year: w.publication_year,
         doi: w.doi.as_ref().map(|d| d.as_str().to_owned()),
+        openalex: Some(w.id.clone()),
         ..searchlog::Found::default()
     }
 }
@@ -1591,36 +1656,55 @@ fn log_searches(
     searchlog::append(&config.search_log, &entries(index))
 }
 
+/// Prints metadata for `inputs`. A registered input prints the registered
+/// block first and, unless `refresh` (`--refresh`), is not fetched.
 fn fetch(
+    arxiv: &Client,
     http: &Http,
     config: &config::Config,
     inputs: &[String],
     out: Output,
+    refresh: bool,
 ) -> Result<bool, String> {
     let (with_abstract, json) = (out.with_abstract, out.json);
+    let index = seen::Index::load(config)?;
     let mut logged: Vec<(String, &'static str, Vec<searchlog::Found>)> = Vec::new();
     let parsed: Vec<Result<Ref, String>> = inputs.iter().map(|s| Ref::parse(s)).collect();
+    let registered: Vec<Vec<registered::Registered>> = inputs
+        .iter()
+        .map(|s| match seen::parse_input(s) {
+            Ok(query) => registered_for(config, &index, &query),
+            Err(_) => Vec::new(),
+        })
+        .collect();
+    let skip = |i: usize| !refresh && !registered[i].is_empty();
     let arxiv_ids: Vec<ArxivId> = parsed
         .iter()
-        .filter_map(|r| match r {
-            Ok(Ref::Arxiv(id)) => Some(id.clone()),
+        .enumerate()
+        .filter_map(|(i, r)| match r {
+            Ok(Ref::Arxiv(id)) if !skip(i) => Some(id.clone()),
             _ => None,
         })
         .collect();
     let mut looked_up = if arxiv_ids.is_empty() {
         Vec::new()
     } else {
-        Client::new(http).fetch(&arxiv_ids)
+        arxiv.fetch(&arxiv_ids)
     }
     .into_iter();
-    let index = seen::Index::load(config)?;
     let mut all_ok = true;
-    for (input, reference) in inputs.iter().zip(parsed) {
+    for (i, (input, reference)) in inputs.iter().zip(parsed).enumerate() {
+        print_registered(input, &registered[i], json);
+        if skip(i) {
+            eprintln!("papers: {input}: registered; not fetched (--refresh to fetch)");
+            continue;
+        }
         let result = match reference {
             Err(message) => Err(message),
             Ok(Ref::Arxiv(_)) => match looked_up.next().expect("one result per arXiv id") {
                 Ok(paper) => {
-                    print_paper(&paper, paper_note(&index, &paper), with_abstract, json);
+                    let note = paper_note(&index, &paper);
+                    println!("{}", paper_text(&paper, note, None, with_abstract, json));
                     logged.push((input.clone(), "arxiv", vec![paper_found(&paper)]));
                     Ok(())
                 }
@@ -1689,10 +1773,24 @@ fn fetch_title(
     config: &config::Config,
     title: &str,
     out: Output,
+    refresh: bool,
 ) -> Result<bool, String> {
     let (with_abstract, json) = (out.with_abstract, out.json);
-    let results = openalex::Client::new(http).search_title(title, TITLE_RESULTS)?;
     let index = seen::Index::load(config)?;
+    let registered = registered_for(
+        config,
+        &index,
+        &seen::Query {
+            title: Some(title.to_owned()),
+            ..seen::Query::default()
+        },
+    );
+    print_registered(title, &registered, json);
+    if !refresh && !registered.is_empty() {
+        eprintln!("papers: {title:?}: registered; not looked up (--refresh to look it up)");
+        return Ok(true);
+    }
+    let results = openalex::Client::new(http).search_title(title, TITLE_RESULTS)?;
     log_searches(config, out, &index, |index| {
         let found: Vec<searchlog::Found> = results.iter().map(work_found).collect();
         vec![searchlog::Entry::new(
@@ -1776,6 +1874,15 @@ fn search(
     if query.is_empty() {
         return Err("empty search query".to_owned());
     }
+    report_earlier(
+        config,
+        &searchlog::Same {
+            source: "arxiv",
+            query: words,
+            arxiv_query: Some(query),
+            since: None,
+        },
+    );
     let (total, results) = client.search(query, sort, max)?;
     let index = seen::Index::load(config)?;
     log_searches(config, out, &index, |index| {
@@ -1789,7 +1896,12 @@ fn search(
         results.len()
     );
     for paper in &results {
-        print_paper(paper, paper_note(&index, paper), with_abstract, json);
+        let seen = searchlog::seen_keys(&index, &paper_found(paper));
+        let note = paper_note(&index, paper);
+        println!(
+            "{}",
+            paper_text(paper, note, Some(&seen), with_abstract, json)
+        );
     }
     Ok(true)
 }
@@ -1808,6 +1920,15 @@ fn search_source(
         return Err("empty search query".to_owned());
     }
     let since_text = since.map(|d| d.to_string());
+    report_earlier(
+        config,
+        &searchlog::Same {
+            source: source.name(),
+            query,
+            arxiv_query: None,
+            since: since_text.as_deref(),
+        },
+    );
     let since_year = since.map(|d| i64::from(d.year()));
     let (total, hits) = match source {
         Source::Openalex => sources::openalex(http, query, since_text.as_deref(), max)?,
@@ -1831,21 +1952,7 @@ fn search_source(
     let index = seen::Index::load(config)?;
     let found: Vec<searchlog::Found> = hits.iter().map(sources::Hit::found).collect();
     for (hit, f) in hits.iter().zip(&found) {
-        let seen: Vec<String> = {
-            let mut keys: Vec<String> = index
-                .lookup(&seen::Query {
-                    doi: f.doi.clone(),
-                    arxiv: f.arxiv.clone(),
-                    url: f.url.clone(),
-                    title: f.title.clone(),
-                })
-                .into_iter()
-                .map(|h| h.key)
-                .collect();
-            keys.dedup();
-            keys
-        };
-        print_hit(hit, &seen, out);
+        println!("{}", hit_text(hit, &searchlog::seen_keys(&index, f), out));
     }
     if out.log {
         // Date filters other than OpenAlex's and CiNii's are applied to the year here.
@@ -1883,19 +1990,9 @@ fn citations(
     };
     let mut in_archive = 0;
     for (hit, f) in hits.iter().zip(&found) {
-        let mut keys: Vec<String> = index
-            .lookup(&seen::Query {
-                doi: f.doi.clone(),
-                arxiv: f.arxiv.clone(),
-                url: f.url.clone(),
-                title: f.title.clone(),
-            })
-            .into_iter()
-            .map(|h| h.key)
-            .collect();
-        keys.dedup();
+        let keys = searchlog::seen_keys(&index, f);
         in_archive += usize::from(!keys.is_empty());
-        print_hit(hit, &keys, out);
+        println!("{}", hit_text(hit, &keys, out));
     }
     let total = total.map_or_else(String::new, |t| format!(" of {t}"));
     eprintln!(
@@ -1921,7 +2018,9 @@ fn citations(
     Ok(true)
 }
 
-fn print_hit(hit: &sources::Hit, seen: &[String], out: Output) {
+/// A search or citation result as printed; a result the archive holds starts
+/// with its `seen:` line.
+fn hit_text(hit: &sources::Hit, seen: &[String], out: Output) -> String {
     if out.json {
         #[derive(Serialize)]
         struct Line<'a> {
@@ -1929,13 +2028,12 @@ fn print_hit(hit: &sources::Hit, seen: &[String], out: Output) {
             hit: &'a sources::Hit,
             seen: &'a [String],
         }
-        println!(
-            "{}",
-            serde_json::to_string(&Line { hit, seen }).expect("hits serialize to JSON")
-        );
-        return;
+        return serde_json::to_string(&Line { hit, seen }).expect("hits serialize to JSON");
     }
-    let mut head = hit.id.clone();
+    let mut head = registered::seen_line(seen)
+        .map(|line| line + "\n")
+        .unwrap_or_default();
+    head += &hit.id;
     if let Some(y) = hit.year {
         head += &format!(" · {y}");
     }
@@ -1952,15 +2050,12 @@ fn print_hit(hit: &sources::Hit, seen: &[String], out: Output) {
     if let Some(u) = &hit.url {
         text += &format!("\n{u}");
     }
-    if !seen.is_empty() {
-        text += &format!("\nseen: {}", seen.join(", "));
-    }
     if out.with_abstract
         && let Some(a) = &hit.abstract_text
     {
         text += &format!("\n{a}");
     }
-    println!("{text}\n");
+    text + "\n"
 }
 
 /// A place `read` may find the full text.
@@ -2120,9 +2215,6 @@ fn read(
                     config.display(&config.registry)
                 )
             })?;
-            if let Some(target) = &r.duplicate_of {
-                println!("note: entry {key} is a duplicate of {target}");
-            }
             let input = match (&r.ids.arxiv, &r.ids.doi, &r.ids.url) {
                 (Some(id), _, _) => format!("{id}{}", r.version.as_deref().unwrap_or("")),
                 (None, Some(doi), _) => doi.clone(),
@@ -2142,6 +2234,86 @@ fn read(
             None,
         ),
     };
+    // The registry's entries for the paper come first: the one `--key` names,
+    // else those with the reference's arXiv id, DOI or URL.
+    let registered: Vec<registry::Reference> = match &entry {
+        Some(r) => vec![r.clone()],
+        None => match seen::parse_input(&input) {
+            // A registry that does not load is said and does not stop the read,
+            // which does not need it.
+            Ok(query) => match registry::load(&config.registry) {
+                Ok(records) => seen::Index::of_registry(records.unwrap_or_default())
+                    .registered(&query)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+                Err(e) => {
+                    eprintln!("papers: registry not checked for this paper: {e}");
+                    Vec::new()
+                }
+            },
+            Err(_) => Vec::new(),
+        },
+    };
+    for r in &registered {
+        println!("{}", registered::Registered::new(config, r).block());
+    }
+    // Without `--key`, a recorded text of a registered paper is the answer:
+    // nothing is downloaded and no file is written.
+    if entry.is_none()
+        && let Some(first) = registered.first()
+    {
+        // Only texts in the asked mode answer the run.
+        let texts: Vec<registry::Text> = registered
+            .iter()
+            .flat_map(|r| r.texts.clone())
+            .filter(|t| keeps_mode(o.extraction, t))
+            .collect();
+        let kept = match o.force {
+            true => None,
+            false => existing_text(config, &texts),
+        };
+        let Some(text) = kept else {
+            if !o.force {
+                println!(
+                    "no text recorded in the entry answers this run \
+                     (`papers read --key {} --record` records one)",
+                    first.key
+                );
+            }
+            return read_from(http, config, o, pdftotext, out_dir, input, entry);
+        };
+        println!(
+            "already have {} (sha256 matches); not downloading (--force to fetch again)",
+            text.path
+        );
+        println!("{}", serde_json::to_string(&text).expect("texts serialize"));
+        return Ok(true);
+    }
+    read_from(http, config, o, pdftotext, out_dir, input, entry)
+}
+
+/// True when a recorded text answers a run that asks for mode `asked`. A text
+/// without a recorded mode counts as plain.
+fn keeps_mode(asked: Option<registry::Extraction>, text: &registry::Text) -> bool {
+    match (asked, text.extraction()) {
+        (None, _) => true,
+        (Some(asked), Ok(mode)) => mode.unwrap_or(registry::Extraction::Plain) == asked,
+        (Some(_), Err(_)) => false,
+    }
+}
+
+/// `read` after the registered report: finds a recorded copy named for this
+/// run, else downloads.
+fn read_from(
+    http: &Http,
+    config: &config::Config,
+    o: &ReadOptions,
+    pdftotext: &str,
+    out_dir: PathBuf,
+    input: String,
+    entry: Option<registry::Reference>,
+) -> Result<bool, String> {
     // `None`: an http(s) URL without a paper id, read as a PDF or landing page.
     let reference = match Ref::parse(&input) {
         Ok(r) => Some(r),
@@ -2191,12 +2363,7 @@ fn read(
         && let Some(mut t) = current
     {
         let mode = t.extraction();
-        let keep = match (o.extraction, &mode) {
-            (None, _) => true,
-            (Some(asked), Ok(m)) => m.unwrap_or(registry::Extraction::Plain) == asked,
-            (Some(_), Err(_)) => false,
-        };
-        if keep {
+        if keeps_mode(o.extraction, &t) {
             if let (Some(asked), Ok(None)) = (o.extraction, &mode) {
                 t.set_extraction(asked);
             }
@@ -2344,7 +2511,7 @@ fn download(
                 .fetch(std::slice::from_ref(id))
                 .remove(0)
                 .map_err(|e| format!("{input}: {e}"))?;
-            print_paper(&paper, None, true, false);
+            println!("{}", paper_text(&paper, None, None, true, false));
             target.title = paper.title;
             vec![Candidate::Pdf(format!("https://arxiv.org/pdf/{id}"))]
         }
@@ -2921,6 +3088,255 @@ mod tests {
         );
         // A registry entry with the same DOI is not a note.
         assert_eq!(index.note("doi:10.9999/none"), None);
+    }
+
+    /// A project whose registry holds key 87 for arXiv 2601.99901 (the first
+    /// paper of the arXiv fixture), with one text, and its config.
+    fn registered_project(name: &str) -> (PathBuf, config::Config) {
+        let dir = std::env::temp_dir().join(format!("papers-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("texts")).unwrap();
+        std::fs::write(dir.join("research.toml"), "[papers]\n").unwrap();
+        std::fs::write(dir.join("texts/87.txt"), "the recorded text").unwrap();
+        let mut r = registry::Reference::new("87".into());
+        r.title = Some("Rebalancing Costs of a Synthetic Market Maker".into());
+        r.depth = Some("full".into());
+        r.ids.arxiv = Some("2601.99901".into());
+        r.ids.doi = Some("10.1234/Synthetic.87".into());
+        r.ids.url = Some("https://example.org/papers/87/".into());
+        r.texts = vec![registry::Text {
+            path: "texts/87.txt".into(),
+            sha256: http::sha256_hex(b"the recorded text"),
+            origin: Some("https://arxiv.org/pdf/2601.99901v4".into()),
+            retrieved: None,
+            extra: serde_json::Map::new(),
+        }];
+        std::fs::write(dir.join("references.jsonl"), registry::render(&[r])).unwrap();
+        let config = config::Config::load(Some(&dir.join("research.toml")), &dir).unwrap();
+        (dir, config)
+    }
+
+    const QUIET: Output = Output {
+        with_abstract: false,
+        json: false,
+        log: false,
+    };
+
+    const ARXIV_FEED: &str = include_str!("../tests/fixtures/arxiv-entries.xml");
+
+    fn arxiv_feed() -> String {
+        http::response(
+            "200 OK",
+            &["Content-Type: application/atom+xml"],
+            ARXIV_FEED,
+        )
+    }
+
+    #[test]
+    fn fetch_skips_a_registered_paper_unless_refreshed() {
+        let (dir, config) = registered_project("fetch-registered");
+        let http = Http::new();
+        let ids = ["arXiv:2601.99901v4".to_owned()];
+        // No response is queued: a request would fail the fetch.
+        let (base, server) = http::serve(Vec::new());
+        let endpoint = format!("{base}/api/query");
+        let arxiv = Client::at(&http, &endpoint);
+        assert_eq!(fetch(&arxiv, &http, &config, &ids, QUIET, false), Ok(true));
+        assert!(server.join().unwrap().is_empty());
+        // By DOI and by URL too: a lookup of this DOI would not find it, and a
+        // URL is not an id that `fetch` can look up.
+        let other = [
+            "https://doi.org/10.1234/synthetic.87".to_owned(),
+            "http://example.org/papers/87".to_owned(),
+        ];
+        assert_eq!(
+            fetch(&arxiv, &http, &config, &other, QUIET, false),
+            Ok(true)
+        );
+        // `--refresh` asks arXiv.
+        let (base, server) = http::serve(vec![arxiv_feed()]);
+        let endpoint = format!("{base}/api/query");
+        let arxiv = Client::at(&http, &endpoint);
+        assert_eq!(fetch(&arxiv, &http, &config, &ids, QUIET, true), Ok(true));
+        let heads = server.join().unwrap();
+        assert_eq!(heads.len(), 1);
+        assert!(heads[0].contains("id_list=2601.99901v4"), "{}", heads[0]);
+        // A paper the registry does not hold is fetched without `--refresh`.
+        let (base, server) = http::serve(vec![arxiv_feed()]);
+        let endpoint = format!("{base}/api/query");
+        let arxiv = Client::at(&http, &endpoint);
+        let both = ["2601.99901".to_owned(), "2601.99902".to_owned()];
+        assert_eq!(fetch(&arxiv, &http, &config, &both, QUIET, false), Ok(true));
+        let heads = server.join().unwrap();
+        assert!(heads[0].contains("id_list=2601.99902&"), "{}", heads[0]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fetch_by_title_skips_a_registered_title() {
+        let (dir, config) = registered_project("fetch-title-registered");
+        // A lookup would go to OpenAlex and fail or differ; none is made.
+        let got = fetch_title(
+            &Http::new(),
+            &config,
+            "rebalancing costs of a synthetic market-maker",
+            QUIET,
+            false,
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(got, Ok(true));
+    }
+
+    #[test]
+    fn read_gives_the_recorded_text_of_a_registered_paper_without_a_download() {
+        let (dir, config) = registered_project("read-registered");
+        let out = dir.join("out");
+        let options = |extraction| ReadOptions {
+            reference: Some("https://arxiv.org/abs/2601.99901".into()),
+            key: None,
+            out: Some(out.clone()),
+            record: false,
+            force: false,
+            extraction,
+            browser: false,
+        };
+        let absent = pdf::tests::fake_program("absent");
+        // A download would ask arXiv and write into `out`; nothing is written.
+        assert_eq!(
+            read(&Http::new(), &config, &options(None), &absent),
+            Ok(true)
+        );
+        assert_eq!(
+            read(
+                &Http::new(),
+                &config,
+                &options(Some(registry::Extraction::Plain)),
+                &absent
+            ),
+            Ok(true)
+        );
+        assert!(!out.exists());
+        // A registry that does not load does not stop a read; this one then
+        // stops at the missing pdftotext, before any request.
+        let registry = std::fs::read_to_string(&config.registry).unwrap();
+        std::fs::write(&config.registry, "not json\n").unwrap();
+        let err = read(
+            &Http::new(),
+            &config,
+            &options(Some(registry::Extraction::Layout)),
+            &absent,
+        )
+        .unwrap_err();
+        assert!(err.contains("layout extraction needs pdftotext"), "{err}");
+        // A later recorded text in the asked mode is the one reused.
+        std::fs::write(dir.join("texts/87-layout.txt"), "the  layout  text").unwrap();
+        let mut entries = registry::parse(&registry, "registry").unwrap();
+        let mut layout = entries[0].texts[0].clone();
+        layout.path = "texts/87-layout.txt".into();
+        layout.sha256 = http::sha256_hex(b"the  layout  text");
+        layout.set_extraction(registry::Extraction::Layout);
+        entries[0].texts.push(layout);
+        std::fs::write(&config.registry, registry::render(&entries)).unwrap();
+        assert_eq!(
+            read(
+                &Http::new(),
+                &config,
+                &options(Some(registry::Extraction::Layout)),
+                &absent
+            ),
+            Ok(true)
+        );
+        std::fs::write(&config.registry, registry).unwrap();
+        // Another mode is not answered by the recorded text: the run goes on to
+        // extract, and stops at the missing pdftotext before any request.
+        let err = read(
+            &Http::new(),
+            &config,
+            &options(Some(registry::Extraction::Layout)),
+            &absent,
+        )
+        .unwrap_err();
+        assert!(err.contains("layout extraction needs pdftotext"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn search_marks_registered_results_and_finds_the_earlier_run() {
+        let (dir, config) = registered_project("search-registered");
+        let http = Http::new();
+        let logging = Output { log: true, ..QUIET };
+        let run = || {
+            let (base, server) = http::serve(vec![arxiv_feed()]);
+            let endpoint = format!("{base}/api/query");
+            let got = search(
+                &Client::at(&http, &endpoint),
+                &config,
+                ("Synthetic  Market", "all:synthetic AND all:market"),
+                Sort::Submitted,
+                3,
+                serde_json::json!({"arxiv_query": "all:synthetic AND all:market"}),
+                logging,
+            );
+            server.join().unwrap();
+            got
+        };
+        let same = searchlog::Same {
+            source: "arxiv",
+            query: "synthetic market",
+            arxiv_query: Some("all:synthetic AND all:market"),
+            since: None,
+        };
+        assert_eq!(searchlog::earlier(&config.search_log, &same), Ok(None));
+        assert_eq!(run(), Ok(true));
+        let first = searchlog::earlier(&config.search_log, &same)
+            .unwrap()
+            .unwrap();
+        assert_eq!((first.results, first.runs), (3, 1));
+        assert_eq!(
+            earlier_line(&first, "arxiv", ".research/papers/search.jsonl"),
+            format!(
+                "papers: searched before: last run {}, 3 results (1 run of this arxiv \
+                 query in .research/papers/search.jsonl)",
+                first.at
+            )
+        );
+        assert_eq!(run(), Ok(true));
+        let second = searchlog::earlier(&config.search_log, &same)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.runs, 2);
+        // The registered paper's result starts with its key; another has no mark.
+        let index = seen::Index::load(&config).unwrap();
+        let papers = atom::parse_feed(ARXIV_FEED).unwrap().papers;
+        let text = |p: &Paper, json: bool| {
+            let seen = searchlog::seen_keys(&index, &paper_found(p));
+            paper_text(p, None, Some(&seen), false, json)
+        };
+        assert!(
+            text(&papers[0], false).starts_with("seen: key 87\n2601.99901v4 · published "),
+            "{}",
+            text(&papers[0], false)
+        );
+        assert!(text(&papers[1], false).starts_with("2601.99902v1 · "));
+        let json: serde_json::Value = serde_json::from_str(&text(&papers[0], true)).unwrap();
+        assert_eq!(json["seen"], serde_json::json!(["87"]));
+        let hit = sources::Hit {
+            id: "openalex:W1".into(),
+            title: "Rebalancing costs of a synthetic market maker".into(),
+            authors: vec!["Ann Lee".into()],
+            year: Some(2026),
+            venue: None,
+            doi: None,
+            arxiv: None,
+            url: None,
+            abstract_text: None,
+        };
+        let seen = searchlog::seen_keys(&index, &hit.found());
+        assert_eq!(
+            hit_text(&hit, &seen, QUIET),
+            "seen: key 87\nopenalex:W1 · 2026\nRebalancing costs of a synthetic market maker\nAnn Lee\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

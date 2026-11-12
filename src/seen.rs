@@ -1,5 +1,6 @@
 //! Lookup of works already in the archive (registry entries and paper notes)
-//! by DOI, arXiv id (any version), normalized URL, or normalized title.
+//! by DOI, arXiv id (any version), OpenAlex id, normalized URL, or normalized
+//! title.
 
 use std::collections::BTreeMap;
 
@@ -16,15 +17,20 @@ pub struct Hit {
     pub key: String,
     /// `registry` or the note's path.
     pub origin: String,
-    /// The identifier that matched: `doi`, `arxiv`, `url`, or `title`.
+    /// The identifier that matched: `doi`, `arxiv`, `openalex`, `url`, or `title`.
     pub by: &'static str,
 }
+
+/// The origin of a registry entry's hits.
+const REGISTRY: &str = "registry";
 
 #[derive(Default)]
 pub struct Index {
     map: BTreeMap<String, Vec<(String, String)>>,
     /// Whether any source (registry or notes) existed.
     pub loaded: bool,
+    /// The registry's entries, by key.
+    registry: BTreeMap<String, Reference>,
 }
 
 /// The identifiers a lookup can use.
@@ -32,6 +38,7 @@ pub struct Index {
 pub struct Query {
     pub doi: Option<String>,
     pub arxiv: Option<String>,
+    pub openalex: Option<String>,
     pub url: Option<String>,
     pub title: Option<String>,
 }
@@ -42,6 +49,11 @@ fn doi_key(doi: &str) -> Option<String> {
 
 fn arxiv_key(id: &str) -> Option<String> {
     ArxivId::parse(id).ok().map(|a| format!("arxiv:{}", a.id))
+}
+
+fn openalex_key(id: &str) -> Option<String> {
+    let id = crate::openalex::short_id(id.trim());
+    (!id.is_empty()).then(|| format!("openalex:{}", id.to_ascii_uppercase()))
 }
 
 fn url_key(url: &str) -> Option<String> {
@@ -59,8 +71,8 @@ impl Index {
         let mut index = Index::default();
         if let Some(records) = registry::load(&config.registry)? {
             index.loaded = true;
-            for r in &records {
-                index.add(r, "registry");
+            for r in records {
+                index.add_registered(r);
             }
         }
         if let Some(all) = notes::load(&config.notes)? {
@@ -77,6 +89,18 @@ impl Index {
         Ok(index)
     }
 
+    /// An index of registry entries only.
+    pub fn of_registry(records: Vec<Reference>) -> Index {
+        let mut index = Index {
+            loaded: true,
+            ..Index::default()
+        };
+        for r in records {
+            index.add_registered(r);
+        }
+        index
+    }
+
     /// The first note (not the registry) filed under an index key such as
     /// `arxiv:<id>` or `doi:<doi>`, by its path.
     pub fn note(&self, key: &str) -> Option<&str> {
@@ -87,10 +111,26 @@ impl Index {
             .map(|(_, origin)| origin.as_str())
     }
 
+    /// Indexes a registry entry and keeps it for [`Index::registered`].
+    pub fn add_registered(&mut self, r: Reference) {
+        self.add(&r, REGISTRY);
+        self.registry.insert(r.key.clone(), r);
+    }
+
+    /// The registry entries that match, in key order. Notes are not entries.
+    pub fn registered(&self, q: &Query) -> Vec<&Reference> {
+        self.lookup(q)
+            .iter()
+            .filter(|h| h.origin == REGISTRY)
+            .filter_map(|h| self.registry.get(&h.key))
+            .collect()
+    }
+
     pub fn add(&mut self, r: &Reference, origin: &str) {
         let keys = [
             r.ids.doi.as_deref().and_then(doi_key),
             r.ids.arxiv.as_deref().and_then(arxiv_key),
+            r.ids.openalex.as_deref().and_then(openalex_key),
             r.ids.url.as_deref().and_then(url_key),
             // The record's URL may itself name an arXiv paper or a DOI.
             r.ids
@@ -112,6 +152,7 @@ impl Index {
         let probes = [
             ("doi", q.doi.as_deref().and_then(doi_key)),
             ("arxiv", q.arxiv.as_deref().and_then(arxiv_key)),
+            ("openalex", q.openalex.as_deref().and_then(openalex_key)),
             ("url", q.url.as_deref().and_then(url_key)),
             ("title", q.title.as_deref().and_then(title_key)),
         ];
@@ -147,7 +188,7 @@ pub fn parse_input(input: &str) -> Result<Query, String> {
         doi,
         arxiv,
         url,
-        title: None,
+        ..Query::default()
     })
 }
 
@@ -215,5 +256,30 @@ mod tests {
         });
         assert_eq!(by_title.len(), 2, "{by_title:?}");
         assert!(by_title.iter().all(|h| h.key == "12" && h.by == "title"));
+    }
+
+    #[test]
+    fn registered_gives_registry_entries_only_and_matches_openalex_ids() {
+        let mut i = index();
+        let mut d = Reference::new("15".into());
+        d.ids.openalex = Some("https://openalex.org/W77".into());
+        i.add_registered(d);
+        let mut e = Reference::new("9".into());
+        e.title = Some("Widgets: a survey".into());
+        i.add_registered(e);
+        let by_id = Query {
+            openalex: Some("w77".into()),
+            ..Query::default()
+        };
+        assert_eq!(i.lookup(&by_id)[0].by, "openalex");
+        let keys =
+            |q: &Query| -> Vec<String> { i.registered(q).iter().map(|r| r.key.clone()).collect() };
+        assert_eq!(keys(&by_id), ["15"]);
+        // Key 12 is indexed without its record (as a note is), so only 9 is an entry.
+        let by_title = Query {
+            title: Some("Widgets a Survey".into()),
+            ..Query::default()
+        };
+        assert_eq!(keys(&by_title), ["9"]);
     }
 }

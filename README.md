@@ -55,7 +55,22 @@ Paths that `papers` prints (a result's `note`, a written stub, and registry `tex
 
 - `--config <PATH>`: use this `research.toml`.
 - `--papers <DIR>`: the notes directory.
-- `--refresh`: ignore cached API responses.
+- `--refresh`: ignore cached API responses, and fetch a registered paper too.
+
+### Registered papers first
+
+`fetch`, `read` and `search` report a paper that the registry already holds before anything else, so that nobody fetches or reads it twice. [docs/interfaces.md](docs/interfaces.md) defines the exact lines.
+
+- `papers fetch <ref>` for a registered paper prints its key, depth, title and each recorded text path, makes no request, and exits 0. `--refresh` fetches the metadata too.
+
+  ```text
+  registered: key 87 · depth full · A Synthetic Title
+  text: sources/text/87.txt
+  ```
+
+- `papers read <ref>` prints the same block. When a recorded text still has its recorded sha256, `read` prints its path and manifest and downloads nothing. `--force` downloads.
+- `papers search`, `refs` and `cited-by` start each result that the archive holds with `seen: key 87`. They match by DOI, arXiv id, OpenAlex id, URL and normalised title.
+- `papers search` prints the time and result count of the last run of the same search, from the search log, on stderr. The same search has the same source, query and `--since`, and for arXiv the same `--category`: `papers: searched before: last run 2026-11-07T03:00:00Z, 20 results (1 run of this arxiv query in .research/papers/search.jsonl)`.
 
 ### Exit codes
 
@@ -223,7 +238,7 @@ A text is named by the keys of the registry entries that list its path, else by 
 
 ## Search log: `rf.search/1`
 
-Every `search`, `fetch`, `refs` and `cited-by` appends one JSON line per query to `[papers] search_log`. `--no-log` turns this off. The log means a literature review can show what was searched, when, and what came back, without reconstructing it later.
+Every `search`, `fetch`, `refs` and `cited-by` appends one JSON line per query to `[papers] search_log`. `--no-log` turns this off. The log means a literature review can show what was searched, when, and what came back, without reconstructing it later. `search` reads it: a query that was already run on the same source is reported with the time and result count of its last run. A `fetch` of a registered paper makes no request and adds no line.
 
 ```json
 {"schema":"rf.search/1","at":"2026-11-07T03:00:00Z","source":"arxiv","query":"retrieval evaluation","params":{"max":20,"since":"2024-01-01","categories":[],"sort":"relevance","arxiv_query":"all:retrieval AND all:evaluation","total":130},"results":[{"id":"arxiv:2601.00001v2","title":"…","year":2026}],"seen":["12"]}
