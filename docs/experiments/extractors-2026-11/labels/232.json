@@ -1,0 +1,37 @@
+{
+  "key": "232",
+  "headings": [
+    {"number": null, "title": "Abstract", "level": 1, "page": 1},
+    {"number": "1", "title": "Introduction", "level": 1, "page": 1},
+    {"number": "2", "title": "Prior work", "level": 1, "page": 2},
+    {"number": "3", "title": "FinanceBench Dataset", "level": 1, "page": 3},
+    {"number": "3.1", "title": "Taxonomy of financial questions", "level": 2, "page": 4},
+    {"number": "3.2", "title": "Dataset labelling and quality control", "level": 2, "page": 4},
+    {"number": "3.3", "title": "Dataset for human eval (n=150)", "level": 2, "page": 5},
+    {"number": "4", "title": "Experimental Setup", "level": 1, "page": 5},
+    {"number": "4.1", "title": "Labelling LLM Responses", "level": 2, "page": 6},
+    {"number": "5", "title": "Results on FinanceBench", "level": 1, "page": 6},
+    {"number": "5.1", "title": "Qualitative analysis of responses", "level": 2, "page": 8},
+    {"number": "6", "title": "Limitations of FinanceBench", "level": 1, "page": 9},
+    {"number": "7", "title": "Conclusion", "level": 1, "page": 10},
+    {"number": null, "title": "References", "level": 1, "page": 10},
+    {"number": "A", "title": "Phrasing variations for the metrics-based questions", "level": 1, "page": 14},
+    {"number": "B", "title": "LLM implementation", "level": 1, "page": 14},
+    {"number": "C", "title": "Data Documentation", "level": 1, "page": 14},
+    {"number": "D", "title": "Comparison of GPT-4 and GPT-4-Turbo", "level": 1, "page": 15},
+    {"number": "E", "title": "Information about each company", "level": 1, "page": 15}
+  ],
+  "references": {"heading": "References", "page": 10, "first_entry": "Yuntao Bai, Saurav Kadavath, Sandipan Kundu,"},
+  "numbers": [
+    {"table": "Table 2", "page": 7, "row": "GPT-4-Turbo", "column": "Failed to answer", "value": "126"},
+    {"table": "Table 2", "page": 7, "row": "Llama2", "column": "Incorrect answer", "value": "104"},
+    {"table": "Table 2", "page": 7, "row": "GPT-4-Turbo", "column": "Failed to answer", "value": "101"},
+    {"table": "Table 2", "page": 7, "row": "Llama2", "column": "Correct answer", "value": "62"},
+    {"table": "Table 2", "page": 7, "row": "Claude2", "column": "Correct answer", "value": "114"},
+    {"table": "Table 2", "page": 7, "row": "GPT-4-Turbo", "column": "Correct answer", "value": "118"},
+    {"table": "Table 2", "page": 7, "row": "GPT-4-Turbo", "column": "Correct answer", "value": "128"},
+    {"table": "Table 2", "page": 7, "row": "Total", "column": "Correct answer", "value": "569"},
+    {"table": "Table 2", "page": 7, "row": "Total", "column": "Incorrect answer", "value": "307"},
+    {"table": "Table 2", "page": 7, "row": "Total", "column": "Failed to answer", "value": "324"}
+  ]
+}

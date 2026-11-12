@@ -1,0 +1,35 @@
+{
+  "key": "85",
+  "headings": [
+    {"number": null, "title": "Abstract", "level": 1, "page": 1},
+    {"number": "1", "title": "Introduction", "level": 1, "page": 1},
+    {"number": "2", "title": "Background", "level": 1, "page": 2},
+    {"number": "3", "title": "TableQuest: Challenging Table-Based QA for Retrieval-Augmented Generation", "level": 1, "page": 3},
+    {"number": "4", "title": "Empirical Study Methodology", "level": 1, "page": 4},
+    {"number": "4.1", "title": "Research Questions", "level": 2, "page": 4},
+    {"number": "4.2", "title": "Overall Benchmarking Pipeline", "level": 2, "page": 4},
+    {"number": "4.3", "title": "PDF Parsing", "level": 2, "page": 5},
+    {"number": "4.4", "title": "Text Chunking", "level": 2, "page": 5},
+    {"number": "4.5", "title": "Experimented Embedding Models", "level": 2, "page": 6},
+    {"number": "4.6", "title": "Experimental Design & Evaluation", "level": 2, "page": 6},
+    {"number": "5", "title": "Experimental Results", "level": 1, "page": 6},
+    {"number": "6", "title": "Related Work", "level": 1, "page": 10},
+    {"number": "7", "title": "Threats to Validity", "level": 1, "page": 10},
+    {"number": "8", "title": "Conclusion", "level": 1, "page": 10},
+    {"number": null, "title": "Acknowledgments", "level": 1, "page": 11},
+    {"number": null, "title": "References", "level": 1, "page": 11}
+  ],
+  "references": {"heading": "References", "page": 11, "first_entry": "Narayan S Adhikari and Shradha Agarwal."},
+  "numbers": [
+    {"table": "Table 6", "page": 6, "row": "BM25 [35]", "column": "P@1", "value": "0.576"},
+    {"table": "Table 6", "page": 6, "row": "ColBERT [24]", "column": "R@3", "value": "0.919"},
+    {"table": "Table 6", "page": 6, "row": "SPLADE [25]", "column": "MRR", "value": "0.625"},
+    {"table": "Table 7", "page": 7, "row": "pdfplumber", "column": "MRR", "value": "0.807"},
+    {"table": "Table 7", "page": 7, "row": "unstructured", "column": "R@3", "value": "0.688"},
+    {"table": "Table 7", "page": 7, "row": "pypdf2", "column": "R@3", "value": "0.822"},
+    {"table": "Table 10", "page": 8, "row": "semantic", "column": "MRR", "value": "0.795"},
+    {"table": "Table 12", "page": 9, "row": "DeepSeek-R1", "column": "k = 1", "value": "24.14"},
+    {"table": "Table 12", "page": 9, "row": "Phi-4", "column": "k = 3", "value": "55.17"},
+    {"table": "Table 12", "page": 9, "row": "GPT-4.1-mini", "column": "k = 1", "value": "57.76"}
+  ]
+}

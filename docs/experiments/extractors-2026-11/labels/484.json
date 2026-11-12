@@ -1,0 +1,43 @@
+{
+  "key": "484",
+  "headings": [
+    {"number": null, "title": "Abstract", "level": 1, "page": 1},
+    {"number": "1", "title": "Introduction", "level": 1, "page": 1},
+    {"number": "2", "title": "Background", "level": 1, "page": 2},
+    {"number": "3", "title": "Dense Passage Retriever (DPR)", "level": 1, "page": 2},
+    {"number": "3.1", "title": "Overview", "level": 2, "page": 2},
+    {"number": "3.2", "title": "Training", "level": 2, "page": 3},
+    {"number": "4", "title": "Experimental Setup", "level": 1, "page": 4},
+    {"number": "4.1", "title": "Wikipedia Data Pre-processing", "level": 2, "page": 4},
+    {"number": "4.2", "title": "Question Answering Datasets", "level": 2, "page": 4},
+    {"number": "5", "title": "Experiments: Passage Retrieval", "level": 1, "page": 4},
+    {"number": "5.1", "title": "Main Results", "level": 2, "page": 5},
+    {"number": "5.2", "title": "Ablation Study on Model Training", "level": 2, "page": 5},
+    {"number": "5.3", "title": "Qualitative Analysis", "level": 2, "page": 7},
+    {"number": "5.4", "title": "Run-time Efficiency", "level": 2, "page": 7},
+    {"number": "6", "title": "Experiments: Question Answering", "level": 1, "page": 7},
+    {"number": "6.1", "title": "End-to-end QA System", "level": 2, "page": 7},
+    {"number": "6.2", "title": "Results", "level": 2, "page": 7},
+    {"number": "7", "title": "Related Work", "level": 1, "page": 8},
+    {"number": "8", "title": "Conclusion", "level": 1, "page": 9},
+    {"number": null, "title": "Acknowledgments", "level": 1, "page": 9},
+    {"number": null, "title": "References", "level": 1, "page": 9},
+    {"number": "A", "title": "Distant Supervision", "level": 1, "page": 12},
+    {"number": "B", "title": "Alternative Similarity Functions & Triplet Loss", "level": 1, "page": 12},
+    {"number": "C", "title": "Qualitative Analysis", "level": 1, "page": 12},
+    {"number": "D", "title": "Joint Training of Retriever and Reader", "level": 1, "page": 12}
+  ],
+  "references": {"heading": "References", "page": 9, "first_entry": "Akari Asai, Kazuma Hashimoto, Hannaneh Hajishirzi,"},
+  "numbers": [
+    {"table": "Table 2", "page": 5, "row": "BM25", "column": "NQ", "value": "59.1"},
+    {"table": "Table 2", "page": 5, "row": "BM25", "column": "TREC", "value": "84.1"},
+    {"table": "Table 2", "page": 5, "row": "DPR", "column": "NQ", "value": "78.4"},
+    {"table": "Table 2", "page": 5, "row": "BM25 + DPR", "column": "SQuAD", "value": "81.3"},
+    {"table": "Table 2", "page": 5, "row": "DPR", "column": "WQ", "value": "82.9"},
+    {"table": "Table 4", "page": 8, "row": "ORQA (Lee et al., 2019)", "column": "SQuAD", "value": "20.2"},
+    {"table": "Table 4", "page": 8, "row": "GraphRetriever (Min et al., 2019b)", "column": "TriviaQA", "value": "56.0"},
+    {"table": "Table 4", "page": 8, "row": "BM25", "column": "TriviaQA", "value": "52.4"},
+    {"table": "Table 4", "page": 8, "row": "BM25+DPR", "column": "TREC", "value": "50.6"},
+    {"table": "Table 4", "page": 8, "row": "DPR", "column": "SQuAD", "value": "24.1"}
+  ]
+}

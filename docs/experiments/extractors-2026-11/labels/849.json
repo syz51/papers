@@ -1,0 +1,34 @@
+{
+  "key": "849",
+  "headings": [
+    {"number": null, "title": "Abstract", "level": 1, "page": 1},
+    {"number": "1", "title": "Introduction", "level": 1, "page": 1},
+    {"number": "2", "title": "Related Work", "level": 1, "page": 2},
+    {"number": "3", "title": "DROP Data Collection", "level": 1, "page": 3},
+    {"number": "4", "title": "DROP Data Analysis", "level": 1, "page": 4},
+    {"number": "5", "title": "Baseline Systems", "level": 1, "page": 5},
+    {"number": "5.1", "title": "Semantic Parsing", "level": 2, "page": 5},
+    {"number": "5.2", "title": "SQuAD-style Reading Comprehension", "level": 2, "page": 6},
+    {"number": "5.3", "title": "Heuristic Baselines", "level": 2, "page": 7},
+    {"number": "6", "title": "NAQANet", "level": 1, "page": 7},
+    {"number": "6.1", "title": "Model Description", "level": 2, "page": 7},
+    {"number": "6.2", "title": "Weakly-Supervised Training", "level": 2, "page": 8},
+    {"number": "7", "title": "Results and Discussion", "level": 1, "page": 8},
+    {"number": "8", "title": "Conclusion", "level": 1, "page": 9},
+    {"number": null, "title": "Acknowledgments", "level": 1, "page": 9},
+    {"number": null, "title": "References", "level": 1, "page": 10}
+  ],
+  "references": {"heading": "References", "page": 10, "first_entry": "Michele Banko, Michael J. Cafarella, Stephen"},
+  "numbers": [
+    {"table": "Table 4", "page": 8, "row": "Syn Dep", "column": "EM", "value": "9.38"},
+    {"table": "Table 4", "page": 8, "row": "OpenIE", "column": "F1", "value": "10.77"},
+    {"table": "Table 4", "page": 8, "row": "BiDAF", "column": "EM", "value": "26.06"},
+    {"table": "Table 4", "page": 8, "row": "QANet+ELMo", "column": "EM", "value": "27.08"},
+    {"table": "Table 4", "page": 8, "row": "BERT", "column": "F1", "value": "33.36"},
+    {"table": "Table 4", "page": 8, "row": "Complete Model", "column": "EM", "value": "46.20"},
+    {"table": "Table 4", "page": 8, "row": "Human", "column": "F1", "value": "96.42"},
+    {"table": "Table 6", "page": 9, "row": "Numbers", "column": "BERT", "value": "14.5"},
+    {"table": "Table 6", "page": 9, "row": "Single Span", "column": "QN+", "value": "58.2"},
+    {"table": "Table 6", "page": 9, "row": "Date", "column": "BERT", "value": "42.8"}
+  ]
+}
