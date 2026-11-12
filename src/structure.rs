@@ -202,9 +202,11 @@ impl Targets {
                 }
             }
         }
+        // Longest first; of two entries with one title, the first in the
+        // registry, as for a DOI. The sort is stable.
         out.titles
-            .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.cmp(b)));
-        out.titles.dedup_by(|a, b| a.0 == b.0);
+            .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+        out.titles.dedup_by(|later, first| later.0 == first.0);
         out
     }
 }
@@ -254,6 +256,7 @@ fn split(content: &str) -> Vec<&str> {
 }
 
 /// A form feed starts a page at its line, unless only blank text follows it.
+/// Pages without text are not listed, so the numbers can skip.
 fn pages(lines: &[&str]) -> Known<Vec<Page>> {
     if !lines.iter().any(|l| l.contains('\u{c}')) {
         return Known::Unknown(UNKNOWN);
@@ -262,19 +265,35 @@ fn pages(lines: &[&str]) -> Known<Vec<Page>> {
         page: 1,
         first_line: 1,
     }];
+    // Each form feed ends a page, so the count gives the page's number.
+    let mut number = 1;
     for (i, line) in lines.iter().enumerate() {
         for (at, _) in line.match_indices('\u{c}') {
+            number += 1;
             let rest_blank = line[at + 1..].trim().is_empty()
                 && lines[i + 1..].iter().all(|l| clean(l).is_empty());
-            let first_line = match line[at + 1..].trim().is_empty() && !rest_blank {
+            if rest_blank {
+                continue;
+            }
+            let first_line = match line[at + 1..].trim().is_empty() {
                 // The page's text starts on the next line.
                 true if at > 0 => i + 2,
                 _ => i + 1,
             };
-            // A form feed before any text leaves page 1 at line 1.
-            if !rest_blank && out.last().is_some_and(|p| p.first_line < first_line) {
+            let last = out.last_mut().expect("page 1");
+            // A page without text is not listed: the next page takes its place.
+            // Its text would start after this line when an earlier form
+            // feed of this line began it.
+            let from = last.first_line - 1;
+            let empty = from > i
+                || lines[from..i].iter().all(|l| clean(l).is_empty())
+                    && clean(&line[..at]).is_empty();
+            if empty {
+                last.page = number;
+                last.first_line = first_line;
+            } else {
                 out.push(Page {
-                    page: out.len() + 1,
+                    page: number,
                     first_line,
                 });
             }
@@ -487,6 +506,11 @@ fn plain_headings(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Heading> {
     let mut abstract_seen = false;
     // The line after a heading's number, which holds the heading's words.
     let mut joined = None;
+    // The last line that reads as a references heading.
+    let last_refs = lines.iter().rposition(|l| {
+        let c = clean(l);
+        c.chars().count() <= 40 && is_references(&c)
+    });
     for (i, raw) in lines.iter().enumerate() {
         let mut c = clean(raw);
         if c.is_empty() || joined == Some(i) {
@@ -535,6 +559,27 @@ fn plain_headings(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Heading> {
             out.push(heading(&c, 1, Kind::Appendix));
             continue;
         }
+        // `1 Introduction` after a references heading that is not the last one:
+        // that heading was a line of a table of contents.
+        if (in_refs || in_appendix)
+            && last_refs.is_some_and(|last| last > i)
+            && let Some(m) = NUMBERED.captures(&c)
+            && &m[1] == "1"
+            && m[2].is_empty()
+            && is_title(&m[3])
+        {
+            if let (Some(first), Some(last)) = (out.first(), out.last()) {
+                warnings.push(format!(
+                    "lines {}-{} read as a table of contents; its headings are not sections",
+                    first.line + 1,
+                    last.line + 1
+                ));
+            }
+            out.retain(|h| h.kind == Kind::Abstract);
+            (in_refs, in_appendix, letter, major) = (false, false, None, 1);
+            out.push(heading(&c, 1, Kind::Body));
+            continue;
+        }
         if in_refs || in_appendix {
             // Lettered appendix sections: `A Proofs`, then `A.1 …`, `B …`.
             let Some(m) = LETTERED.captures(&c) else {
@@ -550,8 +595,17 @@ fn plain_headings(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Heading> {
             // A heading that wraps can end in a comma.
             let title = m[3].trim_end_matches(',');
             let named = matches!(title.to_lowercase().as_str(), "appendix" | "appendices");
+            // In the list, a line right after a page break, with no blank
+            // line between, can be the rest of a reference: the line before
+            // it then ends in a word.
+            let mid_reference = in_refs
+                && i > 0
+                && clean(lines[i - 1])
+                    .chars()
+                    .last()
+                    .is_some_and(|ch| ch.is_lowercase() || matches!(ch, ',' | '-' | ':' | ';'));
             let in_order = match depth {
-                0 => l == next && (after_blank || split || named),
+                0 => l == next && (split || named || (after_blank && !mid_reference)),
                 _ => Some(l) == letter || (l == next && (in_appendix || after_blank)),
             };
             let words = !title.contains(['.', ',']) && !title.chars().any(|ch| ch.is_ascii_digit());
@@ -1135,6 +1189,67 @@ mod tests {
         );
         assert_eq!(s.sections[2].level, 2);
         assert_eq!(s.pages, Known::Unknown("unknown"));
+    }
+
+    #[test]
+    fn a_contents_line_that_reads_references_does_not_hide_the_sections() {
+        let text = "Title\n\nContents\nIntroduction\n1\nReferences\n9\n\n1 Introduction\nwords\n\n2 Method\nwords\n\nReferences\n[1] Smith. A Title.\n";
+        let s = structure(text, false, &Targets::default());
+        assert_eq!(
+            spans(&s),
+            vec![
+                (Kind::Front, 1, 8),
+                (Kind::Body, 9, 11),
+                (Kind::Body, 12, 14),
+                (Kind::References, 15, 16),
+            ]
+        );
+        assert!(s.warnings.iter().any(|w| w.contains("table of contents")));
+    }
+
+    #[test]
+    fn a_reference_that_wraps_over_a_page_break_is_not_an_appendix_heading() {
+        let text = "1 Introduction\nwords\n\nReferences\nSmith, J. 2024. Widgets and\n\u{c}A Survey of Synthetic Models\nfor Markets. Example Press.\n\nJones, K. 2023. Other Work.\n\u{c}A Proofs\nwords\n";
+        let s = structure(text, false, &Targets::default());
+        assert_eq!(
+            spans(&s),
+            vec![
+                (Kind::Body, 1, 3),
+                (Kind::References, 4, 9),
+                (Kind::Appendix, 10, 11),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_page_without_text_keeps_its_number() {
+        let page = |page, first_line| Page { page, first_line };
+        let s = structure(
+            "one\n\u{c}two\n\u{c}\u{c}four\n\u{c}",
+            false,
+            &Targets::default(),
+        );
+        assert_eq!(
+            s.pages,
+            Known::Known(vec![page(1, 1), page(2, 2), page(4, 3)])
+        );
+        let s = structure("\u{c}two\n", false, &Targets::default());
+        assert_eq!(s.pages, Known::Known(vec![page(2, 1)]));
+        let s = structure("one\u{c}\u{c}\nthree\n", false, &Targets::default());
+        assert_eq!(s.pages, Known::Known(vec![page(1, 1), page(3, 2)]));
+    }
+
+    #[test]
+    fn two_entries_with_one_title_give_the_first_in_the_registry() {
+        let title = "A Synthetic Paper About Widgets And Quotes";
+        let records = [
+            entry("9", None, None, title),
+            entry("10", None, None, title),
+        ];
+        let text = "References\n[1] X. A synthetic paper about widgets and quotes. 2024.\n[2] Y. Other.\n[3] Z. More.\n";
+        let s = structure(text, false, &Targets::new(&records, &[]));
+        let list = s.references.known().unwrap();
+        assert_eq!(list.entries[0].key.as_deref(), Some("9"));
     }
 
     #[test]

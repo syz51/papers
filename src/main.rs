@@ -2698,15 +2698,8 @@ fn finish_read(
     let line = serde_json::to_string(&text).expect("texts serialize");
     std::fs::write(sidecar, format!("{line}\n"))
         .map_err(|e| format!("{}: {e}", sidecar.display()))?;
-    // The structure sidecar. A registry that does not load gives no citation
-    // edges, which is said.
-    let records = registry::load(&config.registry).unwrap_or_else(|e| {
-        eprintln!("papers: registry not read for the structure's citations: {e}");
-        None
-    });
-    let built = structure_of(config, &records.unwrap_or_default(), &text.path)?;
-    let written = write_structure(config, &built)?;
-    println!("structure: {}", config.display(&written));
+    let path = text.path.clone();
+    let saved = text.clone();
     if o.record
         && let Some(entry) = entry
     {
@@ -2719,6 +2712,35 @@ fn finish_read(
             config.display(&config.registry),
             entry.key
         );
+    }
+    // The structure sidecar, from the registry as it is now. A registry that
+    // does not load gives no citation edges, which is said. The sidecar can be
+    // built again, so a failure here does not fail the read.
+    let mut records = registry::load(&config.registry)
+        .unwrap_or_else(|e| {
+            eprintln!("papers: registry not read for the structure's citations: {e}");
+            None
+        })
+        .unwrap_or_default();
+    // The text as read, also where the registry does not record it (yet).
+    if let Some(entry) = entry
+        && let Some(r) = records.iter_mut().find(|r| r.key == entry.key)
+    {
+        r.texts.retain(|t| t.path != path);
+        r.texts.push(saved);
+    } else if !records
+        .iter()
+        .any(|r| r.texts.iter().any(|t| t.path == path))
+    {
+        let mut unregistered = registry::Reference::new(String::new());
+        unregistered.texts.push(saved);
+        records.push(unregistered);
+    }
+    match structure_of(config, &records, &path).and_then(|b| write_structure(config, &b)) {
+        Ok(written) => println!("structure: {}", config.display(&written)),
+        Err(e) => eprintln!(
+            "papers: structure sidecar not written (`papers structure {path}` builds it): {e}"
+        ),
     }
     println!("{line}");
     Ok(true)
@@ -3713,6 +3735,13 @@ mod tests {
         assert_eq!(sidecar["schema"], structure::SCHEMA);
         assert_eq!(sidecar["text"]["sha256"], text.sha256.as_str());
         assert_eq!(sidecar["text"]["path"], text.path.as_str());
+        // The mode `read` used, though no registry entry records the text.
+        assert_eq!(sidecar["text"]["extraction"], "plain");
+        assert_eq!(
+            sidecar["warnings"].as_array().unwrap().len(),
+            1,
+            "{sidecar}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

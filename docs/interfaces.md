@@ -48,7 +48,7 @@ text: <path>
 
 ## Paper structure: `rf.paper-structure/1`
 
-`papers structure <key|path>…` and `papers structure --all` write one sidecar for each text. `papers read` writes it too, for the text it saves or finds unchanged in `--out`, and prints `structure: <path>` before the manifest line. When a registered paper's recorded text answers the run, `read` writes no file and prints no such line. The sidecar says where the text has its pages, sections and reference list, and which registry entries the reference list cites. A search index reads it; `papers` never changes the text.
+`papers structure <key|path>…` and `papers structure --all` write one sidecar for each text. `papers read` writes it too, for the text it saves or finds unchanged in `--out`, and prints `structure: <path>` before the manifest line. When a registered paper's recorded text answers the run, `read` writes no file and prints no such line. When the sidecar cannot be written, `read` says so on stderr and still succeeds. The sidecar says where the text has its pages, sections and reference list, and which registry entries the reference list cites. A search index reads it; `papers` never changes the text.
 
 ### File name
 
@@ -104,7 +104,7 @@ The file is one JSON object, pretty-printed, with a final LF.
 | `text.lines` | The number of lines. |
 | `text.extraction` | The `extraction` value the registry records for this path, as it is recorded. `unknown` when no entry records the path or the record has no mode. |
 | `generator` | `papers <version>`. |
-| `pages` | The pages in order, each with its number from 1 and its first line. It is the string `unknown` when the text has no page mark. A form feed (U+000C) ends a page; the next page's `first_line` is the line where its text starts. In a Markdown text without form feeds, a line that is only an HTML comment starting with `page`, such as `<!-- page -->` or `<!-- page break -->`, ends a page; the next page starts on the line after it. |
+| `pages` | The pages in order, each with its number from 1 and its first line. A page without text is not listed, so the numbers can skip. It is the string `unknown` when the text has no page mark. A form feed (U+000C) ends a page; the next page's `first_line` is the line where its text starts. In a Markdown text without form feeds, a line that is only an HTML comment starting with `page`, such as `<!-- page -->` or `<!-- page break -->`, ends a page; the next page starts on the line after it. |
 | `sections` | The spans in line order. Together they cover every line exactly once. An empty text has none. |
 | `sections[].kind` | `front`, `abstract`, `body`, `references`, `appendix` or `unknown`. |
 | `sections[].heading` | The heading, trimmed, with single spaces. `null` for a span without a heading. When the extractor put a heading's number and its words on two lines, it is both joined by a space, and `first_line` is the number's line. |
@@ -133,7 +133,7 @@ Detection reads patterns, not meaning. It reports `unknown` or a warning where a
 Each entry of `references.entries` with a `key` is a citation edge from the text's registry entry to the entry `key`.
 
 - A reference matches an entry by DOI, then by arXiv id, then by title. DOIs compare without case. An arXiv id matches in any version, in the forms `arXiv:2601.00001`, `arxiv.org/abs/2601.00001`, `arxiv.org/pdf/2601.00001`, `abs/2601.00001` and the DOI `10.48550/arXiv.2601.00001`.
-- A title matches when the reference's normalised text contains the entry's normalised title. A normalised title is lower case, without accents, punctuation or spaces, and a line-end hyphen is joined. Titles shorter than 20 normalised characters do not match. The longest title wins.
+- A title matches when the reference's normalised text contains the entry's normalised title. A normalised title is lower case, without accents, punctuation or spaces, and a line-end hyphen is joined. Titles shorter than 20 normalised characters do not match. The longest title wins. Of two entries with the same DOI, arXiv id or title, the first in the registry is the match.
 - A match on an entry that has `duplicate_of` gives that key instead.
 - The entries that record the text itself are never a match.
 - A DOI or arXiv id that a line break divides does not match.

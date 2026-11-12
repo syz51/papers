@@ -5,6 +5,7 @@
 use crate::arxiv;
 use crate::config::Config;
 use crate::id::ArxivId;
+use crate::refs::Doi;
 use crate::registry::{self, Reference};
 use crate::text;
 
@@ -100,6 +101,13 @@ pub fn backfill(
     // OpenAlex, one work per request.
     let mut failures = 0;
     for r in rest {
+        // A DOI that is none is this entry's fault, not a failed request.
+        if r.ids.openalex.is_none()
+            && let Some(doi) = r.ids.doi.as_deref().filter(|d| Doi::parse(d).is_none())
+        {
+            out.failed.push(format!("{}: not a DOI: {doi}", r.key));
+            continue;
+        }
         if failures >= MAX_FAILURES {
             out.failed.push(format!(
                 "{}: not attempted: earlier OpenAlex requests failed",
@@ -149,6 +157,47 @@ pub fn backfill(
 mod tests {
     use super::*;
     use crate::http::{self, Http};
+
+    #[test]
+    fn stops_after_failed_requests_in_a_row_but_not_for_a_bad_doi() {
+        let dir =
+            std::env::temp_dir().join(format!("papers-abstracts-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("research.toml"), "[papers]\n").unwrap();
+        let entry = |key: usize, doi: &str| {
+            format!(
+                r#"{{"schema":"rf.reference/1","key":"{key}","type":"paper","title":"T","authors":null,"year":null,"venue":null,"ids":{{"doi":"{doi}","arxiv":null,"dblp":null,"openalex":null,"url":null}},"version":null,"accessed":null,"depth":null,"texts":[],"duplicate_of":null,"source":null,"verified":null}}"#
+            )
+        };
+        let mut lines: Vec<String> = (1..=4).map(|k| entry(k, "not-a-doi")).collect();
+        lines.extend((5..=9).map(|k| entry(k, &format!("10.1234/synthetic.{k}"))));
+        std::fs::write(dir.join("references.jsonl"), lines.join("\n") + "\n").unwrap();
+        let config = Config::load(Some(&dir.join("research.toml")), &dir).unwrap();
+        let http = Http::new();
+        // No arXiv id: no request is made.
+        let arxiv = arxiv::Client::at(&http, "http://127.0.0.1:9/none");
+        let asked = std::cell::RefCell::new(Vec::new());
+        let openalex = |r: &Reference| -> Result<Option<Found>, String> {
+            asked.borrow_mut().push(r.key.clone());
+            match r.key.as_str() {
+                "5" => Ok(None),
+                _ => Err("HTTP 503".into()),
+            }
+        };
+        let got = backfill(&config, &arxiv, &openalex, &[], None, false).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        // The four bad DOIs do not stop the run; three failed requests do.
+        assert_eq!(*asked.borrow(), ["5", "6", "7", "8"]);
+        assert_eq!(got.without, ["5"]);
+        assert_eq!(got.failed.len(), 8);
+        assert_eq!(got.failed[0], "1: not a DOI: not-a-doi");
+        assert_eq!(got.failed[4], "6: HTTP 503");
+        assert_eq!(
+            got.failed[7],
+            "9: not attempted: earlier OpenAlex requests failed"
+        );
+    }
 
     #[test]
     fn adds_the_abstract_by_arxiv_id_and_changes_nothing_else() {
