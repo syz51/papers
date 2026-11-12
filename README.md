@@ -40,6 +40,8 @@ This needs Rust 1.99 or newer (edition 2024). `papers read` can retry a page tha
 | `registry check` | Duplicates, missing ids, bad dates, parse problems, as `rf.finding/1` | `papers registry check --format jsonl` |
 | `registry attach` | Record a text file already in the project in an entry's `texts`, with its sha256, and update its manifest | `papers registry attach --key 12 --text sources/text/12.txt --origin <url> --extraction layout` |
 | `registry record-pdfs` | Record `pdf_sha256` for texts saved before `read` recorded it, when the saved PDF reproduces the text; no network request | `papers registry record-pdfs --dry-run` |
+| `registry abstracts` | Fill the `abstract` field of entries that have none, from arXiv and OpenAlex by id; no PDF download | `papers registry abstracts --dry-run` |
+| `structure` | Write the `rf.paper-structure/1` sidecar of texts: pages, section spans, the reference list and the registry entries it cites | `papers structure --all` |
 | `verify` | Compare registry entries (or notes) with arXiv, Crossref, OpenAlex | `papers verify --keys 12,40 --format jsonl` |
 | `read` | Download an open-access PDF and extract its text (plain or layout), with a sha256 manifest | `papers read --key 12 --record --extraction layout` |
 | `refs` | Works a paper cites (OpenAlex, else Semantic Scholar) | `papers refs 2601.00001 --max 50` |
@@ -129,6 +131,8 @@ Optional fields that `papers` adds to the contract:
 | `texts[].extraction` | How the text was extracted from its PDF: `plain` or `layout` (`pdftotext -layout`). It is omitted for texts attached by hand without `--extraction` and for texts recorded before `papers` added it; `read` treats those as `plain`. Another value, such as one a later version writes, is kept as it is; `read` does not re-extract such a text without `--extraction`. |
 | `texts[].pdf_sha256` | The sha256 of the PDF that `read` extracted the text from, saved beside the text as `<name>.pdf`. It is omitted for texts attached by hand and for texts recorded before `papers` added it; `registry record-pdfs` adds it to those whose saved PDF reproduces the text. |
 
+| `abstract`, `abstract_source` | The work's abstract as one string with single spaces, and where it is from (`arxiv:<id>v<n>` or `openalex:<W id>`). Both are absent when no abstract is recorded. [`registry abstracts`](#registry-abstracts) adds them. |
+
 Fields that `papers` does not know are kept when it rewrites the registry, in entries and in `texts` objects.
 
 `registry build` reads one of two sources:
@@ -140,7 +144,7 @@ Fields that `papers` does not know are kept when it rewrites the registry, in en
 
 Every value comes from the text. When the text does not settle a value, it stays `null` and is reported as a parse issue. `registry build` prints each parse issue at error severity as `file:line: rule key: message`. It still writes the registry, so one bad entry does not hold back the others, and then exits 1. When an entry's main text cannot be read (`entry-missing`, `frontmatter-invalid`), each field the text no longer gives keeps its recorded value. Values the text still gives, such as a section's labelled lines, are updated. Warnings alone leave the exit code at 0. `--dry-run` reports the same issues and exit code without writing. A rebuild keeps tool-added state (`texts`, `verified`, and fields `papers` does not know) and warns about keys that have disappeared. Keys are never renumbered.
 
-Every write (`registry build`, `registry attach`, `registry record-pdfs`, `verify --record`, `read --record`) takes an exclusive lock on `<registry>.lock` next to the registry, reads the registry afresh, applies its change, and replaces the file atomically. Long runs apply their results at the end, so concurrent runs do not overwrite each other's changes. The lock file holds no data; keep it out of version control.
+Every write (`registry build`, `registry attach`, `registry record-pdfs`, `registry abstracts`, `verify --record`, `read --record`) takes an exclusive lock on `<registry>.lock` next to the registry, reads the registry afresh, applies its change, and replaces the file atomically. Long runs apply their results at the end, so concurrent runs do not overwrite each other's changes. The lock file holds no data; keep it out of version control.
 
 ### `registry check` rules
 
@@ -189,7 +193,7 @@ When an index's metadata is wrong rather than the note, record why in the note's
 
 ## `read`
 
-`papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin, retrieved, extraction, pdf_sha256}`, and a `<name>.json` sidecar keeps a copy. The sha256 is of the text file, `retrieved` is the UTC time of the download (RFC 3339), `extraction` is the extraction mode, and `pdf_sha256` is the sha256 of the PDF, which is saved as `<name>.pdf` beside the text. Texts attached by hand have no `retrieved` unless `--retrieved` gives one.
+`papers read <ref>` or `papers read --key <key>` downloads an open-access PDF into `--out`, which defaults to `<root>/sources/text`, and extracts its text. The last stdout line is the manifest `{path, sha256, origin, retrieved, extraction, pdf_sha256}`, and a `<name>.json` sidecar keeps a copy. `read` also writes the text's [structure sidecar](#structure-sidecars-rfpaper-structure1) and prints `structure: <path>` before the manifest. The sha256 is of the text file, `retrieved` is the UTC time of the download (RFC 3339), `extraction` is the extraction mode, and `pdf_sha256` is the sha256 of the PDF, which is saved as `<name>.pdf` beside the text. Texts attached by hand have no `retrieved` unless `--retrieved` gives one.
 
 `--extraction` chooses how the text is extracted:
 
@@ -235,6 +239,33 @@ It records the PDF's sha256 only when an extractor gives a text with the recorde
 - A text is not reproduced when another version of an extractor wrote it and that version's output differs. Installing Poppler can reproduce more plain and layout texts; run the command again then.
 
 A text is named by the keys of the registry entries that list its path, else by `<name>`. The last lines give the counts and the names of the texts that were not reproduced. `--dry-run` prints the same and writes nothing. The exit code is 0 also when texts were not reproduced.
+
+### `registry abstracts`
+
+`papers registry abstracts [--key <key>]… [--limit <n>] [--dry-run] [--registry <path>]` fills the `abstract` field of entries that have none. A search index can then find a paper by its abstract when no text is saved.
+
+- An entry with an arXiv id gets the abstract from arXiv, in the entry's recorded `version` when it has one. Any other entry with a DOI or an OpenAlex id gets it from OpenAlex. An entry with none of these is counted and skipped.
+- The command sends only those public ids, in batches for arXiv and one work per request for OpenAlex. It uses the response cache and downloads no PDF.
+- It writes `abstract` and `abstract_source` and changes nothing else, under the registry's lock. An entry that has an abstract is never changed.
+- After 3 OpenAlex failures in a row, it does not attempt the rest and reports each as failed. Run it again later; entries that got an abstract are not asked again.
+- The last lines give the counts and the keys whose source has no abstract. `--dry-run` prints the same and writes nothing. The exit code is 1 when a lookup failed, else 0.
+
+[docs/interfaces.md](docs/interfaces.md) defines the two fields.
+
+## Structure sidecars: `rf.paper-structure/1`
+
+`papers structure <key|path>…` writes `<text file name>.structure.json` beside each text: `sources/text/87.txt.structure.json` for `sources/text/87.txt`. `papers structure --all` does so for every text the registry records. `papers read` writes it for the text it saves or finds unchanged in `--out`, and prints `structure: <path>`.
+
+The sidecar holds, as raw line ranges of the text:
+
+- the pages, from the form feeds the extractor wrote;
+- the section spans: `front`, `abstract`, `body`, `references`, `appendix` or `unknown`, each with its heading and level;
+- the reference list, divided into references where they are numbered or separated by blank lines;
+- for each reference, the registry key it cites, matched by DOI, arXiv id or normalised title.
+
+The command reads only the text and the registry. It makes no network request, never changes a text, and works for a text of any `extraction` value and for Markdown texts. What detection does not find is `unknown` or a warning, never a guess. It prints one line per text, then the text's warnings, then the counts of texts with a reference list and with an abstract span. `--dry-run` prints the same and writes nothing. A sidecar is rewritten only when its content changes.
+
+[docs/interfaces.md](docs/interfaces.md) defines the schema, the line numbering and what a search index does with the sidecar.
 
 ## Search log: `rf.search/1`
 
