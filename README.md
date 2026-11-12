@@ -117,7 +117,7 @@ cache_dir = ".research/papers/cache"          # default: <state_dir>/papers/cach
 docling = ["uv", "run", "--quiet", "--no-project", "--with", "docling==2.150.0", "python", "-I"]  # default: the command that runs Python with Docling
 cards = false                       # default; `true` turns on `papers card`
 card_dir = "sources/cards"          # default: where cards are stored, one <key>.json each
-claude = ["claude"]                 # default: the command that runs Claude Code
+claude = ["claude"]                 # default: the command that runs Claude Code; use claude-experiment (see "Paper cards")
 card_model = "claude-haiku-5-5"    # default: the model a card is made with
 status_depth = { read = "full" }    # note status -> registry depth; default read = "method", skimmed = "abstract"
 cite_patterns = ['\[@(?P<key>[\w.-]+)\]']    # default: the two patterns under "cite"
@@ -346,7 +346,9 @@ The gate: when fewer than 80% of the written items are kept, or none were writte
 
 Running it again does nothing when the stored card has the text's sha256, the prompt's sha256 and the model. `--force` calls Claude again. `--reply <file>` checks a saved reply again without a call, for example after the checks change. It prints the kept and dropped items and stores nothing, because a saved reply does not record the prompt it answered.
 
-`[papers] claude` names the command, so a wrapper that chooses the billing can stand in for `claude`. Only the paper text and the prompt go to the model. Send published papers only.
+`[papers] claude` names the command, so a wrapper can stand in for `claude`. Plain `claude` is not enough: Claude Code 2.1.322 adds the account's email, the working directory, the platform and the date to every request. Use `claude-experiment` (dotfiles, `~/.claude/bin/claude-experiment`), which removes them and refuses a request that still holds them; then only the paper text and the prompt go to the model. Send published papers only.
+
+`papers card --preflight [--cap N]` makes no card. It runs `<[papers] claude> preflight --cap N` with the card call's flags (step 2, without the paper text), in the same empty directory. `claude-experiment preflight` sends a fixed canary and exits 3 when a request's prompt tokens exceed the cap. The default cap is 1500: on 2026-11-12 the card prompt and schema took 1188 prompt tokens on Haiku through `claude-experiment`, and the removed blocks add about 580. When the preflight fails or takes over 5 minutes, `papers` prints its last line of standard error, such as its token report, and exits 2. A batch runner runs it once before its first card and stops on a nonzero exit.
 
 ### The card
 

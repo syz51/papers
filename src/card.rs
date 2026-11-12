@@ -42,6 +42,13 @@ pub const MIN_WORDS: usize = 8;
 pub const MIN_KEPT_PERCENT: usize = 80;
 /// The quote and number checks: claimcheck's text forms, as a library.
 pub const CHECKER: &str = "claimcheck 0.10.0";
+/// The default cap of `papers card --preflight` on a request's prompt tokens.
+/// On 2026-11-12 the card prompt and reply schema took 1188 prompt tokens on
+/// Haiku through `claude-experiment`; Claude Code's environment and account
+/// blocks add about 580. Raise it when the prompt or schema grows.
+pub const PREFLIGHT_CAP: u32 = 1500;
+/// The longest the preflight's canary call may take.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// The longest a call may take.
 const TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// The most a call may print.
@@ -502,10 +509,10 @@ fn round4(x: f64) -> f64 {
     (x * 10_000.0).round() / 10_000.0
 }
 
-/// Runs the card call: `config.claude` with the paper text on standard input,
-/// in an empty directory, with no tools, settings sources, MCP servers or
-/// slash commands. Gives the raw reply.
-fn call(config: &Config, text: Vec<u8>) -> Result<Vec<u8>, String> {
+/// The card call's command: `config.claude`, then `before` (such as
+/// `preflight --cap N`), then the call's flags, run in an empty directory with
+/// the card prompt as its system prompt file.
+fn command<'a>(config: &'a Config, before: &[String]) -> Result<(&'a str, Command), String> {
     let [program, args @ ..] = config.claude.as_slice() else {
         return Err("[papers] claude is empty; it names the command that runs Claude Code".into());
     };
@@ -534,6 +541,7 @@ fn call(config: &Config, text: Vec<u8>) -> Result<Vec<u8>, String> {
     let mut command = Command::new(program);
     command
         .args(args)
+        .args(before)
         .args(["-p", "--model", &config.card_model, "--system-prompt-file"])
         .arg(&prompt)
         .args([
@@ -549,7 +557,39 @@ fn call(config: &Config, text: Vec<u8>) -> Result<Vec<u8>, String> {
             REPLY_SCHEMA.trim(),
         ])
         .current_dir(&work);
+    Ok((program, command))
+}
+
+/// Runs the card call: `config.claude` with the paper text on standard input,
+/// in an empty directory, with no tools, settings sources, MCP servers or
+/// slash commands. Gives the raw reply.
+fn call(config: &Config, text: Vec<u8>) -> Result<Vec<u8>, String> {
+    let (program, command) = command(config, &[])?;
     pdf::run_with_input(program, command, Some(text), TIMEOUT, MAX_REPLY)
+}
+
+/// `papers card --preflight`: runs `<[papers] claude> preflight --cap <cap>`
+/// with the card call's flags, as `claude-experiment` takes it, before a batch
+/// of cards. Errs when it fails, with its last line of standard error, such
+/// as its token report when it exits 3 for a prompt over `cap`.
+pub fn preflight(config: &Config, cap: u32) -> Result<bool, String> {
+    if !config.cards {
+        return Err(
+            "paper cards are off: set `cards = true` under [papers] in research.toml (DR043)"
+                .into(),
+        );
+    }
+    let before = ["preflight".to_owned(), "--cap".to_owned(), cap.to_string()];
+    let (program, command) = command(config, &before)?;
+    println!(
+        "preflight: {} preflight --cap {cap} ({} with the card flags)",
+        config.claude.join(" "),
+        config.card_model
+    );
+    pdf::run_with_input(program, command, None, PREFLIGHT_TIMEOUT, MAX_REPLY)
+        .map_err(|e| format!("{e}; start no cards"))?;
+    println!("preflight passed");
+    Ok(true)
 }
 
 /// Saves a raw reply under `<state>/card-replies/`, named by key and time.
