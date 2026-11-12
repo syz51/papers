@@ -187,7 +187,11 @@ pub fn locate(text: &IndexedText, quote: &str) -> Option<[usize; 2]> {
 /// identifier. A word is a run of letters, digits, `.`, `-` and `@`. Figures
 /// joined to a word (`7-point`, `5-fold`, `200ms`) or to a unit (`200MB`,
 /// `3D`, `50Hz`, `8Gb`, `10Mbps`) are checked.
-pub fn missing_numbers(value: &str, quote: &str) -> Vec<String> {
+///
+/// A number that the quote lacks is also kept when its [`name_phrase`]
+/// (`S&P 500`, `Stage 3`, `Claude 3.5`, `ViT-B/32`, `3-gram`) occurs in
+/// `text`, matched as a quote is.
+pub fn missing_numbers(value: &str, quote: &str, text: &IndexedText) -> Vec<String> {
     let chars: Vec<char> = normalize::normalize_str(value)
         .iter()
         .map(|n| n.c)
@@ -214,8 +218,102 @@ pub fn missing_numbers(value: &str, quote: &str) -> Vec<String> {
         .into_iter()
         .filter(|t| !(t.dotted || name(t)))
         .filter(|t| !t.lookup_keys().iter().any(|k| quote.has_number(k)))
+        .filter(|t| {
+            name_phrase(&chars, t).is_none_or(|phrase| {
+                let needle = normalize::skeleton_str(&phrase);
+                text.find_bounded(&needle, 0).is_none()
+            })
+        })
         .map(|t| chars[t.start..t.end].iter().collect())
         .collect()
+}
+
+/// Capitalised words that start a figure, not a name (`In 2020`, `Top 20`).
+const NOT_NAMES: &[&str] = &[
+    "a", "about", "after", "all", "almost", "an", "and", "around", "at", "before", "below",
+    "between", "by", "each", "every", "for", "from", "in", "nearly", "of", "on", "only", "or",
+    "over", "since", "than", "the", "to", "top", "under", "until", "up", "with", "within",
+];
+
+/// The name that number `t` of `chars` may be part of, as written: the number
+/// joined to `-gram` (`3-gram`), or a name word and the number (`S&P 500`,
+/// `Stage 3`, `Claude 3.5`, `Qwen 2.5 7B`, `ViT-B/32`, `DEF 14A`). The name
+/// word comes just before the number, joined to it by a mark or one or more
+/// spaces, past at most one other number. It holds a letter and no digit, and
+/// a capital, unless it is a common word (`In`, `Top`), or a mark (`S&P`,
+/// `ViT-B`). A lowercase word (`top 20`, `reaches 92.4`) and a
+/// word that ends a clause (`Accuracy: 92.4`) are not names.
+fn name_phrase(chars: &[char], t: &numbers::NumTok) -> Option<String> {
+    let in_word = |c: char| c.is_alphanumeric() || matches!(c, '.' | '-' | '@');
+    let mut end = t.end + chars[t.end..].iter().take_while(|c| in_word(**c)).count();
+    while end > t.end && matches!(chars[end - 1], '.' | '-') {
+        end -= 1;
+    }
+    let phrase = |start: usize| Some(chars[start..end].iter().collect());
+    if chars[t.end..].starts_with(&['-', 'g', 'r', 'a', 'm']) {
+        return phrase(t.start);
+    }
+    let gap = |c: char| c == ' ' || c == '\t';
+    let opening = |c: char| matches!(c, '(' | '[' | '{' | '"' | '\'' | '“' | '‘');
+    let mut word_end = t.start;
+    let mut skipped = false;
+    let mut word_start = loop {
+        let run = chars[..word_end]
+            .iter()
+            .rev()
+            .take_while(|c| !c.is_whitespace())
+            .count();
+        if run == 0 {
+            // The number or a skipped number stands alone: step over the
+            // spaces before it, on the same line.
+            let spaces = chars[..word_end]
+                .iter()
+                .rev()
+                .take_while(|c| gap(**c))
+                .count();
+            if spaces == 0 {
+                return None;
+            }
+            word_end -= spaces;
+            continue;
+        }
+        let start = word_end - run;
+        let word = &chars[start..word_end];
+        if word.iter().any(|c| c.is_alphabetic()) {
+            break start;
+        }
+        // One number such as `2.5` in `Qwen 2.5 7B` may stand between.
+        if skipped || word_end == t.start || !word.iter().all(|c| c.is_ascii_digit() || *c == '.') {
+            return None;
+        }
+        skipped = true;
+        word_end = start;
+    };
+    while word_start < word_end && opening(chars[word_start]) {
+        word_start += 1;
+    }
+    let word = &chars[word_start..word_end];
+    let last = *word.last()?;
+    // A name word glued to the number may end in a mark (`ViT-B/`, `Q(`);
+    // one apart from it may not end a clause (`Accuracy:`).
+    if word_end != t.start && !last.is_alphanumeric() {
+        return None;
+    }
+    if word.iter().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let lower: String = word.iter().flat_map(|c| c.to_lowercase()).collect();
+    let capital = word.iter().any(|c| c.is_uppercase()) && !NOT_NAMES.contains(&lower.as_str());
+    let inner = &word[..word.len() - usize::from(word_end == t.start)];
+    let mark = inner
+        .iter()
+        .skip(1)
+        .any(|c| matches!(c, '&' | '-' | '/' | '+' | '_'));
+    if capital || mark {
+        phrase(word_start)
+    } else {
+        None
+    }
 }
 
 /// The words of `s`: each CJK character is a word, as word processors count
@@ -241,7 +339,7 @@ pub fn check(text: &str, items: &[Written]) -> Checked {
             d.short += 1;
             format!("quote under {MIN_WORDS} words")
         } else if let Some(lines) = locate(&index, &item.quote) {
-            let missing = missing_numbers(&item.value, &item.quote);
+            let missing = missing_numbers(&item.value, &item.quote, &index);
             if missing.is_empty() {
                 out.kept.push(Item {
                     field: item.field.clone(),
@@ -531,6 +629,11 @@ mod tests {
 
     const TEXT: &str = "Abstract\nWe train a parser on the Penn Treebank and reach an F1\nof 92.4 on section 23, which beats the baseline by 1.2 points.\nThe method fails on long sentences.\n";
 
+    /// The numbers of `value` that `quote` lacks, against the text [`TEXT`].
+    fn missing(value: &str, quote: &str) -> Vec<String> {
+        missing_numbers(value, quote, &IndexedText::new(TEXT.to_owned()))
+    }
+
     fn item(field: &str, value: &str, quote: &str) -> Written {
         Written {
             field: field.into(),
@@ -578,17 +681,17 @@ mod tests {
             ["dropped (number not in quote: 92.4): result: The parser reaches 92.4 F1."]
         );
         assert_eq!(
-            missing_numbers("up 1,200 (12.0%)", "rose by 1200 or 12 %"),
+            missing("up 1,200 (12.0%)", "rose by 1200 or 12 %"),
             Vec::<String>::new()
         );
-        assert_eq!(missing_numbers("reaches 92.4 F1", quote), vec!["92.4"]);
+        assert_eq!(missing("reaches 92.4 F1", quote), vec!["92.4"]);
         // A name with a digit is not a figure.
         assert_eq!(
-            missing_numbers("uses F1 and H133", "no numbers here"),
+            missing("uses F1 and H133", "no numbers here"),
             Vec::<String>::new()
         );
         assert_eq!(
-            missing_numbers(
+            missing(
                 "recall@5 with Llama-2 and GPT-4o on 10-K filings and Qwen-2.5-14B",
                 "no numbers here"
             ),
@@ -596,26 +699,60 @@ mod tests {
         );
         // A name may start with a digit joined to a capitalised word.
         assert_eq!(
-            missing_numbers("on 2WikiMultiHopQA and HotpotQA", "on HotpotQA and MuSiQue"),
+            missing("on 2WikiMultiHopQA and HotpotQA", "on HotpotQA and MuSiQue"),
             Vec::<String>::new()
         );
         assert_eq!(
-            missing_numbers("uses 200MB in 3D at 50Hz, 8Gb, 10Mbps", "no numbers here"),
+            missing("uses 200MB in 3D at 50Hz, 8Gb, 10Mbps", "no numbers here"),
             vec!["200", "3", "50", "8", "10"]
         );
         // A figure beside such a name is still checked.
         assert_eq!(
-            missing_numbers("top-1 accuracy of 57.04 at k = 3", "top-1 accuracy"),
+            missing("top-1 accuracy of 57.04 at k = 3", "top-1 accuracy"),
             vec!["57.04", "3"]
         );
         // A figure joined to a word is checked, and found when the quote has it.
         assert_eq!(
-            missing_numbers("a 7-point gain, 5-fold, 200ms", "no numbers here"),
+            missing("a 7-point gain, 5-fold, 200ms", "no numbers here"),
             vec!["7", "5", "200"]
         );
         assert_eq!(
-            missing_numbers("a 7-point gain in 200ms", "gains 7 points at 200ms"),
+            missing("a 7-point gain in 200ms", "gains 7 points at 200ms"),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_spaced_name_in_the_paper_text_is_not_a_figure() {
+        let text = IndexedText::new(
+            "Firms of the S&P 500 index. In Stage 3 we ask Claude 3.5 Sonnet,\n\
+             Qwen 2.5 7B and ViT-B/32 (DEF 14A forms), and count 3-gram overlap.\n\
+             The parser reaches 92.4 F1 with the top 20 results in 2020.\n\
+             Accuracy 81 overall.\n"
+                .to_owned(),
+        );
+        let quote = "no numbers here";
+        let names =
+            "S&P 500 firms; (Stage 3) uses Claude 3.5, Qwen 2.5 7B, ViT-B/32, DEF 14A and 3-gram";
+        assert_eq!(missing_numbers(names, quote, &text), Vec::<String>::new());
+        // A name the paper text lacks is checked.
+        assert_eq!(
+            missing_numbers("Stage 4 and Claude 3", quote, &text),
+            vec!["4", "3"]
+        );
+        // A figure after a lowercase or common word, or a clause, is checked
+        // even when the paper text has the phrase.
+        assert_eq!(
+            missing_numbers(
+                "reaches 92.4 F1 with the top 20 results, Top 20 results, In 2020, Accuracy: 81",
+                quote,
+                &text
+            ),
+            vec!["92.4", "20", "20", "2020", "81"]
+        );
+        assert_eq!(
+            missing_numbers("a 7-point gain, 5-fold, 200ms", quote, &text),
+            vec!["7", "5", "200"]
         );
     }
 
