@@ -192,7 +192,7 @@ The list ends at the last line of the `references` span, with two exceptions:
 
 ### Tables
 
-A table is a GitHub-style pipe table outside fenced code (```` ``` ```` or `~~~`). It is a row with `|`, then a delimiter row with the same number of cells, each of dashes with an optional `:` at either end. The body rows follow up to the first line that is blank or has no `|`. A table can have no body rows. Docling writes every table this way; its header row holds the column labels.
+A table is a GitHub-style pipe table outside fenced code (```` ``` ```` or `~~~`). It is a row with `|`, then a delimiter row with the same number of cells, each of dashes with an optional `:` at either end. The body rows follow up to the first line that has no `|`; a blank line has none. A table can have no body rows. A delimiter row under a row with another number of cells is not a table; a warning names its line. Docling writes every table this way; its header row holds the column labels.
 
 ### What a search index does with it
 

@@ -253,7 +253,7 @@ pub fn build(
     let sections = sections(&lines, &headings, markdown, &mut warnings);
     let references = references(&lines, &sections, targets, markdown, &mut warnings);
     let tables = match markdown {
-        true => Known::Known(tables(&lines)),
+        true => Known::Known(tables(&lines, &mut warnings)),
         false => Known::Unknown(UNKNOWN),
     };
     Structure {
@@ -276,8 +276,9 @@ static DELIMITER: LazyLock<Regex> =
 
 /// GitHub-style pipe tables outside fenced code: a row with `|`, then a
 /// delimiter row with as many cells, then body rows up to the first line that
-/// is blank or has no `|`.
-fn tables(lines: &[&str]) -> Vec<Table> {
+/// has no `|`. A delimiter row under a row with another cell count is a
+/// warning, not a table.
+fn tables(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Table> {
     let mut out = Vec::new();
     let mut fence = false;
     let mut i = 0;
@@ -296,15 +297,18 @@ fn tables(lines: &[&str]) -> Vec<Table> {
             continue;
         }
         let columns = cells(header);
-        if columns.len() != cells(lines[i + 1]).len() {
+        let delimiters = cells(lines[i + 1]).len();
+        if columns.len() != delimiters {
+            warnings.push(format!(
+                "line {}: a table header row has {} cells and its delimiter row {delimiters}; the table is not listed",
+                i + 1,
+                columns.len()
+            ));
             i += 1;
             continue;
         }
         let mut last = i + 1;
-        while last + 1 < lines.len()
-            && lines[last + 1].contains('|')
-            && !lines[last + 1].trim().is_empty()
-        {
+        while last + 1 < lines.len() && lines[last + 1].contains('|') {
             last += 1;
         }
         out.push(Table {
@@ -1879,6 +1883,12 @@ Markets, pages 1–9.
             serde_json::json!({"first_line": 5, "last_line": 8, "header_line": 5, "columns": ["Model", "F1 (%)", ""]})
         );
         assert!(s.summary().contains(", 2 tables, "));
+        assert_eq!(
+            s.warnings.last().map(String::as_str),
+            Some(
+                "line 17: a table header row has 2 cells and its delimiter row 1; the table is not listed"
+            )
+        );
     }
 
     #[test]
