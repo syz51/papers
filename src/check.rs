@@ -9,7 +9,7 @@
 //! | `verified-mismatch` | warn | `verify --record` found the entry's metadata differs from its index, or not there |
 //! | `malformed-doi` | warn | a `doi` that does not parse, or that ends in a character other than an ASCII letter, an ASCII digit or `)` |
 //! | `no-identifier` | warn | no DOI, arXiv id, or URL |
-//! | `malformed-date` | error (warn for reported dates) | an access or reported date that is not a calendar date |
+//! | `malformed-date` | error (warn for reported dates) | an access, reported or `verified.at` date that is not a calendar date |
 //! | `invalid-value` | error | `type`, `depth` or `verified.status` outside the `rf.reference/1` vocabulary |
 //! | `key-mismatch` | error | the heading number and the `[N]` entry number differ |
 //! | plus the parser's `entry-unnumbered`, `entry-missing`, `duplicate-key`, `duplicate-annotation-conflict`, `ambiguous-id`, `authors-unparsed`, `frontmatter-invalid`, `depth-invalid`, `depth-unparsed`, `depth-missing` |
@@ -149,8 +149,9 @@ pub fn check(records: &[Reference]) -> Vec<Finding> {
             }
         }
         if let Some(v) = &r.verified {
-            let finding = if !VERIFIED_STATUSES.contains(&v.status.as_str()) {
-                Some(Finding::new(
+            let mut found = Vec::new();
+            if !VERIFIED_STATUSES.contains(&v.status.as_str()) {
+                found.push(Finding::new(
                     "invalid-value",
                     Severity::Error,
                     r.key.clone(),
@@ -159,16 +160,9 @@ pub fn check(records: &[Reference]) -> Vec<Finding> {
                         v.status,
                         VERIFIED_STATUSES.join(", ")
                     ),
-                ))
-            } else if !valid_iso_date(&v.at) {
-                Some(Finding::new(
-                    "malformed-date",
-                    Severity::Error,
-                    r.key.clone(),
-                    format!("verified.at {:?} is not a YYYY-MM-DD calendar date", v.at),
-                ))
+                ));
             } else if v.status != "match" {
-                Some(Finding::new(
+                found.push(Finding::new(
                     "verified-mismatch",
                     Severity::Warn,
                     r.key.clone(),
@@ -176,11 +170,17 @@ pub fn check(records: &[Reference]) -> Vec<Finding> {
                         "papers verify recorded {} against {} on {}; check the entry, then run papers verify --keys {} --record",
                         v.status, v.against, v.at, r.key
                     ),
-                ))
-            } else {
-                None
-            };
-            out.extend(finding.map(|f| with_source(f, r)));
+                ));
+            }
+            if !valid_iso_date(&v.at) {
+                found.push(Finding::new(
+                    "malformed-date",
+                    Severity::Error,
+                    r.key.clone(),
+                    format!("verified.at {:?} is not a YYYY-MM-DD calendar date", v.at),
+                ));
+            }
+            out.extend(found.into_iter().map(|f| with_source(f, r)));
         }
         if let Some(doi) = &r.ids.doi
             && (Doi::parse(doi).is_none()
@@ -554,6 +554,7 @@ mod tests {
             verified("3", "2026-11-12", "not-found"),
             verified("4", "2026-11-12", "checked"),
             verified("5", "12 November", "match"),
+            verified("6", "12 November", "checked"),
         ];
         let found = check(&records);
         let got = rules(&found);
@@ -564,6 +565,8 @@ mod tests {
                 ("verified-mismatch", Severity::Warn, "3"),
                 ("invalid-value", Severity::Error, "4"),
                 ("malformed-date", Severity::Error, "5"),
+                ("invalid-value", Severity::Error, "6"),
+                ("malformed-date", Severity::Error, "6"),
             ]
         );
     }

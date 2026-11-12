@@ -167,6 +167,18 @@ pub fn parse(text: &str, source_path: &str) -> Parsed {
         aliases.append(&mut found);
     }
     apply_duplicates(&mut parsed, aliases, source_path);
+    // A duplicate defers to its survivor and needs no depth of its own.
+    let duplicates: BTreeSet<&str> = parsed
+        .records
+        .iter()
+        .filter(|r| r.duplicate_of.is_some())
+        .map(|r| r.key.as_str())
+        .collect();
+    let issues = std::mem::take(&mut parsed.issues);
+    parsed.issues = issues
+        .into_iter()
+        .filter(|i| !(i.rule == "depth-missing" && duplicates.contains(i.key.as_str())))
+        .collect();
     parsed
 }
 
@@ -850,7 +862,9 @@ static EXPLICIT_DEPTH: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 // `Inspection depth: unknown`, then the reason, if any: `unknown. Reason: …`.
+// Other text after `unknown`, as in `unknown; abstract only`, is read as prose.
 re!(STATED_UNKNOWN, r"(?i)^unknown\b[\s*_`.;,:()\-–—]*(.*)$");
+re!(REASON, r"(?i)^reason\b");
 
 /// The inspection depth. A line `Inspection depth: <level>` naming one
 /// `rf.reference/1` level states it outright and wins over prose; a one-word
@@ -859,10 +873,10 @@ re!(STATED_UNKNOWN, r"(?i)^unknown\b[\s*_`.;,:()\-–—]*(.*)$");
 /// section's `Inspection:` lines name exactly one in plain words (negated
 /// mentions such as "not read in full" are ignored).
 ///
-/// `Inspection depth: unknown` followed by a reason states that the depth is
-/// not known: the depth is `None` and nothing is reported. Any other entry left
-/// without a depth, and not reported as `depth-unparsed`, is reported as
-/// `depth-missing`, as is `unknown` without a reason.
+/// `Inspection depth: unknown. Reason: …` states that the depth is not known:
+/// the depth is `None` and nothing is reported. Any other entry left without a
+/// depth, and not reported as `depth-unparsed`, is reported as `depth-missing`:
+/// at a bare `Inspection depth: unknown` line, or else at the heading.
 fn depth(
     section: &Section,
     issue: &mut impl FnMut(&'static str, Severity, usize, String),
@@ -871,23 +885,22 @@ fn depth(
     let mut levels = BTreeSet::new();
     // Set once the missing depth is accounted for: stated unknown, or reported.
     let mut explained = false;
+    // The first `Inspection depth: unknown` line that gives no reason.
+    let mut bare_unknown = None;
     for &(n, line) in &section.body {
         let line = line.trim();
         if let Some(c) = EXPLICIT_DEPTH.captures(line)
             && let Some(u) = STATED_UNKNOWN.captures(c[1].trim_start_matches(['*', '_', '`']))
         {
-            if u[1].trim().is_empty() {
-                issue(
-                    "depth-missing",
-                    Severity::Warn,
-                    n,
-                    "inspection depth is unknown but no reason is given; \
-                     write `Inspection depth: unknown. Reason: …`"
-                        .to_owned(),
-                );
+            let rest = u[1].trim_end_matches(['*', '_', '`', '.']).trim();
+            if rest.is_empty() {
+                bare_unknown.get_or_insert(n);
+                continue;
             }
-            explained = true;
-            continue;
+            if REASON.is_match(rest) {
+                explained = true;
+                continue;
+            }
         }
         // A one-word value is a stated level; longer text is prose, read below.
         if let Some(c) = EXPLICIT_DEPTH.captures(line)
@@ -955,15 +968,21 @@ fn depth(
         .then(|| levels.first().map(|l| (*l).to_owned()))
         .flatten();
     if level.is_none() && !explained {
-        issue(
-            "depth-missing",
-            Severity::Warn,
-            section.heading_line,
-            format!(
+        let message = match bare_unknown {
+            Some(_) => "inspection depth is unknown but no reason is given; \
+                        write `Inspection depth: unknown. Reason: …`"
+                .to_owned(),
+            None => format!(
                 "no inspection depth: write `Inspection depth: <level>` with one of {}, \
                  or `Inspection depth: unknown. Reason: …`",
                 DEPTHS.join(", ")
             ),
+        };
+        issue(
+            "depth-missing",
+            Severity::Warn,
+            bare_unknown.unwrap_or(section.heading_line),
+            message,
         );
     }
     level
@@ -1175,12 +1194,34 @@ Inspection: the page was opened.
 [4] Doe, Jane. **A Stated Level**. Example Venue, 2025. [Original](https://example.org/4).
 
 Inspection depth: abstract.
+
+## Reference 5
+
+[5] Doe, Jane. **Unknown, Then Prose**. Example Venue, 2025. [Original](https://example.org/5).
+
+Inspection depth: unknown; abstract only
+
+## Reference 6
+
+[6] Doe, Jane. **Unknown, Then A Level**. Example Venue, 2025. [Original](https://example.org/6).
+
+Inspection depth: unknown
+Inspection depth: full
+
+## Reference 7
+
+[7] Doe, Jane. **An Alias**. Example Venue, 2025. [Original](https://example.org/7).
+
+Alias of [4].
 ";
         let p = parse(catalogue, "docs/references.md");
-        for key in ["1", "2", "3"] {
+        for key in ["1", "2", "3", "7"] {
             assert_eq!(get(&p, key).depth, None, "key {key}");
         }
         assert_eq!(get(&p, "4").depth.as_deref(), Some("abstract"));
+        assert_eq!(get(&p, "5").depth.as_deref(), Some("abstract"));
+        assert_eq!(get(&p, "6").depth.as_deref(), Some("full"));
+        assert_eq!(get(&p, "7").duplicate_of.as_deref(), Some("4"));
         let reported: Vec<(&str, &str, usize)> = p
             .issues
             .iter()
@@ -1189,7 +1230,8 @@ Inspection depth: abstract.
         assert_eq!(
             reported,
             [("depth-missing", "2", 11), ("depth-missing", "3", 13)],
-            "an unknown depth needs its reason; a missing line is reported at the heading"
+            "an unknown depth needs its reason or a level; a missing line is reported at \
+             the heading; an alias needs no depth"
         );
     }
 
