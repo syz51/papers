@@ -5,6 +5,7 @@
 use crate::arxiv;
 use crate::config::Config;
 use crate::id::ArxivId;
+use crate::openalex;
 use crate::refs::Doi;
 use crate::registry::{self, Reference};
 use crate::text;
@@ -25,6 +26,25 @@ pub struct Outcome {
     pub no_id: usize,
     /// Entries that had an abstract before.
     pub already: usize,
+}
+
+/// The OpenAlex lookup that `registry abstracts` passes to [`backfill`]: the
+/// work by the entry's OpenAlex id, else by its DOI, and its abstract with the
+/// source `openalex:<id>`. `Ok(None)` when the entry has neither id, OpenAlex
+/// has no such work, or the work has no abstract.
+pub fn from_openalex(client: &openalex::Client, r: &Reference) -> Result<Option<Found>, String> {
+    let work = match (&r.ids.openalex, &r.ids.doi) {
+        (Some(id), _) => client.by_id(id)?,
+        (None, Some(doi)) => {
+            let doi = Doi::parse(doi).ok_or_else(|| format!("not a DOI: {doi}"))?;
+            client.by_doi(&doi)?
+        }
+        (None, None) => None,
+    };
+    Ok(work.and_then(|w| {
+        let source = format!("openalex:{}", w.id);
+        w.abstract_text.map(|text| (text, source))
+    }))
 }
 
 /// OpenAlex lookups stop after this many failures in a row.
@@ -157,6 +177,74 @@ pub fn backfill(
 mod tests {
     use super::*;
     use crate::http::{self, Http};
+
+    /// The real OpenAlex lookup against a local server: by OpenAlex id when
+    /// the entry has one (even with a DOI), else by DOI; the abstract comes
+    /// from `abstract_inverted_index`, and a work without one gives none.
+    #[test]
+    fn looks_up_openalex_abstracts_by_id_and_by_doi() {
+        let entry = |doi: &str, openalex: &str| -> Reference {
+            serde_json::from_str(&format!(
+                r#"{{"schema":"rf.reference/1","key":"1","type":"paper","title":"T","authors":null,"year":null,"venue":null,"ids":{{"doi":{doi},"arxiv":null,"dblp":null,"openalex":{openalex},"url":null}},"version":null,"accessed":null,"depth":null,"texts":[],"duplicate_of":null,"source":null,"verified":null}}"#
+            ))
+            .unwrap()
+        };
+        // `title` and `display_name` differ from the abstract, so reading the
+        // wrong field fails the test.
+        let work = |id: &str, index: &str| {
+            let body = format!(
+                r#"{{"id":"https://openalex.org/{id}","doi":"https://doi.org/10.1234/synthetic.{id}","title":"Title of {id}","display_name":"Name of {id}","abstract_inverted_index":{index}}}"#
+            );
+            http::response("200 OK", &["Content-Type: application/json"], &body)
+        };
+        let (base, server) = http::serve(vec![
+            work(
+                "W9000000001",
+                r#"{"Words":[0,3],"from":[1],"OpenAlex":[2]}"#,
+            ),
+            work("W9000000002", r#"{"By":[0],"DOI.":[1]}"#),
+            work("W9000000003", "null"),
+        ]);
+        let endpoint = format!("{base}/works");
+        let http = Http::new();
+        let client = openalex::Client::at(&http, &endpoint);
+
+        let by_id = entry(
+            r#""10.1234/synthetic.1""#,
+            r#""https://openalex.org/W9000000001""#,
+        );
+        let by_doi = entry(r#""https://doi.org/10.1234/Synthetic.2""#, "null");
+        let without = entry("null", r#""W9000000003""#);
+        assert_eq!(
+            from_openalex(&client, &by_id),
+            Ok(Some((
+                "Words from OpenAlex Words".into(),
+                "openalex:W9000000001".into()
+            )))
+        );
+        assert_eq!(
+            from_openalex(&client, &by_doi),
+            Ok(Some(("By DOI.".into(), "openalex:W9000000002".into())))
+        );
+        assert_eq!(from_openalex(&client, &without), Ok(None));
+        // No id at all: no request.
+        assert_eq!(from_openalex(&client, &entry("null", "null")), Ok(None));
+
+        let requests: Vec<String> = server
+            .join()
+            .unwrap()
+            .iter()
+            .map(|head| head.lines().next().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            requests,
+            [
+                "GET /works/W9000000001 HTTP/1.1",
+                "GET /works/doi:10.1234/synthetic.2 HTTP/1.1",
+                "GET /works/W9000000003 HTTP/1.1",
+            ]
+        );
+    }
 
     #[test]
     fn stops_after_failed_requests_in_a_row_but_not_for_a_bad_doi() {
