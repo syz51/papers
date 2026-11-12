@@ -3099,8 +3099,8 @@ fn finish_text(
             false => format!("{e}; undoing it also failed: {}", undo.join("; ")),
         });
     }
-    // A plain or layout text's path was printed when it was extracted.
-    if staged && is_docling(&text) {
+    // A staged text's path is printed once it is in place.
+    if staged {
         println!("text: {}", config.display(md_path));
     }
     structure_after_read(config, entry, text);
@@ -3554,8 +3554,7 @@ fn extract_pdf(
     // Staged: the caller moves it into place once its record is written.
     derivative::stage(&txt_path, text.as_bytes())?;
     println!(
-        "text: {} ({} words, extracted by {extractor})",
-        txt_path.display(),
+        "text: {} words, extracted by {extractor}",
         text.split_whitespace().count()
     );
     if !pdf::has_title(&text, &target.title) {
