@@ -3476,7 +3476,8 @@ fn save_pdf(target: &Target, body: &[u8], source: &str) -> Result<Saved, String>
 
 /// Converts `<dir>/<name>.pdf`, whose bytes are `body`, with Docling into the
 /// staged `<dir>/<name>.docling.md` (see [`derivative::pending`]); the caller
-/// moves it into place once its record is written. NUL bytes are dropped.
+/// moves it into place once its record is written. Control characters are
+/// dropped as for a plain text (see [`pdf::drop_controls`]).
 fn docling_text(
     target: &Target,
     body: &[u8],
@@ -3490,7 +3491,7 @@ fn docling_text(
     let tmp = derivative::pending(&md_path);
     let staged = docling::convert(target.docling, &pdf_path, &tmp).and_then(|version| {
         let raw = std::fs::read(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        let text = String::from_utf8_lossy(&raw).replace('\0', "");
+        let text = pdf::drop_controls(String::from_utf8_lossy(&raw).into_owned());
         if text.as_bytes() != raw {
             std::fs::write(&tmp, &text).map_err(|e| format!("{}: {e}", tmp.display()))?;
         }
@@ -3576,6 +3577,7 @@ fn extract_pdf(
     if let Some(note) = note {
         println!("text: {note}");
     }
+    let text = pdf::drop_controls(text);
     // Staged: the caller moves it into place once its record is written.
     derivative::stage(&txt_path, text.as_bytes())?;
     println!(
@@ -4961,6 +4963,43 @@ mod tests {
         );
         assert!(matches!(saved, Ok(Saved::PdfOnly)));
         assert!(!dir.join("lay.txt").exists(), "no pdf-extract fallback");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An extraction with NUL and other control characters gives a text
+    /// without them, in plain and layout mode; tab, newline and form feed
+    /// stay, and the manifest's sha256 is that of the written text.
+    #[test]
+    fn save_pdf_drops_control_characters() {
+        let dir = std::env::temp_dir().join(format!("papers-save-controls-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = config::Config::load(None, &dir).unwrap();
+        let controls = pdf::tests::fake_program("controls");
+        let pdf = tiny_pdf("Synthetic Control Paper");
+        for extraction in [registry::Extraction::Plain, registry::Extraction::Layout] {
+            let target = Target {
+                config: &config,
+                dir: dir.clone(),
+                name: "ctl".into(),
+                // Absent from pdf-extract's text, so plain mode uses pdftotext's.
+                title: "Which There".into(),
+                extraction,
+                pdftotext: &controls,
+                docling: &[],
+            };
+            let saved = save_pdf(&target, pdf.as_bytes(), "https://example.org/ctl.pdf");
+            let Ok(Saved::Text(text)) = saved else {
+                panic!("expected a text");
+            };
+            let staged = derivative::pending(&dir.join("ctl.txt"));
+            let written = std::fs::read(&staged).unwrap();
+            assert_eq!(
+                written, b"whichwhich there\n\tcol\x0cpage two\n",
+                "{extraction:?}"
+            );
+            assert_eq!(text.sha256, http::sha256_hex(&written));
+            derivative::discard(&dir.join("ctl.txt"));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

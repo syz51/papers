@@ -52,7 +52,7 @@ text: <path>
 | `extractor` | `docling <version>`, such as `docling 2.150.0`. |
 
 - An entry has at most one text with `extraction` `docling`. Running the command again replaces it in place.
-- The Markdown has `#` headings, Markdown tables, no NUL bytes, and a line `<!-- page -->` between pages. Its structure sidecar is `<name>.docling.md.structure.json`.
+- The Markdown has `#` headings, Markdown tables, no control characters but tab, newline and form feed, and a line `<!-- page -->` between pages. Its structure sidecar is `<name>.docling.md.structure.json`.
 - `<name>.docling.json` holds the same object as one JSON line.
 
 ## Derivatives
@@ -60,6 +60,7 @@ text: <path>
 A derivative is a file `papers` makes from a text or a PDF: a structure sidecar, a Docling text or a paper card. Each records the sha256 of its input: a sidecar and a card in `text.sha256`, a Docling text in `pdf_sha256`.
 
 - A derivative is written to `<file>.tmp` and renamed into place. A Docling text is renamed only after its registry record and its manifest are written, so a reader never finds the file without its record. `read` writes a plain or layout text the same way.
+- From papers 0.12.2, every text `read` writes (plain, layout or Docling) has no C0 control character but tab (U+0009), newline (U+000A) and form feed (U+000C). `read` drops the others, such as NUL and CR, before it writes the text and its sha256. Texts written before 0.12.2 keep their bytes and may hold NUL; search them with `grep -a`.
 - `papers registry check` reports the rule `derivative-stale` (warn) for a derivative whose input now has another sha256. The message names the command that makes it again. An input that is not in the checkout is skipped.
 
 ### `search`, `refs` and `cited-by`

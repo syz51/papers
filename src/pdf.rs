@@ -126,6 +126,18 @@ pub fn pdftotext(
     Ok(text)
 }
 
+/// `text` without the C0 control characters an extractor can emit, such as
+/// NUL from duplicated glyph runs, which make `grep` treat the file as binary.
+/// Tab, newline and form feed stay: a form feed ends a page.
+pub fn drop_controls(text: String) -> String {
+    let dropped = |c: char| c < ' ' && !matches!(c, '\t' | '\n' | '\u{c}');
+    if text.contains(dropped) {
+        text.replace(dropped, "")
+    } else {
+        text
+    }
+}
+
 /// Whether `text` contains `title`, ignoring case, punctuation and spacing.
 pub fn has_title(text: &str, title: &str) -> bool {
     crate::text::key(text).contains(&crate::text::key(title))
@@ -495,7 +507,7 @@ pub(crate) mod tests {
     /// Shell scripts standing in for `pdftotext`, by name. All are written
     /// before any runs: on Linux, writing one while another test spawns a
     /// process can fail the spawn with "text file busy".
-    const FAKE_PROGRAMS: [(&str, &str); 7] = [
+    const FAKE_PROGRAMS: [(&str, &str); 8] = [
         // Echoes its arguments, so the call's arguments are checked too.
         ("prints", r#"echo "text of $3 with $1 $2 $4""#),
         (
@@ -507,7 +519,22 @@ pub(crate) mod tests {
         ("floods", "exec yes"),
         ("invalid", r"printf 'caf\351 text\n'"),
         ("titled", "echo 'On Readable Titles: A Study'"),
+        // NUL and other C0 controls, as in duplicated glyph runs.
+        (
+            "controls",
+            r"printf 'which\000which there\033\000\r\n\tcol\fpage two\n'",
+        ),
     ];
+
+    #[test]
+    fn drop_controls_keeps_tab_newline_and_form_feed() {
+        assert_eq!(
+            drop_controls("which\0which there\u{1b}\0\r\n\tcol\u{c}page two\n".to_owned()),
+            "whichwhich there\n\tcol\u{c}page two\n"
+        );
+        let clean = "caf\u{e9}\ttext\n\u{c}\n".to_owned();
+        assert_eq!(drop_controls(clean.clone()), clean);
+    }
 
     /// The path of a fake program. Every test that runs one gets its path
     /// here first. A name not in `FAKE_PROGRAMS` is a path that does not exist.
