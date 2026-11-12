@@ -205,12 +205,27 @@ pub fn choose_text<'a>(
 /// error with the last line the program wrote to standard error.
 pub fn run(
     program: &str,
+    command: Command,
+    timeout: Duration,
+    max_output: u64,
+) -> Result<Vec<u8>, String> {
+    run_with_input(program, command, None, timeout, max_output)
+}
+
+/// [`run`], with `input` written to the program's standard input (closed
+/// after it); with `None`, the program reads nothing.
+pub fn run_with_input(
+    program: &str,
     mut command: Command,
+    input: Option<Vec<u8>>,
     timeout: Duration,
     max_output: u64,
 ) -> Result<Vec<u8>, String> {
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(match input {
+            Some(_) => Stdio::piped(),
+            None => Stdio::null(),
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -223,6 +238,19 @@ pub fn run(
     // child. Standard error is read to its end, so a chatty program, such as
     // Docling with its progress bars, never meets a closed pipe; only its
     // last `STDERR_LIMIT` bytes are kept.
+    // Written on another thread, so a program that prints before it has read
+    // everything cannot block on a full output pipe. A program that exits
+    // without reading it all ends the write with a broken pipe, which is not
+    // an error here: its exit status says how it went.
+    let writer = input.map(|bytes| {
+        let mut stdin = child
+            .stdin
+            .take()
+            .expect("stdin is piped when input is given");
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut stdin, &bytes);
+        })
+    });
     let stdout = read_limited(child.stdout.take(), max_output + 1);
     let stderr = read_tail(child.stderr.take(), STDERR_LIMIT as usize);
     let deadline = Instant::now() + timeout;
@@ -247,6 +275,9 @@ pub fn run(
             .expect("a reader thread does not panic")
             .map_err(|e| format!("{program} output: {e}"))
     };
+    if let Some(writer) = writer {
+        writer.join().expect("the writer thread does not panic");
+    }
     let (out, err) = (joined(stdout)?, joined(stderr)?);
     if out.len() as u64 > max_output {
         return Err(format!("{program} printed more than {max_output} bytes"));

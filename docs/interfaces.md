@@ -57,7 +57,7 @@ text: <path>
 
 ## Derivatives
 
-A derivative is a file `papers` makes from a text or a PDF: a structure sidecar or a Docling text. Each records the sha256 of its input: a sidecar in `text.sha256`, a Docling text in `pdf_sha256`.
+A derivative is a file `papers` makes from a text or a PDF: a structure sidecar, a Docling text or a paper card. Each records the sha256 of its input: a sidecar and a card in `text.sha256`, a Docling text in `pdf_sha256`.
 
 - A derivative is written to `<file>.tmp` and renamed into place. A Docling text is renamed only after its registry record and its manifest are written, so a reader never finds the file without its record.
 - `papers registry check` reports the rule `derivative-stale` (warn) for a derivative whose input now has another sha256. The message names the command that makes it again. An input that is not in the checkout is skipped.
@@ -187,3 +187,35 @@ Each entry of `references.entries` with a `key` is a citation edge from the text
 - An entry that has an `abstract` is never changed. To replace an abstract, remove both fields by hand and run the command again.
 - `registry build` keeps both fields.
 - The abstract may contain LaTeX or markup as the source gives it. OpenAlex abstracts are rebuilt from its word index, so their punctuation spacing can differ from the paper's.
+
+## Paper cards: `rf.paper-card/1`
+
+`papers card --key <key>` writes `<card_dir>/<key>.json` (default `sources/cards/<key>.json`), one pretty-printed JSON object. It is written only when `[papers] cards = true` and the card keeps at least 80% of the items the model wrote. A card is class `generated`: never a source of a claim.
+
+| Field | Value |
+| --- | --- |
+| `schema` | `rf.paper-card/1`. |
+| `key` | The registry key. |
+| `class` | `generated`. |
+| `text` | `{path, sha256}`: the registry text the card was made from, as recorded in `texts`, and its sha256 then. |
+| `model` | The model id, such as `claude-haiku-5-5`. |
+| `created` | UTC RFC 3339 time of the call. |
+| `items` | `[{field, value, quote, lines}]`. `field` is `task`, `dataset`, `method`, `metric`, `result` or `limit`. `value` is the model's statement. `quote` is verbatim text of the paper, at least 8 words (a CJK character counts as a word). `lines` is `[first, last]`, 1-based and inclusive, in the raw text. |
+| `prompt_sha256` | The sha256 of the card prompt. |
+| `checker` | The quote checker, such as `claimcheck 0.10.0`. |
+| `usage` | `{input_tokens, output_tokens, cost_usd}`. Input tokens include cached ones. `cost_usd` is absent when the reply gives none. |
+| `written`, `dropped`, `dropped_by` | The items the model wrote, those dropped, and the drops by reason: `field`, `short`, `not_found`, `number`. |
+
+Every kept item meets these conditions, and a reader may rely on them:
+
+- `quote` occurs in the text at `text.path`, as one contiguous passage after claimcheck's normalisation, within `lines`.
+- Every number in `value` occurs in `quote`, as claimcheck matches numbers.
+
+A card is stale when the file at `text.path` no longer has `text.sha256`. `papers registry check` reports it as `derivative-stale`, and `papers card --key <key> --force` makes it again. A card whose `prompt_sha256` or `model` differs from the present ones is not stale; `papers card` without `--force` makes it again.
+
+### What a search index does with it
+
+- Index a card as part of its registry entry: the `value` and `quote` of every item. Rank the entry, not the card.
+- Skip a stale card.
+- Show a hit's `quote` with `text.path` and `lines`, so the reader goes to the paper. Never cite the card.
+- Find an entry's Docling text by `texts[].extraction == "docling"`, and its plain or layout text as the other text.

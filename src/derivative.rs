@@ -56,7 +56,7 @@ fn sha256_of(path: &Path) -> Option<String> {
 
 /// The input a derivative JSON file records, at `text.path` and
 /// `text.sha256`.
-fn recorded_input(path: &Path) -> Option<(String, String)> {
+pub fn recorded_input(path: &Path) -> Option<(String, String)> {
     let json: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     let text = json.get("text")?;
     let field = |name: &str| text.get(name)?.as_str().map(str::to_owned);

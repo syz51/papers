@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["items"],"properties":{"items":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["field","value","quote"],"properties":{"field":{"enum":["task","dataset","method","metric","result","limit"]},"value":{"type":"string"},"quote":{"type":"string"}}}}}}

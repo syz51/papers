@@ -1,6 +1,6 @@
 [package]
 name = "papers"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.99"
 description = "Literature CLI for agent-driven research: arXiv, Crossref and OpenAlex metadata, a reference registry, open-access reading, and metadata verification"
@@ -11,6 +11,7 @@ categories = ["command-line-utilities"]
 publish = false
 
 [dependencies]
+claimcheck = { git = "https://github.com/syz51/claimcheck", rev = "65d0aa91ca84d677ea99833cd0c9ce81ea16b9cc" }
 clap = { version = "4.6.7", features = ["derive"] }
 headless_chrome = "1.0.22"
 jiff = "0.2.39"

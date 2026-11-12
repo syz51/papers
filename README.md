@@ -41,6 +41,7 @@ This needs Rust 1.99 or newer (edition 2024). `papers read` can retry a page tha
 | `registry attach` | Record a text file already in the project in an entry's `texts`, with its sha256, and update its manifest | `papers registry attach --key 12 --text sources/text/12.txt --origin <url> --extraction layout` |
 | `registry record-pdfs` | Record `pdf_sha256` for texts saved before `read` recorded it, when the saved PDF reproduces the text; no network request | `papers registry record-pdfs --dry-run` |
 | `registry abstracts` | Fill the `abstract` field of entries that have none, from arXiv and OpenAlex by id; no PDF download | `papers registry abstracts --dry-run` |
+| `card` | Make a paper card (`rf.paper-card/1`) from an entry's local text with one Claude call; keep only items whose quotes check. Off unless `[papers] cards = true` | `papers card --key 12` |
 | `structure` | Write the `rf.paper-structure/1` sidecar of texts: pages, section spans, the reference list and the registry entries it cites | `papers structure --all` |
 | `verify` | Compare registry entries (or notes) with arXiv, Crossref, OpenAlex | `papers verify --keys 12,40 --format jsonl` |
 | `read` | Download an open-access PDF and extract its text (plain or layout), with a sha256 manifest; or convert the saved PDF with Docling as a second text | `papers read --key 12 --record --extraction layout` |
@@ -79,7 +80,7 @@ Paths that `papers` prints (a result's `note`, a written stub, and registry `tex
 | Code | Meaning |
 | --- | --- |
 | 0 | Success. For `seen`, the work is in the archive. |
-| 1 | A finding at error severity: `registry check`, `verify`, a parse issue in `registry build`, or `cite` with an unknown key. For `seen`, the work is not in the archive. |
+| 1 | A finding at error severity: `registry check`, `verify`, a parse issue in `registry build`, or `cite` with an unknown key. For `card`, the card kept under 80% of its items and was not stored. For `seen`, the work is not in the archive. |
 | 2 | Usage error, I/O error, or a failed lookup. |
 
 ## Configuration: `research.toml`
@@ -100,6 +101,10 @@ catalogue = "docs/references.md"    # numbered Markdown catalogue; none by defau
 search_log = ".research/papers/search.jsonl"  # default: <state_dir>/papers/search.jsonl
 cache_dir = ".research/papers/cache"          # default: <state_dir>/papers/cache
 docling = ["uv", "run", "--quiet", "--no-project", "--with", "docling==2.150.0", "python", "-I"]  # default: the command that runs Python with Docling
+cards = false                       # default; `true` turns on `papers card`
+card_dir = "sources/cards"          # default: where cards are stored, one <key>.json each
+claude = ["claude"]                 # default: the command that runs Claude Code
+card_model = "claude-haiku-5-5"    # default: the model a card is made with
 status_depth = { read = "full" }    # note status -> registry depth; default read = "method", skimmed = "abstract"
 cite_patterns = ['\[@(?P<key>[\w.-]+)\]']    # default: the two patterns under "cite"
 cite_replace = "[{n}]"              # default
@@ -160,7 +165,7 @@ Every write (`registry build`, `registry attach`, `registry record-pdfs`, `regis
 | `key-mismatch` | error | The heading number and the `[N]` entry number differ, or a note's id and its file name differ. |
 | `key-missing-from-source` | warn | A registry key is no longer in the source. |
 | `registry-stale` | warn | The registry differs from a fresh parse of the source. |
-| `derivative-stale` | warn | A file made from a text or PDF records an input sha256 that the input no longer has: a structure sidecar whose text changed, or a Docling text whose `<name>.pdf` changed. The message names the command that makes it again. Inputs that are not in the checkout, such as git-ignored texts in a worktree, are skipped. |
+| `derivative-stale` | warn | A file made from a text or PDF records an input sha256 that the input no longer has: a structure sidecar whose text changed, a Docling text whose `<name>.pdf` changed, or a paper card whose text changed. The message names the command that makes it again. Inputs that are not in the checkout, such as git-ignored texts in a worktree, are skipped. |
 
 These parse issues are also reported:
 
@@ -285,6 +290,69 @@ The sidecar holds, as raw line ranges of the text:
 The command reads only the text and the registry. It makes no network request, never changes a text, and works for a text of any `extraction` value and for Markdown texts. What detection does not find is `unknown` or a warning, never a guess. It prints one line per text, then the text's warnings, then the counts of texts with a reference list and with an abstract span. `--dry-run` prints the same and writes nothing. A sidecar is rewritten only when its content changes. It records its text's sha256; `registry check` reports `derivative-stale` when the text no longer has it.
 
 [docs/interfaces.md](docs/interfaces.md) defines the schema, the line numbering and what a search index does with the sidecar.
+
+## Paper cards: `rf.paper-card/1`
+
+A paper card lists what a paper claims, each item with a verbatim quote from the paper's local text and the quote's raw line range. A search index can rank a paper by its card when the full text is too long or too noisy to index. A card is class `generated`: it is never a source, and a citation goes to the paper.
+
+Cards are off by default. `[papers] cards = true` turns them on (decision record DR043 of the masters project).
+
+`papers card --key <key> [--docling] [--force] [--reply <file>]` makes the card of one entry:
+
+1. It reads the entry's first plain or layout text, or its Docling text with `--docling`, and checks the text's sha256 against the registry.
+2. It runs Claude Code once, in print mode: `<[papers] claude> -p --model <card_model> --system-prompt-file <prompt> --tools "" --setting-sources "" --strict-mcp-config --disable-slash-commands --output-format json --json-schema <schema>`. The paper text goes on standard input and is the only input besides the card prompt. The call runs in an empty directory, `<state_dir>/papers/card-cwd`, and is stopped after 20 minutes.
+3. It saves the raw reply as `<state_dir>/papers/card-replies/<key>-<time>.json`.
+4. It checks every item and drops those that fail. The kept items, the dropped counts and the tokens are printed.
+5. It stores the card as `<card_dir>/<key>.json` through a temporary file and a rename.
+
+An item is kept only when all of these hold:
+
+- its `field` is one of the prompt's fields;
+- its quote has at least 8 words, where each CJK character counts as a word, as word processors count them;
+- its quote occurs in the text as one contiguous passage, after claimcheck's normalisation (case, ligatures, quote and dash variants, hyphenation at line ends, white space and punctuation). The match gives the item's `lines`;
+- every number in its `value` also occurs in its quote, as claimcheck matches numbers (`92.4` matches `92.40`, `1,200` matches `1200`). A number that is part of a name is not checked: one in a word that starts with a letter (`F1`, `GPT-4o`, `Llama-2`, `recall@5`, `top-1`), one followed by `-` and a capital (`10-K`), and a dotted identifier. A word here is a run of letters, digits, `.`, `-` and `@`. Figures joined to a word, such as `7-point`, `5-fold` and `200ms`, are checked. The prompt asks the model to take figures only from the quote.
+
+The gate: when fewer than 80% of the written items are kept, or none were written, the card is not stored. The command prints `not stored`, names the main cause, and exits 1. An earlier card of the entry is left as it was.
+
+- When quotes not found in the text are fewer than the other drops (numbers not in the quote, short quotes, unknown fields), the reply is at fault, not the text. The message gives the counts. Try `papers card --key <key> --force`.
+- Otherwise the text is named as a suspected text-extraction fault (such as mixed PDF columns). Try the Docling text: `papers read --key <key> --extraction docling --record`, then `papers card --key <key> --docling`.
+
+Running it again does nothing when the stored card has the text's sha256, the prompt's sha256 and the model. `--force` calls Claude again. `--reply <file>` checks a saved reply again without a call, for example after the checks change. It prints the kept and dropped items and stores nothing, because a saved reply does not record the prompt it answered.
+
+`[papers] claude` names the command, so a wrapper that chooses the billing can stand in for `claude`. Only the paper text and the prompt go to the model. Send published papers only.
+
+### The card
+
+```json
+{
+  "schema": "rf.paper-card/1",
+  "key": "87",
+  "class": "generated",
+  "text": {"path": "sources/text/87.txt", "sha256": "…"},
+  "model": "claude-haiku-5-5",
+  "created": "2026-11-12T03:00:00Z",
+  "prompt_sha256": "…",
+  "checker": "claimcheck 0.10.0",
+  "usage": {"input_tokens": 24564, "output_tokens": 2107, "cost_usd": 0.1052},
+  "items": [
+    {"field": "result", "value": "…", "quote": "…", "lines": [120, 122]}
+  ],
+  "written": 14,
+  "dropped": 1,
+  "dropped_by": {"field": 0, "short": 0, "not_found": 1, "number": 0}
+}
+```
+
+- `text` is the text the card was made from and its sha256 at that time. `registry check` reports `derivative-stale` when the text no longer has it.
+- `lines` are 1-based and inclusive, in the raw text, as in `rf.paper-structure/1`.
+- `field` is one of `task`, `dataset`, `method`, `metric`, `result` and `limit`.
+- `prompt_sha256`, `checker`, `usage`, `written`, `dropped` and `dropped_by` are added to the shared fields (`key`, `text`, `model`, `created`, `items`).
+
+### Turning cards off
+
+1. Set `cards = false` under `[papers]`, or remove the line.
+2. Delete the generated cards in `card_dir` and the saved replies in `<state_dir>/papers/card-replies/`.
+3. Supersede DR043 with a decision record that says why.
 
 ## Search log: `rf.search/1`
 

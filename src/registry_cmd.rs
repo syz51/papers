@@ -2,10 +2,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::card;
 use crate::catalogue::{self, Issue};
 use crate::check;
 use crate::config::Config;
 use crate::derivative;
+use crate::docling;
 use crate::finding::{self, Finding, Format, Severity};
 use crate::notes;
 use crate::registry::{self, Reference};
@@ -313,7 +315,18 @@ pub fn check(config: &Config, from: Option<From>, format: Format) -> Result<bool
         })?,
     };
     findings.extend(check::check(&records));
-    findings.extend(derivative::check(config, &records, |_| Vec::new()));
+    findings.extend(derivative::check(config, &records, |r| {
+        let path = card::path(config, &r.key);
+        // A card made from the Docling text is made again from it.
+        let docling = derivative::recorded_input(&path)
+            .is_some_and(|(text, _)| text.ends_with(docling::TEXT_SUFFIX));
+        let fix = format!(
+            "run papers card --key {} --force{}",
+            r.key,
+            if docling { " --docling" } else { "" }
+        );
+        vec![(path, fix)]
+    }));
     let ok = finding::emit(&findings, format);
     eprintln!(
         "papers: checked {} entries: {} findings{}",
