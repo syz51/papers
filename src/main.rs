@@ -1443,6 +1443,7 @@ fn structure_cmd(
     }
     let mut ok = true;
     let (mut with_refs, mut with_abstract) = (0, 0);
+    let mut unlisted = structure::Unlisted::default();
     for path in &paths {
         let built = match structure_of(config, &records, path) {
             Ok(built) => built,
@@ -1460,6 +1461,7 @@ fn structure_cmd(
             println!("  warning: {w}");
         }
         with_refs += usize::from(built.references.known().is_some());
+        unlisted.add(&built);
         with_abstract += usize::from(
             built
                 .sections
@@ -1472,6 +1474,9 @@ fn structure_cmd(
         paths.len(),
         if dry_run { " (nothing written)" } else { "" }
     );
+    if let Some(line) = unlisted.line() {
+        println!("{line}");
+    }
     Ok(ok)
 }
 
