@@ -231,7 +231,7 @@ pub fn build(
         false => plain_headings(&lines, &mut warnings),
     };
     let sections = sections(&lines, &headings, markdown, &mut warnings);
-    let references = references(&lines, &sections, targets, &mut warnings);
+    let references = references(&lines, &sections, targets, markdown, &mut warnings);
     Structure {
         schema: SCHEMA,
         text: TextInfo {
@@ -827,9 +827,11 @@ static AUTHOR: LazyLock<Regex> = LazyLock::new(|| {
     ))
     .unwrap()
 });
-/// A year as references give it: `2023`, `2023a`.
-static YEAR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:^|[^\d])(?:19|20)\d{2}[a-z]?(?:[^\d]|$)").unwrap());
+/// A year as references give it: `2023`, `2023a`. Not the start of an arXiv
+/// id (`arXiv:2005.14165`, `2005.14165`) or a DOI part (`v1/2020.acl-main.1`).
+static YEAR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|[^\d/:.])(?:19|20)\d{2}[a-z]?(?:$|[^\d.]|\.(?:$|\D))").unwrap()
+});
 /// A Markdown list item.
 static ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*[-*+]\s").unwrap());
 static ARXIV: LazyLock<Regex> = LazyLock::new(|| {
@@ -858,6 +860,7 @@ fn references(
     lines: &[&str],
     sections: &[Section],
     targets: &Targets,
+    markdown: bool,
     warnings: &mut Vec<String>,
 ) -> Known<RefList> {
     let Some(section) = sections
@@ -882,7 +885,7 @@ fn references(
         return Known::Unknown(UNKNOWN);
     };
     let matches = matches(lines, first, last, targets);
-    let starts = entry_starts(lines, first, last);
+    let starts = entry_starts(lines, first, last, markdown);
     let mut last = last;
     let (split, entries) = match starts {
         Some((split, starts, end)) => {
@@ -941,7 +944,9 @@ fn entry_starts(
     lines: &[&str],
     first: usize,
     last: usize,
+    markdown: bool,
 ) -> Option<(&'static str, Vec<usize>, usize)> {
+    let item = |i: usize| markdown && ITEM.is_match(lines[i]);
     let bracket: Vec<usize> = (first..=last)
         .filter(|&i| BRACKET.is_match(lines[i]))
         .collect();
@@ -966,14 +971,22 @@ fn entry_starts(
     }
     let blank = |i: usize| !listed(lines[i]);
     let paragraphs: Vec<usize> = (first..=last)
-        .filter(|&i| !blank(i) && (i == first || blank(i - 1) || ITEM.is_match(lines[i])))
+        .filter(|&i| !blank(i) && (i == first || blank(i - 1) || item(i)))
         .collect();
     let (paragraphs, end) = dated(lines, paragraphs, last);
-    // References of one to a few lines each, not pages of text between blanks.
-    if paragraphs.len() >= 3 && (end + 1 - first) <= paragraphs.len() * 8 {
+    // References of one to a few lines each, not pages of text between blanks,
+    // and most with a year, unlike table rows.
+    let stop = |n: usize| paragraphs.get(n + 1).map_or(end, |next| next - 1);
+    let dated = (0..paragraphs.len())
+        .filter(|&n| has_year(lines, paragraphs[n], stop(n)))
+        .count();
+    if paragraphs.len() >= 3
+        && (end + 1 - first) <= paragraphs.len() * 8
+        && dated * 2 >= paragraphs.len()
+    {
         return Some(("blank", paragraphs, end));
     }
-    author_year(lines, first, last).map(|(starts, end)| ("author-year", starts, end))
+    author_year(lines, first, last, markdown).map(|(starts, end)| ("author-year", starts, end))
 }
 
 /// `starts` without its last references that have no year, and the last
@@ -996,7 +1009,8 @@ fn dated(lines: &[&str], mut starts: Vec<usize>, mut last: usize) -> (Vec<usize>
 
 /// The list's last line: a last reference longer than every other runs on
 /// into what follows the list, such as an appendix or a table, so it ends
-/// before its first blank line.
+/// before its first blank line. A blank line before a page number is a page
+/// break inside the reference, not its end.
 fn close(lines: &[&str], starts: &[usize], last: usize) -> usize {
     let filled = |i: &usize| listed(lines[*i]);
     let Some((&start, others)) = starts.split_last() else {
@@ -1009,10 +1023,17 @@ fn close(lines: &[&str], starts: &[usize], last: usize) -> usize {
     if others.is_empty() || last + 1 - start <= longest {
         return last;
     }
+    let page_number = |i: usize| (start..=last).contains(&i) && is_page_number(lines[i]);
     (start..=last)
-        .find(|i| !filled(i))
+        .find(|&i| !filled(&i) && !(i + 1..=last).find(filled).is_some_and(page_number))
         .and_then(|blank| (start..blank).rev().find(filled))
         .unwrap_or(last)
+}
+
+/// Whether `line` holds only digits, such as a page number.
+fn is_page_number(line: &str) -> bool {
+    let line = clean(line);
+    !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Whether `line` is text in a reference list: not blank and not a page mark.
@@ -1040,13 +1061,19 @@ fn has_year(lines: &[&str], from: usize, to: usize) -> bool {
 /// references: the list's first line and each line that reads as a name (see
 /// [`AUTHOR`]) after a line that ends a reference. The list ends at its last
 /// reference with a year (see [`dated`]); before it, a start whose reference
-/// has no year was not a start, unless it opens a Markdown list item. `None` unless the first line reads as a name,
-/// there are 3 references or more, and they average at most 8 lines. Returns
-/// the starts and the list's last line.
-fn author_year(lines: &[&str], first: usize, last: usize) -> Option<(Vec<usize>, usize)> {
+/// has no year was not a start, unless it opens a list item in a Markdown
+/// text. `None` unless the first line reads as a name, there are 3
+/// references or more, and they average at most 8 lines. Returns the starts
+/// and the list's last line.
+fn author_year(
+    lines: &[&str],
+    first: usize,
+    last: usize,
+    markdown: bool,
+) -> Option<(Vec<usize>, usize)> {
     // Page marks and blank lines are not text.
     let filled: Vec<usize> = (first..=last)
-        .filter(|&i| listed(lines[i]) && !clean(lines[i]).bytes().all(|b| b.is_ascii_digit()))
+        .filter(|&i| listed(lines[i]) && !is_page_number(lines[i]))
         .collect();
     if !AUTHOR.is_match(lines[first]) {
         return None;
@@ -1061,7 +1088,9 @@ fn author_year(lines: &[&str], first: usize, last: usize) -> Option<(Vec<usize>,
     let stop = |n: usize| starts.get(n + 1).map_or(last, |next| next - 1);
     let kept: Vec<usize> = (0..starts.len())
         .filter(|&n| {
-            n == 0 || ITEM.is_match(lines[starts[n]]) || has_year(lines, starts[n], stop(n))
+            n == 0
+                || markdown && ITEM.is_match(lines[starts[n]])
+                || has_year(lines, starts[n], stop(n))
         })
         .map(|n| starts[n])
         .collect();
@@ -1533,8 +1562,9 @@ words
             None,
             "RARE: Redundancy-Aware Retrieval Evaluation for Synthetic Corpora",
         )];
-        // Line 10 reads as a name but its reference has no year; line 11 is a
-        // page number; an appendix's contents follow without a heading.
+        // Line 10 reads as a name, and its reference has no year: an arXiv id
+        // is not one. Line 11 is a page number. An appendix's contents follow
+        // without a heading.
         let text = "1 Introduction
 words
 References
@@ -1544,7 +1574,7 @@ Chen, Z.; Smith, A.; and Wang, W. Y. 2021. FinQA: A
 Dataset. Transactions on Data.
 María Andrea Cruz Blandón and Bruno Charron. 2025.
 MEMERAG: A benchmark. In Proceedings, pages 1–9.
-Preprint, arXiv:2509.03787.
+Preprint, arXiv:2005.14165.
 12
 Gordon V. Cormack and Stefan Buettcher. 2009. Rank
 fusion. In Proceedings of SIGIR.
@@ -1623,6 +1653,56 @@ Claude 0.95
         assert_eq!(
             entry_spans(list),
             vec![(3, 3, None, None), (4, 4, None, None), (8, 8, None, None)]
+        );
+    }
+
+    #[test]
+    fn a_year_is_not_part_of_an_arxiv_id_or_a_doi() {
+        for year in ["2023.", "(2019)", "2020a,", "Press, 1995", "2024"] {
+            assert!(YEAR.is_match(year), "{year}");
+        }
+        for id in [
+            "arXiv:2005.14165.",
+            "abs/1910.10683",
+            "2005.14165",
+            "10.18653/v1/2020.acl-main.1",
+        ] {
+            assert!(!YEAR.is_match(id), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_last_reference_over_a_page_break_keeps_its_lines() {
+        let text = "References
+[1] A. Smith. 2024. One. Journal.
+[2] B. Jones. 2023. Two. Journal.
+[3] C. Lee. 2022. Three: a title that runs
+
+12
+\u{c}on to the next page. Journal.
+";
+        let s = structure(text, false, &Targets::default());
+        let list = s.references.known().unwrap();
+        assert_eq!((list.first_line, list.last_line), (2, 7));
+        assert_eq!(list.entries[2].last_line, 7);
+    }
+
+    #[test]
+    fn a_dash_starts_a_reference_only_in_markdown() {
+        let text = "References
+- Smith, A. 2024. One. Journal.
+- Jones, B. 2023. Two. Journal.
+
+- Lee, C. 2022. Three. Journal.
+
+- Kim, D. 2021. Four. Journal.
+";
+        let s = structure(text, false, &Targets::default());
+        let list = s.references.known().unwrap();
+        assert_eq!(list.split, "blank");
+        assert_eq!(
+            entry_spans(list),
+            vec![(2, 3, None, None), (5, 5, None, None), (7, 7, None, None)]
         );
     }
 

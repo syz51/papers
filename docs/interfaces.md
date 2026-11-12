@@ -137,7 +137,7 @@ The file is one JSON object, pretty-printed, with a final LF.
 | `sections[].level` | 1 for a top heading, 2 for `2.1`, 3 for `2.1.1`. 0 for a span without a heading. In a Markdown text, a heading with a section number has the number's depth, and any other heading has its count of `#`. |
 | `references` | The reference list, or the string `unknown` when no reference heading is detected. |
 | `references.first_line`, `last_line` | The list without its heading line and without blank lines or page marks at its ends. It lies inside the `references` section. It ends at its last reference: see [Where the list ends](#where-the-list-ends). |
-| `references.split` | How the list divides into references: `numbered` (`[1]`, `- [1]` or `1.` marks), `blank` (blank lines between references; in a Markdown text, each list item also starts a reference), `author-year` (no marks and no blank lines; see [Author-year lists](#author-year-lists)) or `unknown`. |
+| `references.split` | How the list divides into references: `numbered` (`[1]`, `- [1]` or `1.` marks), `blank` (blank lines between references, at least half of them with a year; in a Markdown text, each list item also starts a reference), `author-year` (no marks and no blank lines; see [Author-year lists](#author-year-lists)) or `unknown`. |
 | `references.entries` | With `numbered`, `blank` or `author-year`: every reference in order, each with its line range. With `unknown`: only the matches, each with the lines of the id or title that matched. |
 | `entries[].key` | The registry key the reference cites. `null` when no entry matches. |
 | `entries[].by` | What matched: `doi`, `arxiv` or `title`. `null` when `key` is `null`. |
@@ -171,7 +171,7 @@ A list without `[n]` or `n.` marks and without blank lines between references sp
 
 - A line ends a reference when it ends with a full stop, or with a DOI or URL and no hyphen.
 - A name is a capitalised word, followed by up to four more capitalised words or particles (`van`, `de`, `von` and similar), then a comma, a year, or `and` and a capital letter. A Markdown list mark may come first.
-- A start whose reference holds no year (1900 to 2099) is not a start, unless it opens a Markdown list item. So `Preprint, arXiv:2509.03787.` continues the reference before it.
+- A start whose reference holds no year (1900 to 2099) is not a start, unless it opens a list item in a Markdown text. An arXiv id or a DOI part is not a year. So `Preprint, arXiv:2005.14165.` continues the reference before it.
 - A line of digits only, such as a page number, and a page mark are skipped.
 
 The split is `author-year` only when the first line begins with a name, there are 3 references or more, and they average at most 8 lines. Otherwise the list is `unknown`.
@@ -181,7 +181,7 @@ The split is `author-year` only when the first line begins with a name, there ar
 The list ends at the last line of the `references` span, with two exceptions:
 
 - In a `blank` or `author-year` list, the last references without a year are not references: what follows the list, such as table rows or an appendix's contents, does not name a year. The list ends at the last reference with a year.
-- When the last reference is longer than every other reference, it runs on into what follows the list. It ends at the last line before its first blank line.
+- When the last reference is longer than every other reference, it runs on into what follows the list. It ends at the last line before its first blank line. A blank line before a line of digits only, such as a page number, is a page break inside the reference and does not end it.
 
 ### What a search index does with it
 
