@@ -2437,18 +2437,24 @@ fn url_file_name(url: &str) -> Option<String> {
 /// given: the directory of `entry`'s first text, else the one that holds most
 /// of the registry's texts (the first by name on a tie), else `sources/text`
 /// under the project root. So a project that keeps its texts elsewhere, such
-/// as `docs/research/sources/text`, needs no `--out` or `--dir`.
+/// as `docs/research/sources/text`, needs no `--out` or `--dir`. A text at
+/// the root counts for the root.
 fn default_text_dir(
     config: &config::Config,
     records: &[registry::Reference],
     entry: Option<&registry::Reference>,
 ) -> PathBuf {
-    let dir_of = |t: &registry::Text| t.path.rsplit_once('/').map(|(dir, _)| dir.to_owned());
-    if let Some(dir) = entry.into_iter().flat_map(|r| &r.texts).find_map(dir_of) {
+    let dir_of = |t: &registry::Text| {
+        t.path
+            .rsplit_once('/')
+            .map_or("", |(dir, _)| dir)
+            .to_owned()
+    };
+    if let Some(dir) = entry.into_iter().flat_map(|r| &r.texts).map(dir_of).next() {
         return config.root.join(dir);
     }
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for dir in records.iter().flat_map(|r| &r.texts).filter_map(dir_of) {
+    for dir in records.iter().flat_map(|r| &r.texts).map(dir_of) {
         *counts.entry(dir).or_default() += 1;
     }
     let most = counts
@@ -2461,10 +2467,18 @@ fn default_text_dir(
 
 /// The name `read --key` gives entry `r`'s files in `dir`: the key's (see
 /// `file_name_key`), unless the entry's only plain or layout text in `dir` has
-/// another name, such as `coral.txt`, and no `<key>.txt` or `<key>.json` is
+/// another name, such as `coral.txt`, and no file named after the key is
 /// there; then that name, so the PDF and the Docling text sit beside it as
-/// `coral.pdf` and `coral.docling.md`.
-fn entry_file_name(config: &config::Config, r: &registry::Reference, dir: &Path) -> String {
+/// `coral.pdf` and `coral.docling.md`. A plain or layout read (not `docling`)
+/// writes `<name>.txt`, so it takes that name only when `read` made the text
+/// (its `coral.json` manifest is there): a text attached by hand is never
+/// overwritten.
+fn entry_file_name(
+    config: &config::Config,
+    r: &registry::Reference,
+    dir: &Path,
+    docling: bool,
+) -> String {
     let key = file_name_key(&r.key);
     let names: Vec<String> = r
         .texts
@@ -2478,11 +2492,17 @@ fn entry_file_name(config: &config::Config, r: &registry::Reference, dir: &Path)
         })
         .collect();
     let keyed = names.contains(&key)
-        || ["txt", "json"]
-            .iter()
-            .any(|ext| dir.join(format!("{key}.{ext}")).exists());
+        || [
+            ".txt",
+            ".json",
+            ".pdf",
+            docling::TEXT_SUFFIX,
+            docling::MANIFEST_SUFFIX,
+        ]
+        .iter()
+        .any(|suffix| dir.join(format!("{key}{suffix}")).exists());
     match names.as_slice() {
-        [name] if !keyed => name.clone(),
+        [name] if !keyed && (docling || dir.join(format!("{name}.json")).exists()) => name.clone(),
         _ => key,
     }
 }
@@ -2560,31 +2580,25 @@ fn read(
                     return Err(format!("entry {key} has no arXiv id, DOI, or URL to read"));
                 }
             };
-            (input, Some(r), Some(all))
+            (input, Some(r), all)
         }
-        None => (
-            o.reference
+        None => {
+            // A registry that does not load is said and does not stop the
+            // read, which does not need it.
+            let records = match registry::load(&config.registry) {
+                Ok(records) => records.unwrap_or_default(),
+                Err(e) => {
+                    eprintln!("papers: registry not checked for this paper: {e}");
+                    Vec::new()
+                }
+            };
+            let input = o
+                .reference
                 .as_deref()
                 .expect("clap requires REF or --key")
                 .trim()
-                .to_owned(),
-            None,
-            None,
-        ),
-    };
-    let out_dir = match &o.out {
-        Some(dir) => config::normalize(&cwd.join(dir)),
-        // Without `--key`, a registry that does not load is said below, where
-        // the paper is looked up; the texts then go to `sources/text`.
-        None => {
-            let records = match records {
-                Some(records) => records,
-                None => registry::load(&config.registry)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default(),
-            };
-            default_text_dir(config, &records, entry.as_ref())
+                .to_owned();
+            (input, None, records)
         }
     };
     // The registry's entries for the paper come first: the one `--key` names,
@@ -2592,21 +2606,17 @@ fn read(
     let registered: Vec<registry::Reference> = match &entry {
         Some(r) => vec![r.clone()],
         None => match seen::parse_input(&input) {
-            // A registry that does not load is said and does not stop the read,
-            // which does not need it.
-            Ok(query) => match registry::load(&config.registry) {
-                Ok(records) => seen::Index::of_registry(records.unwrap_or_default())
-                    .registered(&query)
-                    .into_iter()
-                    .cloned()
-                    .collect(),
-                Err(e) => {
-                    eprintln!("papers: registry not checked for this paper: {e}");
-                    Vec::new()
-                }
-            },
+            Ok(query) => seen::Index::of_registry(records.clone())
+                .registered(&query)
+                .into_iter()
+                .cloned()
+                .collect(),
             Err(_) => Vec::new(),
         },
+    };
+    let out_dir = match &o.out {
+        Some(dir) => config::normalize(&cwd.join(dir)),
+        None => default_text_dir(config, &records, registered.first()),
     };
     for r in &registered {
         println!("{}", registered::Registered::new(config, r).block());
@@ -2687,7 +2697,12 @@ fn read_from(
         }
     };
     let name = match (&entry, &reference) {
-        (Some(r), _) => entry_file_name(config, r, &out_dir),
+        (Some(r), _) => entry_file_name(
+            config,
+            r,
+            &out_dir,
+            o.extraction == Some(registry::Extraction::Docling),
+        ),
         (None, Some(Ref::Arxiv(id))) => id.to_string().replace('/', "_"),
         (None, Some(Ref::Doi(doi))) => doi.file_key(),
         (None, None) => url_file_name(&input).expect("normalize_url accepted the input"),
@@ -4378,12 +4393,24 @@ mod tests {
             default_text_dir(&config, &[], None),
             root.join("sources/text")
         );
-        assert_eq!(entry_file_name(&config, &entry, &dir), "coral");
-        assert_eq!(entry_file_name(&config, &bare, &dir), "3");
+        // A Docling read writes new files beside the slug's text; a plain
+        // read would overwrite `coral.txt`, which was attached by hand.
+        assert_eq!(entry_file_name(&config, &entry, &dir, true), "coral");
+        assert_eq!(entry_file_name(&config, &entry, &dir, false), "36");
+        assert_eq!(entry_file_name(&config, &bare, &dir, true), "3");
         // Files already named after the key keep the key.
-        std::fs::write(dir.join("36.json"), "{}").unwrap();
-        assert_eq!(entry_file_name(&config, &entry, &dir), "36");
-        std::fs::remove_file(dir.join("36.json")).unwrap();
+        for name in ["36.json", "36.pdf", "36.docling.md"] {
+            std::fs::write(dir.join(name), "{}").unwrap();
+            assert_eq!(entry_file_name(&config, &entry, &dir, true), "36");
+            std::fs::remove_file(dir.join(name)).unwrap();
+        }
+        // A text `read` made has its manifest, and is read again in place.
+        std::fs::write(
+            dir.join("coral.json"),
+            serde_json::to_string(&coral).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(entry_file_name(&config, &entry, &dir, false), "coral");
 
         let options = ReadOptions {
             reference: None,
