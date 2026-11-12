@@ -65,6 +65,7 @@ impl Hit {
             year: self.year,
             doi: self.doi.clone(),
             arxiv: self.arxiv.clone(),
+            openalex: self.id.strip_prefix("openalex:").map(str::to_owned),
             url: self.url.clone(),
         }
     }
