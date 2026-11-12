@@ -260,6 +260,56 @@ const NOT_NAMES: &[&str] = &[
     "over", "since", "than", "the", "to", "top", "under", "until", "up", "with", "within",
 ];
 
+/// Metric words: a number after one is a score, not a name (`BLEU 28`,
+/// `ROUGE-L 41`, `Accuracy 81`). A metric with a digit (`F1`) is no name word.
+const METRICS: &[&str] = &[
+    "acc",
+    "accuracy",
+    "ap",
+    "auc",
+    "auprc",
+    "auroc",
+    "bertscore",
+    "bleu",
+    "cer",
+    "chrf",
+    "cider",
+    "comet",
+    "elo",
+    "em",
+    "f-measure",
+    "f-score",
+    "fid",
+    "hits",
+    "iou",
+    "kappa",
+    "kendall",
+    "lpips",
+    "mae",
+    "map",
+    "match",
+    "meteor",
+    "miou",
+    "mrr",
+    "mse",
+    "ndcg",
+    "pearson",
+    "perplexity",
+    "ppl",
+    "precision",
+    "psnr",
+    "recall",
+    "rmse",
+    "rouge",
+    "sacrebleu",
+    "score",
+    "spearman",
+    "spice",
+    "ssim",
+    "ter",
+    "wer",
+];
+
 /// The name that number `t` of `chars` may be part of, as written: the number
 /// joined to `-gram` (`3-gram`), or a name word and the number (`S&P 500`,
 /// `Stage 3`, `Claude 3.5`, `Qwen 2.5 7B`, `ViT-B/32`, `DEF 14A`). The name
@@ -268,9 +318,10 @@ const NOT_NAMES: &[&str] = &[
 /// a capital, unless it is a common word (`In`, `Top`), or a mark `&`, `/`,
 /// `+` or `_` (`S&P`). A lowercase word (`top 20`, `reaches 92.4`,
 /// `zero-shot 45`), a word that ends a clause (`Accuracy: 92.4`) and a word
-/// glued by another mark (`B=256`, `US$5`) are not names. Nor is a percentage
-/// or a decimal with two or more digits before the point (`BLEU 28.4`): a
-/// name's number is a whole number or a version (`3.5`, `2.0`).
+/// glued by another mark (`B=256`, `US$5`) are not names. Nor is a number
+/// after a metric word (`BLEU 28`, `Accuracy 81`), a percentage, or a decimal
+/// with two or more digits before the point (`BLEU 28.4`): a name's number is
+/// a whole number or a version (`3.5`, `2.0`).
 fn name_phrase(chars: &[char], t: &numbers::NumTok) -> Option<String> {
     let whole = chars[t.start..t.end]
         .iter()
@@ -339,6 +390,10 @@ fn name_phrase(chars: &[char], t: &numbers::NumTok) -> Option<String> {
         return None;
     }
     let lower: String = word.iter().flat_map(|c| c.to_lowercase()).collect();
+    let metric = |w: &str| METRICS.contains(&w.trim_end_matches(['/', '(', '-', '_', '+']));
+    if metric(&lower) || lower.split_once('-').is_some_and(|(head, _)| metric(head)) {
+        return None;
+    }
     let capital = word.iter().any(|c| c.is_uppercase()) && !NOT_NAMES.contains(&lower.as_str());
     let inner = &word[..word.len() - usize::from(glued)];
     let mark = inner
@@ -786,6 +841,7 @@ mod tests {
             ),
             vec!["92.4", "20", "20", "2020", "81"]
         );
+        assert_eq!(missing_numbers("Accuracy 81", quote, &text), vec!["81"]);
         assert_eq!(
             missing_numbers("a 7-point gain, 5-fold, 200ms", quote, &text),
             vec!["7", "5", "200"]
@@ -795,7 +851,9 @@ mod tests {
         let text = IndexedText::new(
             "We reach BLEU 28.4 and BLEU 28 with Recall 90%.\n\
              The zero-shot 45 score uses N=128 and US$5 per run.\n\
-             Accuracy: 81 on the final stage. 3 runs failed.\n"
+             Accuracy: 81 on the final stage. 3 runs failed.\n\
+             ROUGE 41, ROUGE-L 39, Accuracy 81 and Exact Match 45 on S&P 500.\n\
+             BLEU/28, chrF++ 50 and PSNR 30.\n"
                 .to_owned(),
         );
         assert_eq!(
@@ -806,9 +864,18 @@ mod tests {
             ),
             vec!["28.4", "90", "45", "128", "5", "81", "3"]
         );
-        // A whole number after a name is kept only as the text writes it.
+        // A whole number after a metric word is a score, even where the
+        // text writes the phrase so.
         assert_eq!(
-            missing_numbers("BLEU 28", quote, &text),
+            missing_numbers(
+                "BLEU 28, ROUGE 41, ROUGE-L 39, Accuracy 81, Exact Match 45, BLEU/28, chrF++ 50, PSNR 30",
+                quote,
+                &text
+            ),
+            vec!["28", "41", "39", "81", "45", "28", "50", "30"]
+        );
+        assert_eq!(
+            missing_numbers("S&P 500", quote, &text),
             Vec::<String>::new()
         );
     }
