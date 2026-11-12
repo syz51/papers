@@ -1,5 +1,6 @@
 //! `rf.paper-structure/1`: where a paper's text has its pages, sections and
-//! reference list, and which registry entries the reference list cites. The
+//! reference list, which registry entries the reference list cites, and in a
+//! Markdown text where its pipe tables are. The
 //! sidecar `<text file name>.structure.json` lies beside the text; the text
 //! itself is never changed. Lines are numbered from 1 as the file splits at
 //! LF, and ranges include both ends. What detection does not find is recorded
@@ -89,6 +90,18 @@ pub struct RefList {
     pub entries: Vec<Entry>,
 }
 
+/// A Markdown pipe table: its header row, the delimiter row under it, and its
+/// body rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Table {
+    pub first_line: usize,
+    pub last_line: usize,
+    /// The header row's line, which is `first_line`.
+    pub header_line: usize,
+    /// The header row's cells in order, trimmed; an empty cell is `""`.
+    pub columns: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TextInfo {
     /// Relative to the project root, as in the registry.
@@ -110,6 +123,9 @@ pub struct Structure {
     /// In line order; together they cover every line once.
     pub sections: Vec<Section>,
     pub references: Known<RefList>,
+    /// The pipe tables of a Markdown text in line order; `unknown` for a
+    /// plain text, which marks no table borders.
+    pub tables: Known<Vec<Table>>,
     pub warnings: Vec<String>,
 }
 
@@ -136,8 +152,12 @@ impl Structure {
             }
             Known::Unknown(_) => "references unknown".to_owned(),
         };
+        let tables = match &self.tables {
+            Known::Known(t) => format!("{} tables, ", t.len()),
+            Known::Unknown(_) => String::new(),
+        };
         format!(
-            "{}: {} lines, {} sections (abstract {}, body {}, appendix {}, unknown {}), {refs}",
+            "{}: {} lines, {} sections (abstract {}, body {}, appendix {}, unknown {}), {tables}{refs}",
             self.text.path,
             self.text.lines,
             self.sections.len(),
@@ -232,6 +252,10 @@ pub fn build(
     };
     let sections = sections(&lines, &headings, markdown, &mut warnings);
     let references = references(&lines, &sections, targets, markdown, &mut warnings);
+    let tables = match markdown {
+        true => Known::Known(tables(&lines, &mut warnings)),
+        false => Known::Unknown(UNKNOWN),
+    };
     Structure {
         schema: SCHEMA,
         text: TextInfo {
@@ -242,8 +266,83 @@ pub fn build(
         pages,
         sections,
         references,
+        tables,
         warnings,
     }
+}
+
+static DELIMITER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$").unwrap());
+
+/// GitHub-style pipe tables outside fenced code: a row with `|`, then a
+/// delimiter row with as many cells, then body rows up to the first line that
+/// has no `|`. A delimiter row under a row with another cell count is a
+/// warning, not a table.
+fn tables(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Table> {
+    let mut out = Vec::new();
+    let mut fence = false;
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        let c = lines[i].trim();
+        if c.starts_with("```") || c.starts_with("~~~") {
+            fence = !fence;
+        }
+        let header = lines[i];
+        if fence
+            || !header.contains('|')
+            || !lines[i + 1].contains('|')
+            || !DELIMITER.is_match(lines[i + 1])
+        {
+            i += 1;
+            continue;
+        }
+        let columns = cells(header);
+        let delimiters = cells(lines[i + 1]).len();
+        if columns.len() != delimiters {
+            warnings.push(format!(
+                "line {}: a table header row has {} cells and its delimiter row {delimiters}; the table is not listed",
+                i + 1,
+                columns.len()
+            ));
+            i += 1;
+            continue;
+        }
+        let mut last = i + 1;
+        while last + 1 < lines.len() && lines[last + 1].contains('|') {
+            last += 1;
+        }
+        out.push(Table {
+            first_line: i + 1,
+            last_line: last + 1,
+            header_line: i + 1,
+            columns,
+        });
+        i = last + 1;
+    }
+    out
+}
+
+/// A row's cells, trimmed, without the outer pipes. `\|` is a pipe inside a cell.
+fn cells(row: &str) -> Vec<String> {
+    let row = row.trim();
+    let row = row.strip_prefix('|').unwrap_or(row);
+    let row = match row.strip_suffix('|') {
+        Some(rest) if !rest.ends_with('\\') => rest,
+        _ => row,
+    };
+    let mut out = vec![String::new()];
+    let mut chars = row.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if chars.peek() == Some(&'|') => {
+                out.last_mut().unwrap().push('|');
+                chars.next();
+            }
+            '|' => out.push(String::new()),
+            _ => out.last_mut().unwrap().push(ch),
+        }
+    }
+    out.into_iter().map(|c| c.trim().to_owned()).collect()
 }
 
 /// The lines as the file splits at LF; a final LF ends the last line.
@@ -1747,5 +1846,59 @@ Markets, pages 1–9.
                 (8, 10, Some("34"), Some("title")),
             ]
         );
+    }
+
+    #[test]
+    fn markdown_pipe_tables_give_their_lines_and_header_labels() {
+        let text = "# Results\n\nTable 1: Scores.\n\n| Model | F1 (%) |   |\n|:------|------:|---|\n| BM25 | 41.2 | a \\| b |\n| Dense | 55.0 | |\n\nAfter the table.\n\n```\n| a | b |\n|---|---|\n```\n\n| one | two |\n|-----|\n| x | y |\n\n| Solo |\n|---|\n";
+        let records = vec![];
+        let s = structure(text, true, &Targets::new(&records, &[]));
+        let Known::Known(tables) = &s.tables else {
+            panic!("tables unknown")
+        };
+        assert_eq!(
+            tables,
+            &[
+                Table {
+                    first_line: 5,
+                    last_line: 8,
+                    header_line: 5,
+                    columns: vec!["Model".into(), "F1 (%)".into(), "".into()],
+                },
+                Table {
+                    first_line: 21,
+                    last_line: 22,
+                    header_line: 21,
+                    columns: vec!["Solo".into()],
+                },
+            ]
+        );
+        assert_eq!(
+            cells("| BM25 | 41.2 | a \\| b |"),
+            ["BM25", "41.2", "a | b"]
+        );
+        let json: serde_json::Value = serde_json::from_str(&s.render()).unwrap();
+        assert_eq!(
+            json["tables"][0],
+            serde_json::json!({"first_line": 5, "last_line": 8, "header_line": 5, "columns": ["Model", "F1 (%)", ""]})
+        );
+        assert!(s.summary().contains(", 2 tables, "));
+        assert_eq!(
+            s.warnings.last().map(String::as_str),
+            Some(
+                "line 17: a table header row has 2 cells and its delimiter row 1; the table is not listed"
+            )
+        );
+    }
+
+    #[test]
+    fn a_plain_text_has_unknown_tables() {
+        let text = "Title\n\n| Model | F1 |\n|---|---|\n| BM25 | 41 |\n";
+        let records = vec![];
+        let s = structure(text, false, &Targets::new(&records, &[]));
+        assert_eq!(s.tables, Known::Unknown("unknown"));
+        let json: serde_json::Value = serde_json::from_str(&s.render()).unwrap();
+        assert_eq!(json["tables"], "unknown");
+        assert!(!s.summary().contains("tables"));
     }
 }
