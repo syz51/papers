@@ -74,7 +74,7 @@ A derivative is a file `papers` makes from a text or a PDF: a structure sidecar,
 
 ## Paper structure: `rf.paper-structure/1`
 
-`papers structure <key|path>…` and `papers structure --all` write one sidecar for each text. `papers read` writes it too, for the text it saves or finds unchanged in `--out`, and prints `structure: <path>` before the manifest line. When a registered paper's recorded text answers the run, `read` writes no file and prints no such line. When the sidecar cannot be written, `read` says so on stderr and still succeeds. The sidecar says where the text has its pages, sections and reference list, and which registry entries the reference list cites. A search index reads it; `papers` never changes the text.
+`papers structure <key|path>…` and `papers structure --all` write one sidecar for each text. `papers read` writes it too, for the text it saves or finds unchanged in `--out`, and prints `structure: <path>` before the manifest line. When a registered paper's recorded text answers the run, `read` writes no file and prints no such line. When the sidecar cannot be written, `read` says so on stderr and still succeeds. The sidecar says where the text has its pages, sections, reference list and Markdown tables, and which registry entries the reference list cites. A search index reads it; `papers` never changes the text.
 
 ### File name
 
@@ -118,6 +118,7 @@ The file is one JSON object, pretty-printed, with a final LF.
       {"first_line": 40, "last_line": 41, "key": null, "by": null}
     ]
   },
+  "tables": "unknown",
   "warnings": []
 }
 ```
@@ -141,7 +142,13 @@ The file is one JSON object, pretty-printed, with a final LF.
 | `references.entries` | With `numbered`, `blank` or `author-year`: every reference in order, each with its line range. With `unknown`: only the matches, each with the lines of the id or title that matched. |
 | `entries[].key` | The registry key the reference cites. `null` when no entry matches. |
 | `entries[].by` | What matched: `doi`, `arxiv` or `title`. `null` when `key` is `null`. |
+| `tables` | The pipe tables of a Markdown text, in line order; `[]` when it has none. The string `unknown` for a plain text, which marks no table borders. See [Tables](#tables). |
+| `tables[].first_line`, `last_line` | The table from its header row to its last body row. |
+| `tables[].header_line` | The header row's line. It is `first_line`; the delimiter row (`\|---\|`) is the line after it. |
+| `tables[].columns` | The header row's cells in order, trimmed, without the outer pipes. An empty cell is `""`. `\\|` in a cell is a pipe. |
 | `warnings` | Sentences that say what detection did not find or could not decide. |
+
+Version 1 gets new fields without a new version number. A reader ignores fields it does not know. `tables` came in papers 0.12.5; an older sidecar has no `tables` field, which means the same as `unknown`.
 
 ### Section kinds
 
@@ -183,12 +190,17 @@ The list ends at the last line of the `references` span, with two exceptions:
 - In a `blank` or `author-year` list, the last references without a year are not references: what follows the list, such as table rows or an appendix's contents, does not name a year. The list ends at the last reference with a year.
 - When the last reference is longer than every other reference, it runs on into what follows the list. It ends at the last line before its first blank line. A blank line before a line of digits only, such as a page number, is a page break inside the reference and does not end it.
 
+### Tables
+
+A table is a GitHub-style pipe table outside fenced code (```` ``` ```` or `~~~`). It is a row with `|`, then a delimiter row with the same number of cells, each of dashes with an optional `:` at either end. The body rows follow up to the first line that is blank or has no `|`. A table can have no body rows. Docling writes every table this way; its header row holds the column labels.
+
 ### What a search index does with it
 
 - Index the raw text, and keep `first_line` and `last_line` as the anchors of each passage. Do not write a cleaned copy of the text.
 - For matching only, join a word that a line-end hyphen divides, and join wrapped lines into one string. Map each match back to raw lines.
 - Cut passages at section borders. A passage never crosses from one section into the next.
 - Put the paper's title and the section's `heading` before each passage's words in the indexed string.
+- Cut a passage inside a table only between body rows. Put the table's `columns`, joined by ` | `, before each table passage's rows in the indexed string. The table's lines stay the passage anchors.
 - Index the `references` list range in a separate field that a default search does not read. Index `front` and `unknown` spans as body text.
 - Use `entries[].key` as citation edges between registry entries.
 - Treat `unknown`, an absent `abstract` span and each warning as "not known". Fall back to the whole text for such a text.

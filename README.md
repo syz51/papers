@@ -56,7 +56,7 @@ This needs Rust 1.99 or newer (edition 2024). `papers read` can retry a page tha
 | `registry record-pdfs` | Record `pdf_sha256` for texts saved before `read` recorded it, when the saved PDF reproduces the text; no network request | `papers registry record-pdfs --dry-run` |
 | `registry abstracts` | Fill the `abstract` field of entries that have none, from arXiv and OpenAlex by id; no PDF download | `papers registry abstracts --dry-run` |
 | `card` | Make a paper card (`rf.paper-card/1`) from an entry's local text with one Claude call; keep only items whose quotes check. Off unless `[papers] cards = true` | `papers card --key 12` |
-| `structure` | Write the `rf.paper-structure/1` sidecar of texts: pages, section spans, the reference list and the registry entries it cites | `papers structure --all` |
+| `structure` | Write the `rf.paper-structure/1` sidecar of texts: pages, section spans, the reference list, the registry entries it cites and Markdown tables | `papers structure --all` |
 | `verify` | Compare registry entries (or notes) with arXiv, Crossref, OpenAlex | `papers verify --keys 12,40 --format jsonl` |
 | `read` | Download an open-access PDF and extract its text (plain or layout), with a sha256 manifest; or convert the saved PDF with Docling as a second text | `papers read --key 12 --record --extraction layout` |
 | `refs` | Works a paper cites (OpenAlex, else Semantic Scholar) | `papers refs 2601.00001 --max 50` |
@@ -314,7 +314,8 @@ The sidecar holds, as raw line ranges of the text:
 - the pages, from the form feeds the extractor wrote, or a Markdown text's `<!-- page -->` lines;
 - the section spans: `front`, `abstract`, `body`, `references`, `appendix` or `unknown`, each with its heading and level;
 - the reference list, divided into references where they are numbered, separated by blank lines or Markdown list items, or start with authors' names and hold a year;
-- for each reference, the registry key it cites, matched by DOI, arXiv id or normalised title.
+- for each reference, the registry key it cites, matched by DOI, arXiv id or normalised title;
+- in a Markdown text, each pipe table with its header row's line and column labels. A plain text gives `unknown`.
 
 The command reads only the text and the registry. It makes no network request, never changes a text, and works for a text of any `extraction` value and for Markdown texts. What detection does not find is `unknown` or a warning, never a guess. It prints one line per text, then the text's warnings, then the counts of texts with a reference list and with an abstract span. `--dry-run` prints the same and writes nothing. A sidecar is rewritten only when its content changes. It records its text's sha256; `registry check` reports `derivative-stale` when the text no longer has it.
 
