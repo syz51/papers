@@ -3595,10 +3595,7 @@ fn verify(http: &Http, config: &config::Config, o: &VerifyOptions) -> Result<boo
             config.display(&config.registry)
         );
     }
-    let failed = outcomes
-        .iter()
-        .filter(|o| matches!(o, verify::Outcome::Failed { .. }))
-        .count();
+    let failed = outcomes.iter().filter(|o| o.failed()).count();
     if failed > 0 {
         return Err(format!(
             "{failed} lookups failed; rerun to retry them (successful responses are cached)"

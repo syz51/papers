@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://www.openarchives.org/OAI/2.0/ http://www.openarchives.org/OAI/2.0/OAI-PMH.xsd">
+  <responseDate>2026-11-12T05:15:55Z</responseDate>
+  <request verb="GetRecord" identifier="oai:arXiv.org:2601.99977" metadataPrefix="arXivRaw">http://oaipmh.arxiv.org/oai</request>
+  <GetRecord>
+    <record>
+      <header>
+        <identifier>oai:arXiv.org:2601.99977</identifier>
+        <datestamp>2026-02-13</datestamp>
+        <setSpec>cs:cs:IR</setSpec>
+      </header>
+      <metadata>
+        <arXivRaw xmlns="http://arxiv.org/OAI/arXivRaw/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://arxiv.org/OAI/arXivRaw/ https://oaipmh.arxiv.org/OAI/arXivRaw.xsd">
+          <id>2601.99977</id>
+          <submitter>Ena Morrow</submitter>
+          <version version="v1">
+            <date>Tue, 06 Jan 2026 06:51:00 GMT</date>
+            <size>2776kb</size>
+          </version>
+          <version version="v2">
+            <date>Thu, 12 Feb 2026 06:42:10 GMT</date>
+            <size>0kb</size>
+            <source_type>I</source_type>
+          </version>
+          <title>Synthetic Widgets Rewrite Their Own Queries</title>
+          <authors>Ena Morrow, Fitz Calder</authors>
+          <categories>cs.IR</categories>
+          <comments>The paper is about to undergo significant revisions</comments>
+          <license>http://creativecommons.org/licenses/by/4.0/</license>
+          <abstract>A synthetic abstract.</abstract>
+        </arXivRaw>
+      </metadata>
+    </record>
+  </GetRecord>
+</OAI-PMH>

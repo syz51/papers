@@ -189,6 +189,8 @@ These parse issues are also reported:
 
 `verify` checks every registry entry, or the notes when there is no registry. Use `--keys`, `--unverified` or `--limit` to choose fewer. Responses are cached, so a rerun costs no requests. `--record` writes `verified{at, against, status}` back to the registry: `at` is the date, `against` the index, and `status` is `match`, `mismatch` or `not-found`. Only `verify --record` sets the field, and `registry build` keeps it while the checked metadata is unchanged. `registry check` checks its values and reports a recorded `mismatch` or `not-found` as `verified-mismatch`. An entry never checked has `verified: null`. An entry whose only DOI is an arXiv DOI is checked against arXiv. An entry with neither a title nor authors is skipped: there is nothing to compare, so it is never recorded as a match.
 
+Withdrawal and retraction findings are notices about the work, not metadata differences: they leave `verified.status` as `match`. The registry has no field for them; each `verify` run reports them again. Only a paper with more than one arXiv version can have a withdrawn version, so `verify` reads the version history (one request to `oaipmh.arxiv.org`, cached like the others) only for those papers.
+
 | Rule | Severity | Meaning |
 | --- | --- | --- |
 | `verify-title` | error | No source title equals ours; case, accents and punctuation are ignored. |
@@ -196,8 +198,12 @@ These parse issues are also reported:
 | `verify-author-count` | error | The author counts differ. Skipped for "et al." lists. |
 | `verify-year` | error | For notes: not the arXiv v1 year, or after the earliest Crossref/OpenAlex date. For the registry: outside the years the source reports. |
 | `verify-venue` | warn | Our venue does not name the source's journal. Journal articles only. |
+| `verify-withdrawn` | warn | arXiv withdrew a version of the paper, such as `arXiv v2 withdrawn 2025-11-12; ours pins v1`. arXiv's OAI-PMH version history marks it; the Atom API does not. Or the arXiv comment says the paper is withdrawn. |
+| `verify-retracted` | warn | Crossref lists a retraction, withdrawal or removal notice for the DOI (`updated-by`), from the publisher or Retraction Watch. |
+| `verify-notice` | warn | The DOI is itself a notice, such as a retraction (`update-to`). Cite the work it changes. |
+| `verify-updated` | info | Crossref lists another notice for the DOI, such as a correction or an expression of concern. |
 | `verify-not-found` | error (warn for title searches) | The source has no record for our identifier. |
-| `verify-failed` | error | The lookup failed; the run exits 2. |
+| `verify-failed` | error | A lookup failed, including the arXiv version history; the run exits 2. |
 | `verify-manual` | info | No index lists the work, and a note's `checked` date records a hand check. |
 | `verify-skipped` | info | There is nothing to look up or compare: a duplicate, a non-paper without a DOI or arXiv id, or an entry with neither title nor authors. |
 

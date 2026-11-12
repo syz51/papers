@@ -382,7 +382,9 @@ fn interval_ms(host: &str) -> u128 {
         return 0;
     }
     match host {
-        "export.arxiv.org" | "arxiv.org" | "www.arxiv.org" => ARXIV_INTERVAL_MS,
+        "export.arxiv.org" | "arxiv.org" | "www.arxiv.org" | "oaipmh.arxiv.org" => {
+            ARXIV_INTERVAL_MS
+        }
         _ => DEFAULT_INTERVAL_MS,
     }
 }

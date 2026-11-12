@@ -1,6 +1,6 @@
 [package]
 name = "papers"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.99"
 description = "Literature CLI for agent-driven research: arXiv, Crossref and OpenAlex metadata, a reference registry, open-access reading, and metadata verification"

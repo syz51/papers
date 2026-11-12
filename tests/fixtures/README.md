@@ -9,3 +9,8 @@ shapes the parsers read, as documented by each API:
 - `crossref-*.json`: a `/works/{doi}` reply from the Crossref REST API.
 - `openalex-*.json`: a single work and a `/works?search=` page from OpenAlex.
 - `arxiv-*.xml`: Atom feeds from the arXiv API (`/api/query`).
+- `arxiv-oai-*.xml`: `GetRecord` replies in the `arXivRaw` format from arXiv's
+  OAI-PMH interface (`oaipmh.arxiv.org/oai`), modelled on a recorded reply
+  for a paper whose v2 is withdrawn (`<source_type>I</source_type>`, `0kb`).
+- `crossref-retracted.json` and `crossref-retraction-notice.json` follow
+  recorded Retraction Watch `updated-by` and `update-to` entries.
