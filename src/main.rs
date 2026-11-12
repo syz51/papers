@@ -298,10 +298,14 @@ enum Command {
         reply: Option<PathBuf>,
         /// Make no card: run `<[papers] claude> preflight --cap <cap>` with the
         /// card call's flags, for `claude-experiment`, and exit 2 when it
-        /// fails or takes over 5 minutes. Run it before a batch of cards.
+        /// fails or takes over 5 minutes. Run it before a batch of cards. The
+        /// leak check is direct: `claude-experiment` exits 4 when a canary
+        /// request still holds the account or environment block, or none
+        /// reached its proxy. Its last line of standard error names the cause.
         #[arg(long, conflicts_with_all = ["key", "docling", "force", "reply"])]
         preflight: bool,
-        /// The preflight's cap on a request's prompt tokens (default 1500).
+        /// The preflight's cap on a request's prompt tokens, a cost check only
+        /// (default 2500; a clean preflight takes about 1700).
         // `requires = "preflight"` would pass: a flag counts as present at false.
         #[arg(long, conflicts_with = "key")]
         cap: Option<u32>,
