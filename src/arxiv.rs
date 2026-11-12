@@ -1,12 +1,16 @@
 //! arXiv API client: batched lookups, search paging, and query building.
+//!
+//! When the export API rate-limits papers, id lookups fall back to arXiv's
+//! OAI-PMH interface, one record per request, so a run can still finish.
 
 use std::collections::HashMap;
 
 use jiff::civil::Date;
 
 use crate::atom::{Feed, Paper, parse_feed};
-use crate::http::{ATTEMPTS, Get, Http};
+use crate::http::{ATTEMPTS, Get, Http, is_rate_limited};
 use crate::id::ArxivId;
+use crate::text::squash;
 
 const ENDPOINT: &str = "https://export.arxiv.org/api/query";
 /// arXiv's OAI-PMH interface: the only machine-readable source of each
@@ -40,6 +44,8 @@ impl Sort {
 pub struct Client<'a> {
     http: &'a Http,
     endpoint: &'a str,
+    /// OAI-PMH endpoint for lookups while the export API rate-limits papers.
+    oai: &'a str,
 }
 
 /// A response the caller interprets: 200, or 400 (arXiv reports bad ids and
@@ -54,13 +60,23 @@ impl<'a> Client<'a> {
         Client {
             http,
             endpoint: ENDPOINT,
+            oai: OAI_ENDPOINT,
         }
     }
 
-    /// A client for a test server's endpoint.
+    /// This client with another OAI-PMH endpoint for its fallback.
+    pub fn with_oai(self, oai: &'a str) -> Self {
+        Client { oai, ..self }
+    }
+
+    /// A client for a test server's endpoint; it serves the fallback too.
     #[cfg(test)]
     pub(crate) fn at(http: &'a Http, endpoint: &'a str) -> Self {
-        Client { http, endpoint }
+        Client {
+            http,
+            endpoint,
+            oai: endpoint,
+        }
     }
 
     /// `cache`: id lookups may come from the response cache; searches never do.
@@ -94,6 +110,12 @@ impl<'a> Client<'a> {
         let mut batches = batched.chunks(MAX_PER_REQUEST).chain(alone.chunks(1));
         for batch in batches.by_ref() {
             if let Err(message) = self.fetch_batch(batch, ATTEMPTS, &mut found, &mut failed) {
+                if is_rate_limited(&message) {
+                    let rest: Vec<&ArxivId> =
+                        batch.iter().chain(batches.flatten()).copied().collect();
+                    self.fetch_oai(&rest, &message, &mut found, &mut failed);
+                    break;
+                }
                 // The API is refusing or failing requests after the retries:
                 // stop instead of sending it more.
                 for id in batches.flatten() {
@@ -117,6 +139,65 @@ impl<'a> Client<'a> {
                 }
             })
             .collect()
+    }
+
+    /// Looks up `ids` one by one through OAI-PMH after the export API
+    /// rate-limited papers with `cause`. Gives the latest version only, so a
+    /// pinned older version stays failed. Stops at the first failed request.
+    fn fetch_oai(
+        &self,
+        ids: &[&ArxivId],
+        cause: &str,
+        found: &mut HashMap<String, Paper>,
+        failed: &mut HashMap<String, String>,
+    ) {
+        eprintln!(
+            "papers: arXiv's export API is rate-limiting papers; looking up {} id(s) \
+             through OAI-PMH instead, one request each (about {}s)",
+            ids.len(),
+            ids.len() * 3
+        );
+        // A versioned and a versionless id share one record.
+        let mut records: HashMap<&str, Option<Paper>> = HashMap::new();
+        for (i, id) in ids.iter().enumerate() {
+            let fetched = match records.get(id.id.as_str()) {
+                Some(paper) => Ok(paper.clone()),
+                None => record(self.http, self.oai, &id.id).map(|r| r.map(|r| r.paper)),
+            };
+            if let Ok(paper) = &fetched {
+                records.insert(&id.id, paper.clone());
+            }
+            let paper = match fetched {
+                Ok(Some(paper)) => paper,
+                Ok(None) => {
+                    failed.insert(
+                        id.to_string(),
+                        "not found: arXiv OAI-PMH has no record for this id".to_owned(),
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    let message = format!("{cause}; OAI-PMH fallback failed too: {e}");
+                    for id in &ids[i..] {
+                        failed.insert(id.to_string(), message.clone());
+                    }
+                    return;
+                }
+            };
+            if id.version.is_some_and(|v| v != paper.version) {
+                failed.insert(
+                    id.to_string(),
+                    format!(
+                        "{cause}; the OAI-PMH fallback gives only the latest version, v{}",
+                        paper.version
+                    ),
+                );
+                continue;
+            }
+            failed.remove(&id.to_string());
+            found.insert(format!("{}v{}", paper.id, paper.version), paper.clone());
+            found.insert(paper.id.clone(), paper);
+        }
     }
 
     /// One batch. A response that cannot be read as a feed is split in half to
@@ -255,19 +336,40 @@ pub struct Version {
     pub withdrawn: bool,
 }
 
+/// A versionless arXiv id's `arXivRaw` record: its version history and its
+/// latest version's metadata.
+#[derive(Debug, Clone)]
+struct Record {
+    versions: Vec<Version>,
+    /// The latest version, as the Atom API would give it.
+    paper: Paper,
+}
+
 /// The version history of a versionless arXiv id; `Ok(None)` when arXiv has no
 /// such record.
 pub fn versions(http: &Http, endpoint: &str, id: &str) -> Result<Option<Vec<Version>>, String> {
+    Ok(record(http, endpoint, id)?.map(|r| r.versions))
+}
+
+/// The `arXivRaw` record of a versionless arXiv id; `Ok(None)` when arXiv has
+/// no such record. [`versions`] asks for the same URL, so it is cached.
+fn record(http: &Http, endpoint: &str, id: &str) -> Result<Option<Record>, String> {
     let url = format!(
         "{endpoint}?verb=GetRecord&identifier=oai:arXiv.org:{}&metadataPrefix=arXivRaw",
         encode(id)
     );
     let reply = http.get(&Get::api(&url, &[200]))?;
-    parse_versions(&reply.text()).map_err(|e| format!("{e} ({url})"))
+    parse_record(&reply.text()).map_err(|e| format!("{e} ({url})"))
 }
 
 /// Parses an OAI-PMH `GetRecord` reply in the `arXivRaw` format.
+#[cfg(test)]
 pub fn parse_versions(xml: &str) -> Result<Option<Vec<Version>>, String> {
+    Ok(parse_record(xml)?.map(|r| r.versions))
+}
+
+/// Parses an OAI-PMH `GetRecord` reply in the `arXivRaw` format.
+fn parse_record(xml: &str) -> Result<Option<Record>, String> {
     let doc = roxmltree::Document::parse(xml)
         .map_err(|e| format!("invalid OAI-PMH XML from arXiv: {e}"))?;
     let root = doc.root_element();
@@ -296,7 +398,8 @@ pub fn parse_versions(xml: &str) -> Result<Option<Vec<Version>>, String> {
             .unwrap_or_default()
             .to_owned()
     };
-    raw.children()
+    let versions = raw
+        .children()
         .filter(|n| n.has_tag_name((ARXIV_RAW, "version")))
         .map(|v| {
             let label = v.attribute("version").unwrap_or_default();
@@ -316,8 +419,152 @@ pub fn parse_versions(xml: &str) -> Result<Option<Vec<Version>>, String> {
                 withdrawn: child(v, "source_type").contains('I') || child(v, "size") == "0kb",
             })
         })
-        .collect::<Result<Vec<_>, String>>()
-        .map(Some)
+        .collect::<Result<Vec<_>, String>>()?;
+    let (Some(first), Some(latest)) = (versions.first(), versions.last()) else {
+        return Err("arXivRaw record has no versions".to_owned());
+    };
+    let id = ArxivId::parse(&child(raw, "id"))
+        .map_err(|e| format!("arXivRaw id {:?}: {e}", child(raw, "id")))?;
+    let optional = |name: &str| Some(squash(&child(raw, name))).filter(|t| !t.is_empty());
+    let categories: Vec<String> = child(raw, "categories")
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    let paper = Paper {
+        version: latest.version,
+        title: squash(&child(raw, "title")),
+        authors: parse_authors(&child(raw, "authors")),
+        published: first.date.clone(),
+        updated: latest.date.clone(),
+        primary_category: categories.first().cloned().unwrap_or_default(),
+        categories,
+        journal_ref: optional("journal-ref"),
+        doi: optional("doi"),
+        comment: optional("comments"),
+        abstract_text: squash(&child(raw, "abstract")),
+        abs_url: id.abs_url(),
+        id: id.id,
+    };
+    Ok(Some(Record { versions, paper }))
+}
+
+/// Splits arXivRaw's author string ("A. Lee, B. Kim and C. M\\\"uller (MIT)")
+/// into names: affiliations in parentheses are dropped and TeX accents decoded.
+fn parse_authors(text: &str) -> Vec<String> {
+    let mut plain = String::new();
+    let mut depth = 0usize;
+    for c in text.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => plain.push(c),
+            _ => {}
+        }
+    }
+    let plain = squash(&decode_tex(&plain));
+    plain
+        .split(',')
+        .flat_map(|part| part.split(" and "))
+        .map(|name| name.trim().trim_start_matches("and ").trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Decodes the TeX accents and letters arXiv metadata uses into Unicode (NFC),
+/// then drops leftover braces: `M\\\"{u}ller` → `Müller`.
+fn decode_tex(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '\\' {
+            if chars[i] != '{' && chars[i] != '}' {
+                out.push(chars[i]);
+            }
+            i += 1;
+            continue;
+        }
+        let next = chars.get(i + 1).copied().unwrap_or_default();
+        let mark = match next {
+            '"' => Some('\u{308}'),
+            '\'' => Some('\u{301}'),
+            '`' => Some('\u{300}'),
+            '^' => Some('\u{302}'),
+            '~' => Some('\u{303}'),
+            '=' => Some('\u{304}'),
+            '.' => Some('\u{307}'),
+            'c' => Some('\u{327}'),
+            'v' => Some('\u{30C}'),
+            'u' => Some('\u{306}'),
+            'H' => Some('\u{30B}'),
+            'r' => Some('\u{30A}'),
+            'k' => Some('\u{328}'),
+            _ => None,
+        };
+        // A letter accent (`\c`, `\v`, …) needs a brace or space after it, else
+        // it is the start of a command such as `\v` in `\vartheta`.
+        let letter_accent = next.is_ascii_alphabetic();
+        let after = chars.get(i + 2).copied().unwrap_or_default();
+        if let Some(mark) = mark
+            && (!letter_accent || after == '{' || after == ' ')
+        {
+            // The accented letter: the next non-brace, non-space character.
+            let mut j = i + 2;
+            while j < chars.len() && (chars[j] == '{' || chars[j] == ' ') {
+                j += 1;
+            }
+            if let Some(&base) = chars.get(j) {
+                let base = match base {
+                    _ if base == '\\' && chars.get(j + 1) == Some(&'i') => {
+                        j += 1;
+                        'i'
+                    }
+                    other => other,
+                };
+                out.push(base);
+                out.push(mark);
+                i = j + 1;
+                continue;
+            }
+        }
+        // Letters written as commands: `\ss`, `\o`, `\aa`, `\l`, `\i`, ….
+        let word: String = chars[i + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
+        let letter = match word.as_str() {
+            "ss" => Some("ß"),
+            "o" => Some("ø"),
+            "O" => Some("Ø"),
+            "aa" => Some("å"),
+            "AA" => Some("Å"),
+            "ae" => Some("æ"),
+            "AE" => Some("Æ"),
+            "oe" => Some("œ"),
+            "OE" => Some("Œ"),
+            "l" => Some("ł"),
+            "L" => Some("Ł"),
+            "i" => Some("ı"),
+            _ => None,
+        };
+        match letter {
+            Some(letter) => {
+                out += letter;
+                i += 1 + word.len();
+                // The space that ends a control word belongs to it.
+                if chars.get(i) == Some(&' ') && chars.get(i + 1).is_some_and(|c| *c == '}') {
+                    i += 1;
+                }
+            }
+            None => {
+                out.push('\\');
+                i += 1;
+            }
+        }
+    }
+    out.nfc().collect()
 }
 
 fn describe_errors(feed: &Feed, url: &str) -> String {
@@ -428,16 +675,102 @@ mod tests {
     }
 
     #[test]
+    fn oai_records_give_the_latest_version() {
+        let xml = include_str!("../tests/fixtures/arxiv-oai-withdrawn.xml");
+        let paper = parse_record(xml).unwrap().unwrap().paper;
+        assert_eq!(
+            (paper.id.as_str(), paper.version, paper.published.as_str()),
+            ("2601.99977", 2, "2026-01-06")
+        );
+        assert_eq!(paper.updated, "2026-02-12");
+        assert_eq!(paper.title, "Synthetic Widgets Rewrite Their Own Queries");
+        assert_eq!(paper.authors, ["Ena Morrow", "Fitz Calder"]);
+        assert_eq!(
+            (paper.primary_category.as_str(), paper.categories.len()),
+            ("cs.IR", 1)
+        );
+        assert_eq!(
+            paper.comment.as_deref(),
+            Some("The paper is about to undergo significant revisions")
+        );
+        assert_eq!(paper.abs_url, "https://arxiv.org/abs/2601.99977");
+        assert_eq!(paper.doi, None);
+    }
+
+    #[test]
+    fn oai_author_strings_become_names() {
+        assert_eq!(
+            parse_authors(
+                r#"J. M\"uller, A. Sch{\"o}n (Inst. of X (Y)), B. Ko\c{c} and C. {\AA}berg,
+                 and D. Garc\'{\i}a, E. Wa\l{}\k{e}sa, F. \v Simek, G. \vartheta"#
+            ),
+            [
+                "J. Müller",
+                "A. Schön",
+                "B. Koç",
+                "C. Åberg",
+                "D. García",
+                "E. Wałęsa",
+                "F. Šimek",
+                "G. \\vartheta"
+            ]
+        );
+    }
+
+    #[test]
+    fn rate_limited_lookups_fall_back_to_oai() {
+        use crate::http::{response, serve};
+        let xml = [("Content-Type", "text/xml")].map(|(k, v)| format!("{k}: {v}"));
+        let xml: Vec<&str> = xml.iter().map(String::as_str).collect();
+        let (api, api_server) = serve(vec![response(
+            "429 Too Many Requests",
+            &["Retry-After: 120"],
+            "Rate exceeded.",
+        )]);
+        let (oai, oai_server) = serve(vec![
+            response(
+                "200 OK",
+                &xml,
+                include_str!("../tests/fixtures/arxiv-oai-withdrawn.xml"),
+            ),
+            response(
+                "200 OK",
+                &xml,
+                include_str!("../tests/fixtures/arxiv-oai-error.xml"),
+            ),
+        ]);
+        let http = Http::new();
+        let (endpoint, oai) = (format!("{api}/api/query"), format!("{oai}/oai"));
+        let client = Client::at(&http, &endpoint).with_oai(&oai);
+        let ids: Vec<ArxivId> = ["2601.99977", "2601.99977v1", "2601.99999"]
+            .iter()
+            .map(|id| ArxivId::parse(id).unwrap())
+            .collect();
+        let results = client.fetch(&ids);
+        assert_eq!(api_server.join().unwrap().len(), 1);
+        let heads = oai_server.join().unwrap();
+        assert!(
+            heads[0].contains("identifier=oai:arXiv.org:2601.99977&metadataPrefix=arXivRaw"),
+            "{}",
+            heads[0]
+        );
+        let paper = results[0].as_ref().unwrap();
+        assert_eq!((paper.version, paper.updated.as_str()), (2, "2026-02-12"));
+        let pinned = results[1].as_ref().unwrap_err();
+        assert!(pinned.contains("only the latest version, v2"), "{pinned}");
+        assert!(pinned.contains("is rate-limiting papers"), "{pinned}");
+        let missing = results[2].as_ref().unwrap_err();
+        assert!(missing.starts_with("not found"), "{missing}");
+    }
+
+    #[test]
     fn failing_requests_are_not_split_and_stop_the_lookup() {
         let busy = || crate::http::response("503 Service Unavailable", &["Retry-After: 0"], "");
         // Exactly one request per attempt; a split would send more.
         let (base, server) = crate::http::serve((0..ATTEMPTS).map(|_| busy()).collect());
         let http = Http::new();
         let endpoint = format!("{base}/api/query");
-        let client = Client {
-            http: &http,
-            endpoint: &endpoint,
-        };
+        let client = Client::at(&http, &endpoint);
         let ids: Vec<ArxivId> = ["2601.00001", "2601.00002", "hep-th/9901999v1"]
             .iter()
             .map(|id| ArxivId::parse(id).unwrap())

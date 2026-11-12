@@ -15,11 +15,25 @@ Network access happens only in the commands that need it. Every request goes thr
 
 - spaces requests per host across processes;
 - retries 429, 5xx and transport errors with backoff (5, 10, 20, 40 s, honouring `Retry-After`);
+- after a 429 from an API, stops every `papers` process from sending that host requests until a cooldown ends (see below);
 - identifies itself as `papers/<version>`;
 - sends no email address or other personal data;
 - keeps credentials out of its messages: values of `appid`, `api_key`, `key` and `token` query parameters are printed as `<redacted>`, and API-key headers are dropped when a redirect leaves the host or falls back from https to http.
 
 A batch of arXiv ids whose request still fails after these retries is not split up: the batch fails, and the remaining batches are reported as not attempted. Only a response that cannot be read as a feed is split in half to find the id behind it.
+
+**Rate-limit cooldown.** A 429 from an API starts a cooldown for that host. The cooldown is shared by every `papers` process of the user. It is kept as `<host>.cooldown` beside the throttle lock files (see `PAPERS_LOCK_DIR`).
+
+- The cooldown lasts for the server's `Retry-After` (at most 300 s) when it sends one.
+- Otherwise it lasts 30 s, doubling with each further 429 in a row, up to 1 hour.
+- A host that sends no 429 for 1 hour after its cooldown ends starts again at 30 s.
+- During a cooldown, no request goes to the host. A request waits when the cooldown ends within 60 s.
+- A longer cooldown fails the request at once, such as `export.arxiv.org is rate-limiting papers (HTTP 429, 3 in a row): no requests to it until 14:05:09 JST (in 240s)`. Cached responses still work.
+- The first successful reply from the host clears its cooldown. To clear it by hand, delete the `.cooldown` file.
+
+Downloads of PDFs and landing pages report a 429 without retrying it, so they start no cooldown.
+
+**arXiv fallback.** When the arXiv export API is rate-limiting `papers`, id lookups (`fetch`, `verify`, `registry abstracts`) fall back to arXiv's OAI-PMH interface (`oaipmh.arxiv.org`). It takes one request per paper, 3 s apart, and `papers` prints the count first. The fallback gives the latest version only: a pinned older version still fails. Authors come from arXivRaw's author string: affiliations in parentheses are dropped and TeX accents are decoded. A name written oddly there can differ from the Atom API's form. Searches have no fallback.
 
 ## Install
 
@@ -465,7 +479,8 @@ The documentation listed here was checked on 2026-11-07. Behaviour marked "live"
 
 | Source | Spacing in `papers` | What the provider documents |
 | --- | --- | --- |
-| arXiv API (`export.arxiv.org`) | 3 s | arXiv's API terms of use (https://info.arxiv.org/help/api/tou.html) ask for one request every three seconds. The page was not re-read in this session. |
+| arXiv API (`export.arxiv.org`) | 3 s | arXiv's API terms of use (https://info.arxiv.org/help/api/tou.html) ask for one request every three seconds. The page was not re-read in this session. In November 2026 the API answered every request with HTTP 429 `Rate exceeded.` for at least a day, even at this spacing. |
+| arXiv OAI-PMH (`oaipmh.arxiv.org`) | 3 s | The same terms. `papers` uses it for version histories and as the fallback for id lookups. |
 | Crossref (`api.crossref.org`) | 1 s | Not re-checked in this session. |
 | OpenAlex (`api.openalex.org`) | 1 s | https://help.openalex.org/api/authentication/ and https://help.openalex.org/api/llm-quick-reference/ (pages dated 2026-11-03; docs.openalex.org redirects there). See the notes below the table. |
 | Semantic Scholar (`api.semanticscholar.org`) | 1 s | https://www.semanticscholar.org/product/api documents 1000 requests per second shared by all unauthenticated users, and 1 request per second with an introductory key. See the notes below the table. |
