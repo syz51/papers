@@ -42,11 +42,13 @@ pub const MIN_WORDS: usize = 8;
 pub const MIN_KEPT_PERCENT: usize = 80;
 /// The quote and number checks: claimcheck's text forms, as a library.
 pub const CHECKER: &str = "claimcheck 0.10.0";
-/// The default cap of `papers card --preflight` on a request's prompt tokens.
-/// On 2026-11-12 the card prompt and reply schema took 1188 prompt tokens on
-/// Haiku through `claude-experiment`; Claude Code's environment and account
-/// blocks add about 580. Raise it when the prompt or schema grows.
-pub const PREFLIGHT_CAP: u32 = 1500;
+/// The default cap of `papers card --preflight` on a request's prompt tokens:
+/// a cost check only. `claude-experiment preflight` checks for the leaked
+/// account and environment blocks directly (exit 4). With `--json-schema` the
+/// canary makes two requests, and the second carries the first reply: on
+/// 2026-11-12 a clean preflight took 1633-1731 prompt tokens on Haiku (1188 of
+/// them the card prompt and schema). Raise it when the prompt or schema grows.
+pub const PREFLIGHT_CAP: u32 = 2500;
 /// The longest the preflight's canary call may take.
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// The longest a call may take.
@@ -570,8 +572,9 @@ fn call(config: &Config, text: Vec<u8>) -> Result<Vec<u8>, String> {
 
 /// `papers card --preflight`: runs `<[papers] claude> preflight --cap <cap>`
 /// with the card call's flags, as `claude-experiment` takes it, before a batch
-/// of cards. Errs when it fails, with its last line of standard error, such
-/// as its token report when it exits 3 for a prompt over `cap`.
+/// of cards. Errs when it fails, with its last line of standard error: exit 4
+/// when a canary request still holds the account or environment block, exit 3
+/// when a request's prompt tokens exceed `cap`.
 pub fn preflight(config: &Config, cap: u32) -> Result<bool, String> {
     if !config.cards {
         return Err(

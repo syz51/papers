@@ -296,7 +296,7 @@ fn preflight_runs_the_card_flags_through_the_command_and_fails_on_its_exit() {
     assert_eq!(out.status.code(), Some(0), "{}", shown(&out));
     assert!(shown(&out).contains("preflight passed"), "{}", shown(&out));
     let args: Vec<String> = p.read("args").unwrap().lines().map(String::from).collect();
-    assert_eq!(args[..5], ["preflight", "--cap", "1500", "-p", "--model"]);
+    assert_eq!(args[..5], ["preflight", "--cap", "2500", "-p", "--model"]);
     let prompt = &args[args
         .iter()
         .position(|a| a == "--system-prompt-file")
@@ -325,7 +325,16 @@ fn preflight_runs_the_card_flags_through_the_command_and_fails_on_its_exit() {
     assert!(shown(&out).contains("exit status: 3"), "{}", shown(&out));
     assert!(shown(&out).contains("start no cards"), "{}", shown(&out));
     assert_eq!(p.read("args").unwrap().lines().nth(2), Some("777"));
-    assert_eq!(p.calls(), 2);
+
+    // claude-experiment exits 4 when a canary request still holds the
+    // account or environment block; the default cap does not hide it.
+    std::fs::write(p.dir.join("exit-code"), "4").unwrap();
+    let out = p.papers(&["card", "--preflight"]);
+    assert_eq!(out.status.code(), Some(2), "{}", shown(&out));
+    assert!(shown(&out).contains("exit status: 4"), "{}", shown(&out));
+    assert!(shown(&out).contains("start no cards"), "{}", shown(&out));
+    assert_eq!(p.read("args").unwrap().lines().nth(2), Some("2500"));
+    assert_eq!(p.calls(), 3);
 }
 
 #[test]
