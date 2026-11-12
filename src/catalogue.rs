@@ -862,9 +862,9 @@ static EXPLICIT_DEPTH: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 // `Inspection depth: unknown`, then the reason, if any: `unknown. Reason: …`.
-// Other text after `unknown`, as in `unknown; abstract only`, is read as prose.
 re!(STATED_UNKNOWN, r"(?i)^unknown\b[\s*_`.;,:()\-–—]*(.*)$");
-re!(REASON, r"(?i)^reason\b");
+// The reason's label, then its text.
+re!(REASON, r"(?i)^reason\b[\s*_`.;,:()\-–—]*(.*)$");
 
 /// The inspection depth. A line `Inspection depth: <level>` naming one
 /// `rf.reference/1` level states it outright and wins over prose; a one-word
@@ -874,9 +874,12 @@ re!(REASON, r"(?i)^reason\b");
 /// mentions such as "not read in full" are ignored).
 ///
 /// `Inspection depth: unknown. Reason: …` states that the depth is not known:
-/// the depth is `None` and nothing is reported. Any other entry left without a
-/// depth, and not reported as `depth-unparsed`, is reported as `depth-missing`:
-/// at a bare `Inspection depth: unknown` line, or else at the heading.
+/// the line gives no level and nothing is reported. Other text after `unknown`,
+/// as in `unknown; abstract only`, contradicts it: the line is reported as
+/// `depth-unparsed` and gives no level. Any other entry left without a depth,
+/// and not reported as `depth-unparsed`, is reported as `depth-missing`: at a
+/// bare `Inspection depth: unknown` line, or a `Reason` without text, or else
+/// at the heading.
 fn depth(
     section: &Section,
     issue: &mut impl FnMut(&'static str, Severity, usize, String),
@@ -893,14 +896,32 @@ fn depth(
             && let Some(u) = STATED_UNKNOWN.captures(c[1].trim_start_matches(['*', '_', '`']))
         {
             let rest = u[1].trim_end_matches(['*', '_', '`', '.']).trim();
-            if rest.is_empty() {
-                bare_unknown.get_or_insert(n);
-                continue;
+            match REASON.captures(rest) {
+                // `unknown`, with or without the reason's label: no reason.
+                _ if rest.is_empty() => {
+                    bare_unknown.get_or_insert(n);
+                }
+                Some(r) if r[1].trim().is_empty() => {
+                    bare_unknown.get_or_insert(n);
+                }
+                Some(_) => explained = true,
+                None => {
+                    explained = true;
+                    issue(
+                        "depth-unparsed",
+                        Severity::Warn,
+                        n,
+                        format!(
+                            "inspection depth {:?} says unknown, then gives text that is not a \
+                             reason; write `Inspection depth: unknown. Reason: …`, or \
+                             `Inspection depth: <level>` with one of {}",
+                            clip(&c[1]),
+                            DEPTHS.join(", ")
+                        ),
+                    );
+                }
             }
-            if REASON.is_match(rest) {
-                explained = true;
-                continue;
-            }
+            continue;
         }
         // A one-word value is a stated level; longer text is prose, read below.
         if let Some(c) = EXPLICIT_DEPTH.captures(line)
@@ -1213,14 +1234,33 @@ Inspection depth: full
 [7] Doe, Jane. **An Alias**. Example Venue, 2025. [Original](https://example.org/7).
 
 Alias of [4].
+
+## Reference 8
+
+[8] Doe, Jane. **Unknown And Prose, Then A Level**. Example Venue, 2025. [Original](https://example.org/8).
+
+Inspection depth: unknown (abstract only)
+Inspection depth: method
+
+## Reference 9
+
+[9] Doe, Jane. **An Empty Reason**. Example Venue, 2025. [Original](https://example.org/9).
+
+Inspection depth: unknown. Reason:
+
+## Reference 10
+
+[10] Doe, Jane. **A Reason After A Dash**. Example Venue, 2025. [Original](https://example.org/10).
+
+**Inspection depth:** Unknown — reason: the publisher page is paywalled.
 ";
         let p = parse(catalogue, "docs/references.md");
-        for key in ["1", "2", "3", "7"] {
+        for key in ["1", "2", "3", "5", "7", "9", "10"] {
             assert_eq!(get(&p, key).depth, None, "key {key}");
         }
         assert_eq!(get(&p, "4").depth.as_deref(), Some("abstract"));
-        assert_eq!(get(&p, "5").depth.as_deref(), Some("abstract"));
         assert_eq!(get(&p, "6").depth.as_deref(), Some("full"));
+        assert_eq!(get(&p, "8").depth.as_deref(), Some("method"));
         assert_eq!(get(&p, "7").duplicate_of.as_deref(), Some("4"));
         let reported: Vec<(&str, &str, usize)> = p
             .issues
@@ -1229,9 +1269,16 @@ Alias of [4].
             .collect();
         assert_eq!(
             reported,
-            [("depth-missing", "2", 11), ("depth-missing", "3", 13)],
-            "an unknown depth needs its reason or a level; a missing line is reported at \
-             the heading; an alias needs no depth"
+            [
+                ("depth-missing", "2", 11),
+                ("depth-missing", "3", 13),
+                ("depth-unparsed", "5", 29),
+                ("depth-unparsed", "8", 48),
+                ("depth-missing", "9", 55),
+            ],
+            "an unknown depth needs its reason or a level; prose after unknown is reported \
+             where it is written; a missing line is reported at the heading; an alias needs \
+             no depth"
         );
     }
 
