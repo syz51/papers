@@ -1443,8 +1443,7 @@ fn structure_cmd(
     }
     let mut ok = true;
     let (mut with_refs, mut with_abstract) = (0, 0);
-    // Texts without a reference heading: short ones, and paper-length ones by path.
-    let (mut short, mut long) = (0, Vec::new());
+    let mut unlisted = structure::Unlisted::default();
     for path in &paths {
         let built = match structure_of(config, &records, path) {
             Ok(built) => built,
@@ -1461,11 +1460,8 @@ fn structure_cmd(
         for w in &built.warnings {
             println!("  warning: {w}");
         }
-        match built.references.known() {
-            Some(_) => with_refs += 1,
-            None if built.short() => short += 1,
-            None => long.push(built.text.path.clone()),
-        }
+        with_refs += usize::from(built.references.known().is_some());
+        unlisted.add(&built);
         with_abstract += usize::from(
             built
                 .sections
@@ -1478,16 +1474,8 @@ fn structure_cmd(
         paths.len(),
         if dry_run { " (nothing written)" } else { "" }
     );
-    if short + long.len() > 0 {
-        println!(
-            "no reference heading: {short} short texts (under {} words), {} paper-length texts{}",
-            structure::SHORT_WORDS,
-            long.len(),
-            match long.is_empty() {
-                true => String::new(),
-                false => format!(": {}", long.join(", ")),
-            }
-        );
+    if let Some(line) = unlisted.line() {
+        println!("{line}");
     }
     Ok(ok)
 }

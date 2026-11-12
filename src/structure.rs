@@ -142,6 +142,12 @@ impl Structure {
         out
     }
 
+    /// No references heading was found, as opposed to a heading over an
+    /// empty list.
+    pub fn no_heading(&self) -> bool {
+        !self.sections.iter().any(|s| s.kind == Kind::References)
+    }
+
     /// Fewer than [`SHORT_WORDS`] words.
     pub fn short(&self) -> bool {
         self.words < SHORT_WORDS
@@ -161,7 +167,7 @@ impl Structure {
                     r.entries.len()
                 )
             }
-            Known::Unknown(_) => format!(
+            Known::Unknown(_) if self.no_heading() => format!(
                 "references unknown (no heading; {} text, {} words)",
                 if self.short() {
                     "short"
@@ -170,6 +176,7 @@ impl Structure {
                 },
                 self.words
             ),
+            Known::Unknown(_) => "references unknown (empty list)".to_owned(),
         };
         let tables = match &self.tables {
             Known::Known(t) => format!("{} tables, ", t.len()),
@@ -185,6 +192,39 @@ impl Structure {
             count(Kind::Appendix),
             count(Kind::Unknown)
         )
+    }
+}
+
+/// The texts of a run without a references heading: how many are short, and
+/// the paths of the paper-length ones.
+#[derive(Debug, Default)]
+pub struct Unlisted {
+    short: usize,
+    long: Vec<String>,
+}
+
+impl Unlisted {
+    pub fn add(&mut self, s: &Structure) {
+        match s.no_heading() {
+            false => {}
+            true if s.short() => self.short += 1,
+            true => self.long.push(s.text.path.clone()),
+        }
+    }
+
+    /// The line for the user; `None` when every text has a heading.
+    pub fn line(&self) -> Option<String> {
+        (self.short + self.long.len() > 0).then(|| {
+            let names = match self.long.is_empty() {
+                true => String::new(),
+                false => format!(": {}", self.long.join(", ")),
+            };
+            format!(
+                "no reference heading: {} short texts (under {SHORT_WORDS} words), {} paper-length texts{names}",
+                self.short,
+                self.long.len()
+            )
+        })
     }
 }
 
@@ -546,7 +586,8 @@ static COLUMN_GAP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s{3,}").unwr
 /// In a two-column layout text, a references heading can share its line with
 /// the other column: `body words   References`. When no line is a references
 /// heading on its own, the last line with a column cell that is one, followed
-/// within 10 lines by a year, is the heading. Returns its line and the cell.
+/// within 10 lines by a year, is the heading; not when a page number follows
+/// the cell, as in a table of contents. Returns its line and the cell.
 /// In such a text, a line whose left column is empty counts as blank before a
 /// heading.
 fn column_references(lines: &[&str]) -> Option<(usize, String)> {
@@ -556,10 +597,14 @@ fn column_references(lines: &[&str]) -> Option<(usize, String)> {
             .map(clean)
             .filter(|c| !c.is_empty())
             .collect();
-        let title = cells
+        let at = cells
             .iter()
-            .find(|c| c.chars().count() <= 40 && is_references(c))?;
+            .position(|c| c.chars().count() <= 40 && is_references(c))?;
+        // `References   23` is a line of a table of contents.
+        let page = cells.get(at + 1).is_some_and(|c| is_page_number(c));
+        let title = &cells[at];
         (cells.len() > 1
+            && !page
             && i + 1 < lines.len()
             && has_year(lines, i + 1, (i + 10).min(lines.len() - 1)))
         .then(|| (i, title.clone()))
@@ -2040,5 +2085,38 @@ Markets, pages 1–9.
             s.summary()
                 .ends_with("references unknown (no heading; paper-length text, 2000 words)")
         );
+        let mut unlisted = Unlisted::default();
+        assert_eq!(unlisted.line(), None);
+        unlisted.add(&s);
+        // A heading over an empty list is not a missing heading.
+        let empty = structure(
+            "Title\n\n1 Introduction\n\nWords.\n\nReferences\n\n",
+            false,
+            &Targets::new(&records, &[]),
+        );
+        assert!(!empty.no_heading());
+        assert!(empty.summary().ends_with("references unknown (empty list)"));
+        unlisted.add(&empty);
+        let short = structure("A note.\n", false, &Targets::new(&records, &[]));
+        unlisted.add(&short);
+        unlisted.add(&short);
+        assert_eq!(
+            unlisted.line().as_deref(),
+            Some(
+                "no reference heading: 2 short texts (under 2000 words), 1 paper-length texts: texts/a.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn a_table_of_contents_cell_is_not_a_column_heading() {
+        let text = format!(
+            "Title\n\nContents\n{:<30}{}\n{:<30}{}\n\nBody words from 2020 here.\n",
+            "Introduction", "1", "References", "23"
+        );
+        let records = vec![];
+        let s = structure(&text, false, &Targets::new(&records, &[]));
+        assert!(s.no_heading());
+        assert_eq!(s.references, Known::Unknown("unknown"));
     }
 }
