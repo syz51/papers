@@ -21,8 +21,10 @@ pub fn is_pdf(content_type: &str, body: &[u8]) -> bool {
 /// Pages larger than this are real pages, not check interstitials.
 const CHALLENGE_PAGE_LIMIT: usize = 64 << 10;
 
-/// Markers of a page that only runs a JavaScript check before serving the
-/// content (lowercase): AWS WAF challenges (as on figshare) and generic notices.
+/// Markers of a 200 page that only runs a JavaScript check before serving the
+/// content (lowercase): AWS WAF challenge scripts and generic notices. The
+/// check pages met so far carry none: figshare's AWS WAF challenge is a 202
+/// with an empty body and dblp's Anubis page a 202, both caught by status.
 const CHALLENGE_MARKERS: [&str; 6] = [
     "awswaf",
     "challenge.js",
@@ -542,6 +544,36 @@ pub(crate) mod tests {
             " ".repeat(CHALLENGE_PAGE_LIMIT)
         );
         assert!(!is_js_challenge(200, html, big.as_bytes()));
+    }
+
+    /// The shapes of real check pages that plain requests got on 2026-11-13
+    /// (hand-written, not copies). Each is told apart by its status; none
+    /// carries a [`CHALLENGE_MARKERS`] marker.
+    #[test]
+    fn captured_check_page_shapes() {
+        // figshare (AWS WAF, `x-amzn-waf-action: challenge`): 202, empty body.
+        assert!(is_js_challenge(202, "text/html; charset=UTF-8", b""));
+        // dblp (Anubis): 202, a small page that runs a proof-of-work script.
+        let anubis = br#"<!doctype html><html><head><title>Making sure you&#39;re not a bot!</title>
+            <script id="anubis_challenge" type="application/json">{"rules":{"difficulty":4}}</script>
+            <script async type="module" src="/.within.website/x/cmd/anubis/static/js/main.mjs"></script>
+            </head><body><h1>Making sure you&#39;re not a bot!</h1></body></html>"#;
+        assert!(is_js_challenge(202, "text/html; charset=utf-8", anubis));
+        assert!(
+            !CHALLENGE_MARKERS
+                .iter()
+                .any(|m| String::from_utf8_lossy(anubis).to_lowercase().contains(m))
+        );
+        // SSRN (Cloudflare, `cf-mitigated: challenge`): a 403 is a refusal,
+        // reported and never retried in a browser.
+        let cloudflare = br#"<!DOCTYPE html><html><head><title>Just a moment...</title></head>
+            <body><noscript><span id="challenge-error-text">Enable JavaScript and cookies to continue</span></noscript>
+            <script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script></body></html>"#;
+        assert!(!is_js_challenge(
+            403,
+            "text/html; charset=UTF-8",
+            cloudflare
+        ));
     }
 
     #[test]
