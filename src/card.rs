@@ -436,8 +436,13 @@ fn name_phrase(chars: &[char], t: &numbers::NumTok) -> Option<String> {
 /// piece without a letter or digit, such as `，` or `(`, is no word.
 fn words(s: &str) -> usize {
     let cjk = |c: char| matches!(c as u32, 0x3040..=0x309F | 0x30A1..=0x30FA | 0x30FC..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF);
-    // CJK punctuation (`、`, `。`, `「`, `・`) separates words and is none itself.
-    let gap = |c: char| cjk(c) || matches!(c as u32, 0x3000..=0x303F | 0x30A0 | 0x30FB);
+    // CJK and full-width punctuation (`、`, `。`, `「`, `・`, `，`, `（`)
+    // separates words and is none itself.
+    let gap = |c: char| {
+        cjk(c)
+            || matches!(c as u32, 0x3000..=0x303F | 0x30A0 | 0x30FB)
+            || (matches!(c as u32, 0xFF00..=0xFFEF) && !c.is_alphanumeric())
+    };
     let other: String = s.chars().map(|c| if gap(c) { ' ' } else { c }).collect();
     s.chars().filter(|c| cjk(*c)).count()
         + other
@@ -955,7 +960,10 @@ mod tests {
         assert_eq!(words("模型(数据)：方法；"), 6);
         assert_eq!(words("データ・モデル"), 6);
         assert_eq!(words("a — b , c"), 3);
-        // Korean spaces its words: three words, not eleven syllables.
+        // Full-width punctuation separates the words it joins.
+        assert_eq!(words("GPT，BERT，T5（LLaMA）"), 4);
+        assert_eq!(words("방법，모델"), 2);
+        // Korean spaces its words: four words, not eleven syllables.
         assert_eq!(words("연도 혼동을 완화하는 방법"), 4);
         assert_eq!(words("검색 증강 생성"), 3);
     }
