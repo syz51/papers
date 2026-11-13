@@ -7,11 +7,14 @@ pub fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Removes accents (NFKD, then drops combining marks) and transliterates the
-/// common Latin letters that do not decompose.
+/// Removes accents (NFKD, then drops combining marks other than the kana
+/// voicing marks) and transliterates the common Latin letters that do not
+/// decompose. Non-ASCII output is recomposed (NFC), so kana and Hangul
+/// syllables stay whole.
 pub fn fold(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.nfkd().filter(|&c| !is_combining_mark(c)) {
+    let kept = |c: char| !is_combining_mark(c) || matches!(c, '\u{3099}' | '\u{309A}');
+    for c in s.nfkd().filter(|&c| kept(c)) {
         match c {
             'ø' => out.push('o'),
             'Ø' => out.push('O'),
@@ -30,7 +33,11 @@ pub fn fold(s: &str) -> String {
             _ => out.push(c),
         }
     }
-    out
+    if out.is_ascii() {
+        out
+    } else {
+        out.nfc().collect()
+    }
 }
 
 /// Case-, punctuation-, whitespace-, and accent-insensitive comparison key.
@@ -155,14 +162,50 @@ pub fn venue_key(s: &str) -> String {
     words[start..].concat()
 }
 
-/// Title similarity in [0, 1]: Dice coefficient of the two titles' word sets,
-/// and exactly 1 when their [`key`]s are equal.
+/// Han, kana and Hangul: scripts written without spaces between words.
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{1100}'..='\u{11FF}' // Hangul Jamo
+        | '\u{3040}'..='\u{30FF}' // Hiragana, Katakana
+        | '\u{3130}'..='\u{318F}' // Hangul Compatibility Jamo
+        | '\u{31F0}'..='\u{31FF}' // Katakana Phonetic Extensions
+        | '\u{3400}'..='\u{4DBF}' // Han Extension A
+        | '\u{4E00}'..='\u{9FFF}' // Han
+        | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
+        | '\u{F900}'..='\u{FAFF}' // Han Compatibility
+        | '\u{20000}'..='\u{3FFFF}' // Han Extensions B and later
+    )
+}
+
+/// Comparison tokens of a title: its [`ascii_words`], plus the character
+/// bigrams of each CJK run (the character itself for a one-character run).
+fn title_tokens(s: &str) -> Vec<String> {
+    let s: String = s.nfkc().collect();
+    let mut tokens = Vec::new();
+    let mut rest = s.as_str();
+    while let Some(start) = rest.find(is_cjk) {
+        tokens.extend(ascii_words(&rest[..start]));
+        let run = &rest[start..];
+        let end = run.find(|c| !is_cjk(c)).unwrap_or(run.len());
+        let chars: Vec<char> = run[..end].chars().collect();
+        if chars.len() == 1 {
+            tokens.push(chars[0].to_string());
+        }
+        tokens.extend(chars.windows(2).map(|w| w.iter().collect()));
+        rest = &run[end..];
+    }
+    tokens.extend(ascii_words(rest));
+    tokens
+}
+
+/// Title similarity in [0, 1]: Dice coefficient of the two titles' token sets
+/// ([`title_tokens`]), and exactly 1 when their [`key`]s are equal.
 pub fn similarity(a: &str, b: &str) -> f64 {
     if key(a) == key(b) {
         return 1.0;
     }
     let set = |s: &str| {
-        let mut words = ascii_words(s);
+        let mut words = title_tokens(s);
         words.sort();
         words.dedup();
         words
@@ -275,6 +318,8 @@ mod tests {
         );
         assert_eq!(key("Évaluation des marchés"), key("Evaluation des Marches"));
         assert_eq!(key("Ørsted: a Study"), "orstedastudy");
+        assert_ne!(key("ガバナンス"), key("カハナンス"));
+        assert_eq!(key("ｶﾞﾊﾞﾅﾝｽ"), key("ガバナンス"));
         assert_ne!(
             key("Synthetic Market Making"),
             key("Synthetic Market Maker")
@@ -352,5 +397,34 @@ mod tests {
         );
         assert!(s > 0.3 && s < 0.8, "{s}");
         assert_eq!(similarity("", "x"), 0.0);
+    }
+
+    #[test]
+    fn cjk_title_similarity() {
+        let zh = "基于深度学习的股票价格预测";
+        assert_eq!(similarity(zh, zh), 1.0);
+        let s = similarity(zh, "基于深度学习的股票价格预测研究");
+        assert!(s > 0.8, "{s}");
+        let s = similarity(zh, "区块链技术在供应链金融中的应用");
+        assert!(s < 0.3, "{s}");
+
+        let ja = "深層学習による株価予測";
+        assert_eq!(similarity(ja, ja), 1.0);
+        let s = similarity(ja, "深層学習を用いた株価予測の検討");
+        assert!(s > 0.3, "{s}");
+        let s = similarity(ja, "ブロックチェーン技術の金融応用");
+        assert!(s < 0.3, "{s}");
+        // Voiced kana differ from their unvoiced forms.
+        assert!(similarity("ガバナンス", "カハナンス") < 1.0);
+
+        let ko = "딥러닝 기반 주가 예측";
+        assert!(similarity(ko, "딥러닝 기반 주가 예측 연구") > 0.8);
+        assert!(similarity(ko, "블록체인 금융 응용") < 0.3);
+
+        let s = similarity(
+            "基于Transformer的时间序列预测",
+            "基于 Transformer 的时间序列预测方法",
+        );
+        assert!(s > 0.8, "{s}");
     }
 }
