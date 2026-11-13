@@ -989,12 +989,13 @@ fn main() -> ExitCode {
                 "sort": format!("{sort:?}").to_lowercase(),
             });
             let arxiv_query = arxiv::build_query(&query, &categories, since);
+            let hint = arxiv::and_hint(&query, &categories, since);
             let mut params = params;
             params["arxiv_query"] = arxiv_query.clone().into();
             search(
                 &Client::new(&http),
                 &config,
-                (&query, &arxiv_query),
+                (&query, &arxiv_query, hint.as_deref()),
                 sort,
                 max.into(),
                 params,
@@ -2166,7 +2167,7 @@ fn fetch_title(
 fn search(
     client: &Client,
     config: &config::Config,
-    (words, query): (&str, &str),
+    (words, query, hint): (&str, &str, Option<&str>),
     sort: Sort,
     max: usize,
     params: serde_json::Value,
@@ -2193,10 +2194,9 @@ fn search(
         params["total"] = total.into();
         vec![searchlog::Entry::new("arxiv", words, params, &found, index)]
     })?;
-    eprintln!(
-        "papers: {total} results for {query} (showing {})",
-        results.len()
-    );
+    for line in result_lines(query, total, results.len(), hint) {
+        eprintln!("{line}");
+    }
     for paper in &results {
         let seen = searchlog::seen_keys(&index, &paper_found(paper));
         let note = paper_note(&index, paper);
@@ -2206,6 +2206,16 @@ fn search(
         );
     }
     Ok(true)
+}
+
+/// The stderr lines after an arXiv search: the result count, then `hint` when
+/// nothing matched.
+fn result_lines(query: &str, total: u64, shown: usize, hint: Option<&str>) -> Vec<String> {
+    let mut lines = vec![format!(
+        "papers: {total} results for {query} (showing {shown})"
+    )];
+    lines.extend(hint.filter(|_| total == 0).map(str::to_owned));
+    lines
 }
 
 fn search_source(
@@ -4101,6 +4111,33 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_plain_word_search_prints_the_and_hint() {
+        let empty = http::response(
+            "200 OK",
+            &["Content-Type: application/atom+xml"],
+            include_str!("../tests/fixtures/arxiv-empty.xml"),
+        );
+        let (base, server) = http::serve(vec![empty]);
+        let http = Http::new();
+        let endpoint = format!("{base}/api/query");
+        let query = arxiv::build_query("funding rate", &[], None);
+        let hint = arxiv::and_hint("funding rate", &[], None);
+        let (total, papers) = Client::at(&http, &endpoint)
+            .search(&query, Sort::Submitted, 20)
+            .unwrap();
+        server.join().unwrap();
+        let lines = result_lines(&query, total, papers.len(), hint.as_deref());
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(
+            lines[0],
+            "papers: 0 results for all:funding AND all:rate (showing 0)"
+        );
+        assert!(lines[1].contains("plain words are AND-ed"), "{}", lines[1]);
+        // A search with results prints only its count.
+        assert_eq!(result_lines(&query, 3, 3, hint.as_deref()).len(), 1);
+    }
+
+    #[test]
     fn search_marks_registered_results_and_finds_the_earlier_run() {
         let (dir, config) = registered_project("search-registered");
         let http = Http::new();
@@ -4111,7 +4148,7 @@ mod tests {
             let got = search(
                 &Client::at(&http, &endpoint),
                 &config,
-                ("Synthetic  Market", "all:synthetic AND all:market"),
+                ("Synthetic  Market", "all:synthetic AND all:market", None),
                 Sort::Submitted,
                 3,
                 serde_json::json!({"arxiv_query": "all:synthetic AND all:market"}),

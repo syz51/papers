@@ -607,6 +607,30 @@ fn is_raw(query: &str) -> bool {
         })
 }
 
+/// The stderr line for an arXiv search that finds nothing, when its query is two
+/// or more plain words: `build_query` AND-ed them, so each word had to match. The
+/// retries leave out `--source openalex` while `--category` is set, which only arXiv takes.
+pub fn and_hint(words: &str, categories: &[String], since: Option<Date>) -> Option<String> {
+    if is_raw(words) || words.split_whitespace().nth(1).is_none() {
+        return None;
+    }
+    let mut retries = vec!["fewer words", "ti:/abs: field syntax"];
+    if since.is_some() {
+        retries.push("an earlier --since");
+    }
+    retries.push(if categories.is_empty() {
+        "--source openalex"
+    } else {
+        "no --category"
+    });
+    let last = retries.pop().unwrap_or_default();
+    Some(format!(
+        "papers: arXiv matched none: plain words are AND-ed, so every word must match; \
+         retry with {}, or {last}",
+        retries.join(", ")
+    ))
+}
+
 /// Builds the `search_query` value: raw syntax passes through, plain words become
 /// `all:<word>` joined by AND; categories are OR-ed and a date floor is AND-ed on.
 pub fn build_query(query: &str, categories: &[String], since: Option<Date>) -> String {
@@ -796,6 +820,28 @@ mod tests {
             build_query("funding rate  perpetual", &[], None),
             "all:funding AND all:rate AND all:perpetual"
         );
+    }
+
+    #[test]
+    fn and_hint_names_the_retries_that_fit_the_filters() {
+        let plain = and_hint("funding rate", &[], None).unwrap();
+        assert_eq!(
+            plain,
+            "papers: arXiv matched none: plain words are AND-ed, so every word must match; \
+             retry with fewer words, ti:/abs: field syntax, or --source openalex"
+        );
+        let since = Date::constant(2026, 11, 1);
+        let filtered = and_hint("funding rate", &["q-fin.TR".to_owned()], Some(since)).unwrap();
+        assert!(
+            filtered.ends_with(
+                "retry with fewer words, ti:/abs: field syntax, an earlier --since, or no --category"
+            ),
+            "{filtered}"
+        );
+        assert_eq!(and_hint("funding", &[], None), None);
+        for raw in ["ti:funding rate", "funding OR rate", "abs:basis"] {
+            assert_eq!(and_hint(raw, &[], None), None, "{raw}");
+        }
     }
 
     #[test]
