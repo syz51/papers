@@ -54,17 +54,30 @@ pub fn is_js_challenge(status: u16, content_type: &str, body: &[u8]) -> bool {
 /// Extracts the text of a PDF. The parser can panic on malformed input; that
 /// is reported as an error rather than aborting.
 pub fn extract_text(bytes: &[u8]) -> Result<String, String> {
+    let text = guarded(|| pdf_extract::extract_text_from_mem(bytes))?;
+    if text.trim().is_empty() {
+        return Err("the PDF has no extractable text (scanned images?)".to_owned());
+    }
+    Ok(text)
+}
+
+/// The text of a PDF's first page, as [`extract_text`] gives a whole PDF's.
+pub fn first_page_text(bytes: &[u8]) -> Result<String, String> {
+    let pages = guarded(|| pdf_extract::extract_text_from_mem_by_pages(bytes))?;
+    match pages.into_iter().next() {
+        Some(text) if !text.trim().is_empty() => Ok(text),
+        _ => Err("the PDF's first page has no extractable text".to_owned()),
+    }
+}
+
+/// Runs a pdf-extract call, reporting a parser panic as an error.
+fn guarded<T, E: std::fmt::Display>(extract: impl FnOnce() -> Result<T, E>) -> Result<T, String> {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        pdf_extract::extract_text_from_mem(bytes)
-    }));
+    let result = catch_unwind(AssertUnwindSafe(extract));
     std::panic::set_hook(hook);
     match result {
-        Ok(Ok(text)) if text.trim().is_empty() => {
-            Err("the PDF has no extractable text (scanned images?)".to_owned())
-        }
-        Ok(Ok(text)) => Ok(text),
+        Ok(Ok(out)) => Ok(out),
         Ok(Err(e)) => Err(format!("PDF text extraction failed: {e}")),
         Err(_) => Err("PDF text extraction failed: the parser panicked on this file".to_owned()),
     }
@@ -111,9 +124,30 @@ pub fn pdftotext(
     timeout: Duration,
     max_output: u64,
 ) -> Result<String, String> {
+    let options: &[&str] = if layout { &["-layout"] } else { &[] };
+    pdftotext_with(program, path, options, timeout, max_output)
+}
+
+/// [`pdftotext`]'s plain text of the PDF's first page only.
+pub fn pdftotext_first_page(
+    program: &str,
+    path: &Path,
+    timeout: Duration,
+    max_output: u64,
+) -> Result<String, String> {
+    pdftotext_with(program, path, &["-f", "1", "-l", "1"], timeout, max_output)
+}
+
+fn pdftotext_with(
+    program: &str,
+    path: &Path,
+    options: &[&str],
+    timeout: Duration,
+    max_output: u64,
+) -> Result<String, String> {
     let mut command = Command::new(program);
     command
-        .args(layout.then_some("-layout"))
+        .args(options)
         .args(["-enc", "UTF-8"])
         .arg(path)
         .arg("-");
@@ -355,27 +389,36 @@ fn stop(child: &mut Child) -> String {
 /// Download paths of open repositories whose file links lack a `.pdf` suffix.
 const DOWNLOAD_PATHS: [&str; 1] = ["/ndownloader/files/"]; // figshare
 
+/// A PDF link on a landing page.
+#[derive(Debug, PartialEq)]
+pub struct PageLink {
+    pub url: String,
+    /// Named by the page's `citation_pdf_url` meta tag, so the page's own
+    /// PDF. Another link can be any of the site's PDFs, such as a help sheet.
+    pub cited: bool,
+}
+
 /// PDF links on an HTML landing page at `base`: the `citation_pdf_url` meta tag,
 /// then `href`s on the page's own host that end in `.pdf` or are a known
 /// repository download path. At most a few, deduplicated.
-pub fn page_pdf_links(html: &str, base: &str) -> Vec<String> {
+pub fn page_pdf_links(html: &str, base: &str) -> Vec<PageLink> {
     let Ok(base_host) = host(base) else {
         return Vec::new();
     };
-    let mut links = Vec::new();
+    let mut links: Vec<PageLink> = Vec::new();
     // `raw` is already entity-decoded.
-    let mut push = |raw: &str, same_host_only: bool| {
+    let mut push = |raw: &str, cited: bool| {
         if let Some(url) = resolve(base, raw)
-            && (!same_host_only || host(&url).is_ok_and(|h| h == base_host))
-            && !links.contains(&url)
+            && (cited || host(&url).is_ok_and(|h| h == base_host))
+            && !links.iter().any(|l| l.url == url)
             && links.len() < MAX_PAGE_LINKS
         {
-            links.push(url);
+            links.push(PageLink { url, cited });
         }
     };
     for (name, content) in meta_tags(html) {
         if name.eq_ignore_ascii_case("citation_pdf_url") {
-            push(&content, false);
+            push(&content, true);
         }
     }
     let lower = html.to_ascii_lowercase();
@@ -386,7 +429,7 @@ pub fn page_pdf_links(html: &str, base: &str) -> Vec<String> {
         let path = value.split(['?', '#']).next().unwrap_or_default();
         let path = path.to_ascii_lowercase();
         if path.ends_with(".pdf") || DOWNLOAD_PATHS.iter().any(|p| path.contains(p)) {
-            push(&unescape(value), true);
+            push(&unescape(value), false);
         }
     }
     links
@@ -762,12 +805,19 @@ pub(crate) mod tests {
             html,
             "https://www.example.org/2026/04/staff-analytical-paper-2026-13/",
         );
+        let links: Vec<(&str, bool)> = links.iter().map(|l| (l.url.as_str(), l.cited)).collect();
         assert_eq!(
             links,
             [
-                "https://cdn.example.org/x.pdf",
-                "https://www.example.org/wp-content/uploads/2026/04/sap2026-13.pdf",
-                "https://www.example.org/2026/04/staff-analytical-paper-2026-13/report.PDF?download=1&x=2",
+                ("https://cdn.example.org/x.pdf", true),
+                (
+                    "https://www.example.org/wp-content/uploads/2026/04/sap2026-13.pdf",
+                    false
+                ),
+                (
+                    "https://www.example.org/2026/04/staff-analytical-paper-2026-13/report.PDF?download=1&x=2",
+                    false
+                ),
             ]
         );
         assert!(page_pdf_links(html, "not a url").is_empty());
@@ -779,7 +829,10 @@ pub(crate) mod tests {
             <a href="https://figshare.com/articles/x/25886773">item</a>"#;
         assert_eq!(
             page_pdf_links(html, "https://figshare.com/articles/x/25886773"),
-            ["https://figshare.com/ndownloader/files/52627142/1"]
+            [PageLink {
+                url: "https://figshare.com/ndownloader/files/52627142/1".into(),
+                cited: false
+            }]
         );
     }
 

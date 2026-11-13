@@ -28,7 +28,9 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 /// Upper bound on a server-requested `Retry-After` wait.
 const MAX_RETRY_AFTER_S: u64 = 300;
 /// Cooldown after a first 429 without `Retry-After`; it doubles with each
-/// further 429 in a row, up to [`COOLDOWN_MAX_S`].
+/// further 429 in a row, up to [`COOLDOWN_MAX_S`], whatever `Retry-After` says.
+/// So the third 429 in a row starts a cooldown longer than [`COOLDOWN_WAIT_S`]:
+/// the host gets no more requests until it ends.
 const COOLDOWN_BASE_S: u64 = 30;
 const COOLDOWN_MAX_S: u64 = 3600;
 /// The longest cooldown a request waits out; a longer one fails it at once.
@@ -465,16 +467,20 @@ struct Cooldown {
 }
 
 impl Cooldown {
-    /// The cooldown after another 429 at `now`: the server's `Retry-After`
-    /// when it gives one, else [`COOLDOWN_BASE_S`] doubled for each earlier 429.
+    /// The cooldown after another 429 at `now`: [`COOLDOWN_BASE_S`] doubled
+    /// for each earlier 429 in a row. The server's `Retry-After` replaces it
+    /// for a first 429, and lengthens it for a later one: a short
+    /// `Retry-After` repeated would otherwise be waited out without end.
     fn strike(&self, retry_after: Option<u64>, now: u128) -> Cooldown {
         let fresh = now > self.until_ms + u128::from(STRIKE_MEMORY_S) * 1000;
         let strikes = if fresh { 1 } else { self.strikes + 1 };
-        let wait_s = match retry_after {
-            Some(s) => s.min(MAX_RETRY_AFTER_S),
-            None => COOLDOWN_BASE_S
-                .saturating_mul(1 << (strikes - 1).min(16))
-                .min(COOLDOWN_MAX_S),
+        let doubled = COOLDOWN_BASE_S
+            .saturating_mul(1 << (strikes - 1).min(16))
+            .min(COOLDOWN_MAX_S);
+        let wait_s = match retry_after.map(|s| s.min(MAX_RETRY_AFTER_S)) {
+            Some(s) if strikes == 1 => s,
+            Some(s) => s.max(doubled),
+            None => doubled,
         };
         Cooldown {
             until_ms: now + u128::from(wait_s) * 1000,
@@ -1084,6 +1090,65 @@ mod tests {
         );
     }
 
+    /// A host that answers every request with a 429 and a short Retry-After
+    /// gets three requests: the third 429 starts a cooldown too long to wait
+    /// out, and later requests fail at once without being sent.
+    #[test]
+    fn repeated_short_retry_afters_stop_requests_after_three_429s() {
+        let limited = || response("429 Too Many Requests", &["Retry-After: 5"], "");
+        let (base, server) = serve(vec![limited(), limited(), limited()]);
+        let site = base.trim_start_matches("http://").to_owned();
+        let path = cooldown_dir().unwrap().join(cooldown_file_name(&site));
+        let get = |p: &str| {
+            Http::new().get(&Get {
+                cache: false,
+                attempts: 1,
+                ..Get::api(&format!("{base}/{p}"), &[200])
+            })
+        };
+        let mut waits = Vec::new();
+        for n in 1..=3 {
+            let err = get(&format!("r{n}")).err().unwrap();
+            assert!(err.contains("HTTP 429"), "{err}");
+            let cooldown = read_cooldown(&path);
+            assert_eq!(cooldown.strikes, n);
+            waits.push(cooldown.until_ms.saturating_sub(now_ms()).div_ceil(1000));
+            if n < 3 {
+                // As if the cooldown had been waited out.
+                write_cooldown(
+                    &path,
+                    &Cooldown {
+                        until_ms: now_ms() - 1,
+                        ..cooldown
+                    },
+                );
+            }
+        }
+        // Retry-After for the first, then at least the doubled cooldown.
+        assert!(
+            waits[0] <= 5 && waits[1] > 55 && waits[2] > u128::from(COOLDOWN_WAIT_S),
+            "{waits:?}"
+        );
+        // With every attempt the request has, it still fails at once, unsent.
+        let start = std::time::Instant::now();
+        let err = Http::new()
+            .get(&Get {
+                cache: false,
+                ..Get::api(&format!("{base}/r4"), &[200])
+            })
+            .err()
+            .unwrap();
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(
+            err.contains(&format!(
+                "{site} is rate-limiting papers (HTTP 429, 3 in a row)"
+            )),
+            "{err}"
+        );
+        assert_eq!(server.join().unwrap().len(), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn cooldowns_double_and_reset_after_a_quiet_hour() {
         let now = 10_000_000_000;
@@ -1107,8 +1172,15 @@ mod tests {
             c.strike(None, c.until_ms).until_ms - c.until_ms,
             s(COOLDOWN_MAX_S)
         );
-        // Retry-After wins, capped like retries.
-        assert_eq!(first.strike(Some(7), now).until_ms, now + s(7));
+        // A first 429's Retry-After wins, capped like retries; a later one
+        // only lengthens the doubled cooldown.
+        let fresh = Cooldown::default();
+        assert_eq!(fresh.strike(Some(7), now).until_ms, now + s(7));
+        assert_eq!(
+            fresh.strike(Some(9999), now).until_ms,
+            now + s(MAX_RETRY_AFTER_S)
+        );
+        assert_eq!(first.strike(Some(7), now).until_ms, now + s(60));
         assert_eq!(
             first.strike(Some(9999), now).until_ms,
             now + s(MAX_RETRY_AFTER_S)

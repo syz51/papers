@@ -141,17 +141,15 @@ enum Command {
     /// stdout line is the text's manifest {path, sha256, origin, retrieved,
     /// extraction, pdf_sha256} as JSON.
     Read {
-        #[arg(
-            required_unless_present = "key",
-            conflicts_with = "key",
-            value_name = "REF"
-        )]
+        #[arg(required_unless_present = "key", value_name = "REF")]
         /// An arXiv id, DOI, SSRN or NBER URL, or the http(s) URL of an open PDF
-        /// or landing page.
+        /// or landing page. With --key, read for that entry instead of its own
+        /// ids (with --record --force, it replaces the entry's text).
         reference: Option<String>,
-        /// Read the registry entry with this key (its arXiv version, DOI, or URL);
-        /// files are named after the key, or after the entry's plain text when
-        /// that has another name (`coral.txt` gives `coral.pdf`).
+        /// Read the registry entry with this key (its arXiv version, DOI, or URL,
+        /// unless REF is given); files are named after the key, or after the
+        /// entry's plain text when that has another name (`coral.txt` gives
+        /// `coral.pdf`).
         #[arg(long, value_name = "KEY")]
         key: Option<String>,
         /// Directory for <name>.pdf, <name>.txt and the <name>.json manifest
@@ -2366,12 +2364,23 @@ enum Candidate {
     Pdf(String),
     /// An open-access landing page without a PDF URL; scanned for PDF links.
     Landing(String),
+    /// A PDF link on a landing page other than its `citation_pdf_url`: any of
+    /// the site's PDFs, so kept only when its first page holds the title.
+    PageLink(String),
 }
 
 impl Candidate {
     fn url(&self) -> &str {
         match self {
-            Candidate::Pdf(u) | Candidate::Landing(u) => u,
+            Candidate::Pdf(u) | Candidate::Landing(u) | Candidate::PageLink(u) => u,
+        }
+    }
+
+    /// The candidate for a PDF link found on a landing page.
+    fn of_link(link: pdf::PageLink) -> Candidate {
+        match link.cited {
+            true => Candidate::Pdf(link.url),
+            false => Candidate::PageLink(link.url),
         }
     }
 }
@@ -2589,11 +2598,16 @@ fn read(
                     config.display(&config.registry)
                 )
             })?;
-            let input = match (&r.ids.arxiv, &r.ids.doi, &r.ids.url) {
-                (Some(id), _, _) => format!("{id}{}", r.version.as_deref().unwrap_or("")),
-                (None, Some(doi), _) => doi.clone(),
-                (None, None, Some(url)) => url.clone(),
-                (None, None, None) => {
+            // A REF given with the key replaces the entry's own ids, such as
+            // the URL of a PDF checked by hand.
+            let input = match (&o.reference, &r.ids.arxiv, &r.ids.doi, &r.ids.url) {
+                (Some(given), ..) => given.trim().to_owned(),
+                (None, Some(id), _, _) => {
+                    format!("{id}{}", r.version.as_deref().unwrap_or(""))
+                }
+                (None, None, Some(doi), _) => doi.clone(),
+                (None, None, None, Some(url)) => url.clone(),
+                (None, None, None, None) => {
                     return Err(format!("entry {key} has no arXiv id, DOI, or URL to read"));
                 }
             };
@@ -3191,6 +3205,8 @@ fn download(
     let mut tried = Vec::new();
     // Candidates whose plain-HTTP reply was a JavaScript check page.
     let mut challenged = Vec::new();
+    // Linked PDFs whose first page lacks the title.
+    let mut rejected = Vec::new();
     // For a URL without a paper id: the DOI its landing page names.
     let mut page_doi = None;
     if candidates.is_empty() {
@@ -3200,6 +3216,7 @@ fn download(
         candidates,
         &mut tried,
         &mut challenged,
+        &mut rejected,
         reference.is_none().then_some(&mut page_doi),
         &target,
     )? {
@@ -3231,8 +3248,15 @@ fn download(
                 let more: Vec<Candidate> =
                     found.into_iter().filter(|c| !tried.contains(c)).collect();
                 if !more.is_empty()
-                    && let Some(saved) =
-                        try_candidates(http, more, &mut tried, &mut challenged, None, &target)?
+                    && let Some(saved) = try_candidates(
+                        http,
+                        more,
+                        &mut tried,
+                        &mut challenged,
+                        &mut rejected,
+                        None,
+                        &target,
+                    )?
                 {
                     return Ok(Some(saved));
                 }
@@ -3280,6 +3304,7 @@ fn download(
                         alternates,
                         &mut tried,
                         &mut challenged,
+                        &mut rejected,
                         None,
                         &target,
                     )? {
@@ -3289,7 +3314,50 @@ fn download(
             }
         }
     }
-    retry_challenged(&mut challenged, &target, browse)
+    let saved = retry_challenged(&mut challenged, &target, browse)?;
+    if saved.is_none() && !rejected.is_empty() {
+        return Err(format!(
+            "no PDF of {input} found: the landing page links to {}, whose first page lacks \
+             the title {:?}, so not registered. Given the URL of a PDF you have checked, \
+             `papers read <URL> --key <KEY> --record --force` registers it",
+            rejected.join(", "),
+            target.title
+        ));
+    }
+    Ok(saved)
+}
+
+/// Whether the first page of the PDF `body` holds `target`'s title (any PDF
+/// does when the title is unknown): pdf-extract's text of it, else
+/// pdftotext's. pdftotext reads the PDF from `<dir>/<name>.pdf.tmp`, removed
+/// after. `Err` says why the title was not found.
+fn first_page_holds_title(target: &Target, body: &[u8]) -> Result<(), String> {
+    let title = &target.title;
+    let extracted = match pdf::first_page_text(body) {
+        Ok(text) if pdf::has_title(&text, title) => return Ok(()),
+        Ok(_) => "pdf-extract's text of its first page lacks the title".to_owned(),
+        Err(e) => e,
+    };
+    let program = target.pdftotext;
+    let pdf_path = target.dir.join(format!("{}.pdf", target.name));
+    let fallback = std::fs::create_dir_all(&target.dir)
+        .map_err(|e| format!("{}: {e}", target.dir.display()))
+        .and_then(|()| derivative::stage(&pdf_path, body))
+        .and_then(|staged| {
+            let text = pdf::pdftotext_first_page(
+                program,
+                &staged,
+                pdf::PDFTOTEXT_TIMEOUT,
+                pdf::PDFTOTEXT_MAX_OUTPUT,
+            );
+            derivative::discard(&pdf_path);
+            text
+        });
+    match fallback {
+        Ok(text) if pdf::has_title(&text, title) => Ok(()),
+        Ok(_) => Err(format!("{extracted}, and so does {program}'s")),
+        Err(e) => Err(format!("{extracted}; {e}")),
+    }
 }
 
 /// Looks `doi` up and prints it. Returns its title and the open-access
@@ -3331,6 +3399,8 @@ fn try_in_browser(challenged: &[String], target: &Target) -> Result<Option<Saved
             queue.push(url.clone());
         }
     }
+    // Links from loaded pages that are not their `citation_pdf_url`.
+    let mut unchecked: Vec<String> = Vec::new();
     println!("retrying in headless Chromium:");
     let browser = browser::Browser::launch()?;
     let mut i = 0;
@@ -3340,13 +3410,25 @@ fn try_in_browser(challenged: &[String], target: &Target) -> Result<Option<Saved
         let loaded = http::throttled(&http::host(&url)?, || browser.load(&url, PDF_LIMIT))?;
         match loaded {
             Ok(browser::Loaded::Download(bytes)) if bytes.starts_with(b"%PDF-") => {
+                if unchecked.contains(&url)
+                    && let Err(why) = first_page_holds_title(target, &bytes)
+                {
+                    println!("browser: {url}: linked PDF not taken: {why}");
+                    continue;
+                }
                 return save_pdf(target, &bytes, &url).map(Some);
             }
             Ok(browser::Loaded::Download(_)) => println!("browser: {url}: download is not a PDF"),
             Ok(browser::Loaded::Page { html, url: page }) => {
                 let links: Vec<String> = pdf::page_pdf_links(&html, &page)
                     .into_iter()
-                    .filter(|l| !queue.contains(l))
+                    .filter(|l| !queue.contains(&l.url))
+                    .map(|l| {
+                        if !l.cited {
+                            unchecked.push(l.url.clone());
+                        }
+                        l.url
+                    })
                     .collect();
                 println!(
                     "browser: {url}: page loaded; {} PDF link(s) on it",
@@ -3369,7 +3451,8 @@ fn try_in_browser(challenged: &[String], target: &Target) -> Result<Option<Saved
 /// Tries `candidates` in order, expanding a landing page into the PDF links it
 /// carries, until one is a PDF. Saves it and returns whether text was extracted;
 /// `None` when no candidate was a PDF. Every URL attempted is added to `tried`,
-/// those that answered with a JavaScript check page to `challenged`. When
+/// those that answered with a JavaScript check page to `challenged`, and
+/// linked PDFs whose first page lacks the title to `rejected`. When
 /// `page_doi` is given and empty, it is set to the first DOI a landing page
 /// names in its metadata.
 fn try_candidates(
@@ -3377,6 +3460,7 @@ fn try_candidates(
     mut candidates: Vec<Candidate>,
     tried: &mut Vec<Candidate>,
     challenged: &mut Vec<String>,
+    rejected: &mut Vec<String>,
     mut page_doi: Option<&mut Option<Doi>>,
     target: &Target,
 ) -> Result<Option<Saved>, String> {
@@ -3408,6 +3492,13 @@ fn try_candidates(
             }
         };
         if pdf::is_pdf(&reply.content_type, &reply.body) {
+            if matches!(candidate, Candidate::PageLink(_))
+                && let Err(why) = first_page_holds_title(target, &reply.body)
+            {
+                println!("skip {url}: linked PDF not taken: {why}");
+                rejected.push(url.to_owned());
+                continue;
+            }
             return save_pdf(target, &reply.body, &reply.url).map(Some);
         }
         let html = reply.content_type.contains("html");
@@ -3418,10 +3509,16 @@ fn try_candidates(
             {
                 *slot = pdf::page_doi(&page);
             }
+            let seen = |c: &Candidate| {
+                candidates
+                    .iter()
+                    .chain(tried.iter())
+                    .any(|o| o.url() == c.url())
+            };
             pdf::page_pdf_links(&page, &reply.url)
                 .into_iter()
-                .map(Candidate::Pdf)
-                .filter(|c| !candidates.contains(c) && !tried.contains(c))
+                .map(Candidate::of_link)
+                .filter(|c| !seen(c))
                 .collect()
         } else {
             Vec::new()
@@ -4088,12 +4185,13 @@ mod tests {
             pdftotext: &absent,
             docling: &[],
         };
-        let (mut tried, mut challenged) = (Vec::new(), Vec::new());
+        let (mut tried, mut challenged, mut rejected) = (Vec::new(), Vec::new(), Vec::new());
         let saved = try_candidates(
             &Http::new(),
             candidates,
             &mut tried,
             &mut challenged,
+            &mut rejected,
             None,
             &target,
         );
@@ -4569,6 +4667,166 @@ mod tests {
         let kept = sidecar_of(&root);
         assert_eq!(kept.sha256, forced.sha256, "not downloaded");
         assert_eq!(kept.extraction(), Ok(Some(registry::Extraction::Plain)));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A project with a registry entry `k` titled `title`, whose URL is `url`,
+    /// and with `texts`.
+    fn titled_project(name: &str, title: &str, url: &str, texts: &[registry::Text]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("papers-read-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sources/text")).unwrap();
+        std::fs::write(
+            root.join("research.toml"),
+            "[papers]\nregistry = \"refs.jsonl\"\n",
+        )
+        .unwrap();
+        let mut entry = registry::Reference::new("k".into());
+        entry.title = Some(title.to_owned());
+        entry.ids.url = Some(url.to_owned());
+        entry.texts = texts.to_vec();
+        std::fs::write(
+            root.join("refs.jsonl"),
+            format!("{}\n", serde_json::to_string(&entry).unwrap()),
+        )
+        .unwrap();
+        root
+    }
+
+    /// `read --key k --record`, of `reference` when given.
+    fn record_key(root: &Path, reference: Option<String>, force: bool) -> Result<bool, String> {
+        let config = config::Config::load(None, root).unwrap();
+        let options = ReadOptions {
+            reference,
+            key: Some("k".into()),
+            out: None,
+            record: true,
+            force,
+            extraction: None,
+            browser: false,
+        };
+        read(
+            &Http::new(),
+            &config,
+            &options,
+            &pdf::tests::fake_program("absent"),
+        )
+    }
+
+    /// The texts the registry at `root` records for entry `k`.
+    fn texts_of_k(root: &Path) -> Vec<registry::Text> {
+        let records = registry::load(&root.join("refs.jsonl")).unwrap().unwrap();
+        records.into_iter().find(|r| r.key == "k").unwrap().texts
+    }
+
+    /// A landing page's PDF link that is not its `citation_pdf_url`, such as
+    /// a site-wide help sheet, is skipped when its first page lacks the
+    /// entry's title; the page's next link, the paper, is registered.
+    #[test]
+    fn read_key_skips_a_linked_pdf_without_the_title() {
+        use crate::http::response;
+        let title = "Year Confusion in Synthetic Retrieval";
+        let page = r#"<html><head><meta name="citation_doi" content=""></head><body>
+            <a href="/resources/help.pdf">Export format help</a>
+            <a href="/files/paper.pdf">Full text</a></body></html>"#;
+        let (base, server) = http::serve(vec![
+            response("200 OK", &["Content-Type: text/html"], page),
+            response(
+                "200 OK",
+                &["Content-Type: application/pdf"],
+                &tiny_pdf("Export Format Help"),
+            ),
+            response(
+                "200 OK",
+                &["Content-Type: application/pdf"],
+                &tiny_pdf(title),
+            ),
+        ]);
+        let root = titled_project("linked", title, &format!("{base}/article"), &[]);
+        assert_eq!(record_key(&root, None, false), Ok(true));
+        let heads = server.join().unwrap();
+        assert!(
+            heads[1].starts_with("GET /resources/help.pdf "),
+            "{}",
+            heads[1]
+        );
+        let texts = texts_of_k(&root);
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].origin, Some(format!("{base}/files/paper.pdf")));
+        let saved = std::fs::read_to_string(root.join("sources/text/k.txt")).unwrap();
+        assert!(saved.contains(title), "{saved}");
+        assert!(!root.join("sources/text/k.pdf.tmp").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// When the only PDF a landing page links to lacks the title on its first
+    /// page, nothing is saved or registered, and the error names its URL.
+    #[test]
+    fn read_key_fails_naming_a_linked_pdf_without_the_title() {
+        use crate::http::response;
+        let page = r#"<html><body><a href="/resources/help.pdf">Help</a></body></html>"#;
+        let (base, server) = http::serve(vec![
+            response("200 OK", &["Content-Type: text/html"], page),
+            response(
+                "200 OK",
+                &["Content-Type: application/pdf"],
+                &tiny_pdf("Export Format Help"),
+            ),
+        ]);
+        let root = titled_project(
+            "unlinked",
+            "Synthetic Paper",
+            &format!("{base}/article"),
+            &[],
+        );
+        let err = record_key(&root, None, false).unwrap_err();
+        server.join().unwrap();
+        assert!(err.contains(&format!("{base}/resources/help.pdf")), "{err}");
+        assert!(err.contains("lacks the title"), "{err}");
+        assert!(texts_of_k(&root).is_empty());
+        let left: Vec<_> = std::fs::read_dir(root.join("sources/text"))
+            .unwrap()
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// `read <URL> --key k --record --force` downloads the URL, not the
+    /// entry's own, and replaces the entry's text in one command.
+    #[test]
+    fn read_url_with_key_replaces_the_entrys_text() {
+        use crate::http::response;
+        let title = "Synthetic Replaced Paper";
+        let (base, server) = http::serve(vec![response(
+            "200 OK",
+            &["Content-Type: application/pdf"],
+            &tiny_pdf(title),
+        )]);
+        let wrong = "Export format help\n";
+        let old = registry::Text {
+            path: "sources/text/k.txt".into(),
+            sha256: http::sha256_hex(wrong.as_bytes()),
+            origin: Some("https://example.invalid/help.pdf".into()),
+            retrieved: Some("2026-11-07T10:00:00Z".into()),
+            extra: Default::default(),
+        };
+        let root = titled_project(
+            "replace",
+            title,
+            "https://example.invalid/article",
+            std::slice::from_ref(&old),
+        );
+        std::fs::write(root.join("sources/text/k.txt"), wrong).unwrap();
+        let url = format!("{base}/files/paper.pdf");
+        assert_eq!(record_key(&root, Some(url.clone()), true), Ok(true));
+        server.join().unwrap();
+        let texts = texts_of_k(&root);
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert_eq!(texts[0].path, old.path);
+        assert_eq!(texts[0].origin.as_deref(), Some(url.as_str()));
+        let saved = std::fs::read_to_string(root.join("sources/text/k.txt")).unwrap();
+        assert!(saved.contains(title), "{saved}");
+        assert_eq!(texts[0].sha256, http::sha256_hex(saved.as_bytes()));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -5400,7 +5658,22 @@ mod tests {
         // cite never rewrites its inputs, so their citation keys survive.
         assert!(Cli::try_parse_from(["papers", "cite", "a.md", "--in-place"]).is_err());
         assert!(Cli::try_parse_from(["papers", "cite", "a.md", "--out", "d"]).is_ok());
-        assert!(Cli::try_parse_from(["papers", "read", "x", "--key", "7"]).is_err());
+        // An explicit REF reads for the entry instead of its own ids.
+        let cli = Cli::try_parse_from([
+            "papers",
+            "read",
+            "https://x.org/a.pdf",
+            "--key",
+            "7",
+            "--record",
+            "--force",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Read { reference: Some(ref r), key: Some(ref k), record: true, force: true, .. }
+                if r == "https://x.org/a.pdf" && k == "7"
+        ));
         assert!(Cli::try_parse_from(["papers", "read", "--key", "7", "--record"]).is_ok());
         let cli = Cli::try_parse_from(["papers", "read", "x", "--extraction", "layout"]).unwrap();
         assert!(matches!(
