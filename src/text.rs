@@ -155,14 +155,56 @@ pub fn venue_key(s: &str) -> String {
     words[start..].concat()
 }
 
-/// Title similarity in [0, 1]: Dice coefficient of the two titles' word sets,
-/// and exactly 1 when their [`key`]s are equal.
+/// Letters of Han, kana and Hangul, scripts written without spaces between
+/// words. Kana punctuation (・, ゠) and the voicing marks are not letters.
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{1100}'..='\u{11FF}' // Hangul Jamo
+        | '\u{3005}'..='\u{3007}' // 々 〆 〇
+        | '\u{303B}' // 〻
+        | '\u{3041}'..='\u{3096}' // Hiragana
+        | '\u{309D}'..='\u{309F}' // Hiragana iteration marks, ゟ
+        | '\u{30A1}'..='\u{30FA}' // Katakana
+        | '\u{30FC}'..='\u{30FF}' // ー, Katakana iteration marks, ヿ
+        | '\u{3130}'..='\u{318F}' // Hangul Compatibility Jamo
+        | '\u{31F0}'..='\u{31FF}' // Katakana Phonetic Extensions
+        | '\u{3400}'..='\u{4DBF}' // Han Extension A
+        | '\u{4E00}'..='\u{9FFF}' // Han
+        | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
+        | '\u{F900}'..='\u{FAFF}' // Han Compatibility
+        | '\u{20000}'..='\u{3FFFF}' // Han Extensions B and later
+    )
+}
+
+/// Comparison tokens of a title: its [`ascii_words`], plus the character
+/// bigrams of each CJK run (the character itself for a one-character run).
+fn title_tokens(s: &str) -> Vec<String> {
+    let s: String = s.nfkc().collect();
+    let mut tokens = Vec::new();
+    let mut rest = s.as_str();
+    while let Some(start) = rest.find(is_cjk) {
+        tokens.extend(ascii_words(&rest[..start]));
+        let run = &rest[start..];
+        let end = run.find(|c| !is_cjk(c)).unwrap_or(run.len());
+        let chars: Vec<char> = run[..end].chars().collect();
+        if chars.len() == 1 {
+            tokens.push(chars[0].to_string());
+        }
+        tokens.extend(chars.windows(2).map(|w| w.iter().collect()));
+        rest = &run[end..];
+    }
+    tokens.extend(ascii_words(rest));
+    tokens
+}
+
+/// Title similarity in [0, 1]: Dice coefficient of the two titles' token sets
+/// ([`title_tokens`]), and exactly 1 when their [`key`]s are equal.
 pub fn similarity(a: &str, b: &str) -> f64 {
     if key(a) == key(b) {
         return 1.0;
     }
     let set = |s: &str| {
-        let mut words = ascii_words(s);
+        let mut words = title_tokens(s);
         words.sort();
         words.dedup();
         words
@@ -352,5 +394,36 @@ mod tests {
         );
         assert!(s > 0.3 && s < 0.8, "{s}");
         assert_eq!(similarity("", "x"), 0.0);
+    }
+
+    #[test]
+    fn cjk_title_similarity() {
+        let zh = "基于深度学习的股票价格预测";
+        assert_eq!(similarity(zh, zh), 1.0);
+        let s = similarity(zh, "基于深度学习的股票价格预测研究");
+        assert!(s > 0.8, "{s}");
+        let s = similarity(zh, "区块链技术在供应链金融中的应用");
+        assert!(s < 0.3, "{s}");
+
+        let ja = "深層学習による株価予測";
+        assert_eq!(similarity(ja, ja), 1.0);
+        let s = similarity(ja, "深層学習を用いた株価予測の検討");
+        assert!(s > 0.3, "{s}");
+        let s = similarity(ja, "ブロックチェーン技術の金融応用");
+        assert!(s < 0.3, "{s}");
+        // 々 stays in its run; ・ separates runs like a space.
+        assert_eq!(title_tokens("様々な"), ["様々", "々な"]);
+        assert_eq!(title_tokens("データ・サイ"), ["デー", "ータ", "サイ"]);
+        assert_eq!(title_tokens("AI と 株"), ["ai", "と", "株"]);
+
+        let ko = "딥러닝 기반 주가 예측";
+        assert!(similarity(ko, "딥러닝 기반 주가 예측 연구") > 0.8);
+        assert!(similarity(ko, "블록체인 금융 응용") < 0.3);
+
+        let s = similarity(
+            "基于Transformer的时间序列预测",
+            "基于 Transformer 的时间序列预测方法",
+        );
+        assert!(s > 0.8, "{s}");
     }
 }
