@@ -35,8 +35,8 @@ const CHALLENGE_MARKERS: [&str; 6] = [
 ];
 
 /// Whether a non-PDF reply is a JavaScript check page, the one case where
-/// `read` retries in a browser: a 202 HTML reply (AWS WAF's challenge status)
-/// or a small 200 HTML page carrying a challenge marker. Refusals (403, 429,
+/// `read` retries in a browser: a 202 HTML reply (the status of AWS WAF's
+/// challenge, as on figshare, and of Anubis's, as on dblp) or a small 200 HTML page carrying a challenge marker. Refusals (403, 429,
 /// any other status) never are: those hosts block automated clients, and
 /// that is reported, not worked around.
 pub fn is_js_challenge(status: u16, content_type: &str, body: &[u8]) -> bool {
@@ -559,11 +559,8 @@ pub(crate) mod tests {
             <script async type="module" src="/.within.website/x/cmd/anubis/static/js/main.mjs"></script>
             </head><body><h1>Making sure you&#39;re not a bot!</h1></body></html>"#;
         assert!(is_js_challenge(202, "text/html; charset=utf-8", anubis));
-        assert!(
-            !CHALLENGE_MARKERS
-                .iter()
-                .any(|m| String::from_utf8_lossy(anubis).to_lowercase().contains(m))
-        );
+        // As a 200 it would not count: it carries no marker.
+        assert!(!is_js_challenge(200, "text/html; charset=utf-8", anubis));
         // SSRN (Cloudflare, `cf-mitigated: challenge`): a 403 is a refusal,
         // reported and never retried in a browser.
         let cloudflare = br#"<!DOCTYPE html><html><head><title>Just a moment...</title></head>
@@ -571,6 +568,12 @@ pub(crate) mod tests {
             <script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script></body></html>"#;
         assert!(!is_js_challenge(
             403,
+            "text/html; charset=UTF-8",
+            cloudflare
+        ));
+        // Nor would a 200 copy: no marker matches its notice.
+        assert!(!is_js_challenge(
+            200,
             "text/html; charset=UTF-8",
             cloudflare
         ));
