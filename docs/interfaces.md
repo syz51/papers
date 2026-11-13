@@ -73,6 +73,7 @@ A derivative is a file `papers` makes from a text or a PDF: a structure sidecar,
 - When the search log holds the same search, `search` prints this line on stderr before it searches: `papers: searched before: last run <RFC 3339 time>, <n> results (<m> runs of this <source> query in <log path>)`. `<n>` is the number of results the last run logged. The search still runs.
 - Two searches are the same when they have the same source and the same normalised query. For arXiv the query is the one sent, which holds the words, `--category` and `--since`. For the other sources it is the words, and `--since` must be equal too. `--max` and `--sort` do not count. A normalised query is lower case, without accents, with single spaces.
 - A search log that cannot be read is reported on stderr and does not stop the search.
+- An arXiv search whose query is two or more plain words, with no field syntax or boolean operator, AND-s the words. When it finds no results, `search` prints this line on stderr after the result count: `papers: arXiv matched none: plain words are AND-ed, so every word must match; retry with fewer words, ti:/abs: field syntax, or --source openalex`. It does not run the search again.
 
 ## Paper structure: `rf.paper-structure/1`
 

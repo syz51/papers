@@ -2197,6 +2197,9 @@ fn search(
         "papers: {total} results for {query} (showing {})",
         results.len()
     );
+    if let Some(hint) = arxiv::and_hint(words, total) {
+        eprintln!("{hint}");
+    }
     for paper in &results {
         let seen = searchlog::seen_keys(&index, &paper_found(paper));
         let note = paper_note(&index, paper);

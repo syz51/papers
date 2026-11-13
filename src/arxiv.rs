@@ -607,6 +607,16 @@ fn is_raw(query: &str) -> bool {
         })
 }
 
+/// The stderr line for a search with no results whose query is two or more plain
+/// words: `build_query` AND-ed them, so each word had to match.
+pub fn and_hint(words: &str, total: u64) -> Option<String> {
+    (total == 0 && !is_raw(words) && words.split_whitespace().nth(1).is_some()).then(|| {
+        "papers: arXiv matched none: plain words are AND-ed, so every word must match; \
+         retry with fewer words, ti:/abs: field syntax, or --source openalex"
+            .to_owned()
+    })
+}
+
 /// Builds the `search_query` value: raw syntax passes through, plain words become
 /// `all:<word>` joined by AND; categories are OR-ed and a date floor is AND-ed on.
 pub fn build_query(query: &str, categories: &[String], since: Option<Date>) -> String {
@@ -796,6 +806,39 @@ mod tests {
             build_query("funding rate  perpetual", &[], None),
             "all:funding AND all:rate AND all:perpetual"
         );
+    }
+
+    #[test]
+    fn empty_plain_word_search_names_the_and_rule() {
+        let empty = crate::http::response(
+            "200 OK",
+            &["Content-Type: application/atom+xml"],
+            include_str!("../tests/fixtures/arxiv-empty.xml"),
+        );
+        let (base, server) = crate::http::serve(vec![empty]);
+        let http = Http::new();
+        let endpoint = format!("{base}/api/query");
+        let words = "funding rate perpetual";
+        let query = build_query(words, &[], None);
+        let (total, papers) = Client::at(&http, &endpoint)
+            .search(&query, Sort::Submitted, 20)
+            .unwrap();
+        assert_eq!(server.join().unwrap().len(), 1);
+        assert_eq!((total, papers.len()), (0, 0));
+        let hint = and_hint(words, total).unwrap();
+        for part in ["AND-ed", "fewer words", "ti:/abs:", "--source openalex"] {
+            assert!(hint.contains(part), "{hint}");
+        }
+    }
+
+    #[test]
+    fn and_hint_needs_no_results_and_two_plain_words() {
+        assert!(and_hint("funding rate", 0).is_some());
+        assert_eq!(and_hint("funding rate", 3), None);
+        assert_eq!(and_hint("funding", 0), None);
+        for raw in ["ti:funding rate", "funding OR rate", "abs:basis"] {
+            assert_eq!(and_hint(raw, 0), None, "{raw}");
+        }
     }
 
     #[test]
