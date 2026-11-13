@@ -144,7 +144,8 @@ enum Command {
         #[arg(required_unless_present = "key", value_name = "REF")]
         /// An arXiv id, DOI, SSRN or NBER URL, or the http(s) URL of an open PDF
         /// or landing page. With --key, read for that entry instead of its own
-        /// ids (with --record --force, it replaces the entry's text).
+        /// ids, always downloading it (with --record, it replaces the entry's
+        /// text).
         reference: Option<String>,
         /// Read the registry entry with this key (its arXiv version, DOI, or URL,
         /// unless REF is given); files are named after the key, or after the
@@ -2404,6 +2405,7 @@ fn oa_candidates(locations: &[openalex::Location]) -> Vec<Candidate> {
     out
 }
 
+#[derive(Clone)]
 struct ReadOptions {
     reference: Option<String>,
     key: Option<String>,
@@ -2582,6 +2584,16 @@ fn read(
 ) -> Result<bool, String> {
     if o.record && o.key.is_none() {
         return Err("--record adds the text to a registry entry; name it with --key".to_owned());
+    }
+    // A REF given with the key is a copy to fetch for the entry: a text it
+    // already has would otherwise answer the run.
+    if let (Some(given), Some(key), false) = (&o.reference, &o.key, o.force) {
+        println!("{given} given with --key {key}: downloading it, as --force does");
+        let forced = ReadOptions {
+            force: true,
+            ..o.clone()
+        };
+        return read(http, config, &forced, pdftotext);
     }
     let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
     let (input, entry, records) = match &o.key {
@@ -2873,9 +2885,9 @@ fn read_from(
             Saved::PdfOnly => Ok(false),
         };
     }
-    let mut browse = |pages: &[String], target: &Target| {
+    let mut browse = |pages: &[Candidate], target: &Target, rejected: &mut Vec<String>| {
         if o.browser {
-            try_in_browser(pages, target)
+            try_in_browser(pages, target, rejected)
         } else {
             println!("not retrying the JavaScript check page(s) in a browser (--no-browser)");
             Ok(None)
@@ -3052,9 +3064,9 @@ fn read_docling(
             Some(extract_pdf(&target, &bytes, origin, retrieved)?)
         }
         None => {
-            let mut browse = |pages: &[String], target: &Target| {
+            let mut browse = |pages: &[Candidate], target: &Target, rejected: &mut Vec<String>| {
                 if o.browser {
-                    try_in_browser(pages, target)
+                    try_in_browser(pages, target, rejected)
                 } else {
                     println!(
                         "not retrying the JavaScript check page(s) in a browser (--no-browser)"
@@ -3170,7 +3182,8 @@ fn unrecord_text(
 
 /// Retries JavaScript check pages in a browser: `try_in_browser`, or a
 /// stand-in in tests.
-type Browse<'b> = dyn FnMut(&[String], &Target) -> Result<Option<Saved>, String> + 'b;
+type Browse<'b> =
+    dyn FnMut(&[Candidate], &Target, &mut Vec<String>) -> Result<Option<Saved>, String> + 'b;
 
 /// Finds and downloads an open-access PDF; `None` when no candidate was one.
 fn download(
@@ -3230,7 +3243,7 @@ fn download(
         // The copy the user named comes first: its JavaScript check pages are
         // retried in the browser before other copies are looked for. A browser
         // failure here leaves those other copies to try.
-        match retry_challenged(&mut challenged, &target, browse) {
+        match retry_challenged(&mut challenged, &target, &mut rejected, browse) {
             Ok(Some(saved)) => return Ok(Some(saved)),
             Ok(None) => {}
             Err(e) => println!("browser: {e}"),
@@ -3245,8 +3258,10 @@ fn download(
                 if target.title.is_empty() {
                     target.title = title;
                 }
-                let more: Vec<Candidate> =
-                    found.into_iter().filter(|c| !tried.contains(c)).collect();
+                let more: Vec<Candidate> = found
+                    .into_iter()
+                    .filter(|c| !tried.iter().any(|t| t.url() == c.url()))
+                    .collect();
                 if !more.is_empty()
                     && let Some(saved) = try_candidates(
                         http,
@@ -3285,7 +3300,7 @@ fn download(
                 let alternates: Vec<Candidate> = others
                     .iter()
                     .flat_map(|w| oa_candidates(&w.oa_locations))
-                    .filter(|c| !tried.contains(c))
+                    .filter(|c| !tried.iter().any(|t| t.url() == c.url()))
                     .collect();
                 if alternates.is_empty() {
                     println!("no other open-access version with the same title found");
@@ -3314,12 +3329,12 @@ fn download(
             }
         }
     }
-    let saved = retry_challenged(&mut challenged, &target, browse)?;
+    let saved = retry_challenged(&mut challenged, &target, &mut rejected, browse)?;
     if saved.is_none() && !rejected.is_empty() {
         return Err(format!(
             "no PDF of {input} found: the landing page links to {}, whose first page lacks \
              the title {:?}, so not registered. Given the URL of a PDF you have checked, \
-             `papers read <URL> --key <KEY> --record --force` registers it",
+             `papers read <URL> --key <KEY> --record` registers it",
             rejected.join(", "),
             target.title
         ));
@@ -3329,30 +3344,31 @@ fn download(
 
 /// Whether the first page of the PDF `body` holds `target`'s title (any PDF
 /// does when the title is unknown): pdf-extract's text of it, else
-/// pdftotext's. pdftotext reads the PDF from `<dir>/<name>.pdf.tmp`, removed
-/// after. `Err` says why the title was not found.
+/// pdftotext's. pdftotext reads the PDF from a file in the system's temporary
+/// directory, removed after. `Err` says why the title was not found.
 fn first_page_holds_title(target: &Target, body: &[u8]) -> Result<(), String> {
     let title = &target.title;
+    if title.is_empty() {
+        return Ok(());
+    }
     let extracted = match pdf::first_page_text(body) {
         Ok(text) if pdf::has_title(&text, title) => return Ok(()),
         Ok(_) => "pdf-extract's text of its first page lacks the title".to_owned(),
         Err(e) => e,
     };
     let program = target.pdftotext;
-    let pdf_path = target.dir.join(format!("{}.pdf", target.name));
-    let fallback = std::fs::create_dir_all(&target.dir)
-        .map_err(|e| format!("{}: {e}", target.dir.display()))
-        .and_then(|()| derivative::stage(&pdf_path, body))
-        .and_then(|staged| {
-            let text = pdf::pdftotext_first_page(
-                program,
-                &staged,
-                pdf::PDFTOTEXT_TIMEOUT,
-                pdf::PDFTOTEXT_MAX_OUTPUT,
-            );
-            derivative::discard(&pdf_path);
-            text
-        });
+    let pdf_path =
+        std::env::temp_dir().join(format!("papers-{}-{}.pdf", std::process::id(), target.name));
+    let fallback = derivative::stage(&pdf_path, body).and_then(|staged| {
+        let text = pdf::pdftotext_first_page(
+            program,
+            &staged,
+            pdf::PDFTOTEXT_TIMEOUT,
+            pdf::PDFTOTEXT_MAX_OUTPUT,
+        );
+        derivative::discard(&pdf_path);
+        text
+    });
     match fallback {
         Ok(text) if pdf::has_title(&text, title) => Ok(()),
         Ok(_) => Err(format!("{extracted}, and so does {program}'s")),
@@ -3376,31 +3392,42 @@ fn doi_candidates(http: &Http, doi: &Doi) -> Result<Option<(String, Vec<Candidat
 }
 
 /// Retries the JavaScript check pages in `challenged` with `browse`, and
-/// empties `challenged`.
+/// empties `challenged`. Linked PDFs the browser skips go to `rejected`.
 fn retry_challenged(
-    challenged: &mut Vec<String>,
+    challenged: &mut Vec<Candidate>,
     target: &Target,
+    rejected: &mut Vec<String>,
     browse: &mut Browse,
 ) -> Result<Option<Saved>, String> {
     if challenged.is_empty() {
         return Ok(None);
     }
-    browse(&std::mem::take(challenged), target)
+    browse(&std::mem::take(challenged), target, rejected)
 }
 
 /// Retries in headless Chromium the candidates that answered with a JavaScript
 /// check page (see `pdf::is_js_challenge`), following PDF links on the pages it
-/// loads. URLs refused with 403, 429, or an error never come here. Returns like
+/// loads. URLs refused with 403, 429, or an error never come here. A PDF from
+/// a linked URL that is not a page's `citation_pdf_url` is taken only when its
+/// first page holds the title; else its URL goes to `rejected`. Returns like
 /// `try_candidates`.
-fn try_in_browser(challenged: &[String], target: &Target) -> Result<Option<Saved>, String> {
+fn try_in_browser(
+    challenged: &[Candidate],
+    target: &Target,
+    rejected: &mut Vec<String>,
+) -> Result<Option<Saved>, String> {
     let mut queue: Vec<String> = Vec::new();
-    for url in challenged {
-        if !queue.contains(url) && queue.len() < BROWSER_URLS {
-            queue.push(url.clone());
+    // Linked URLs that are not a page's `citation_pdf_url`.
+    let mut unchecked: Vec<String> = Vec::new();
+    for c in challenged {
+        let url = c.url().to_owned();
+        if !queue.contains(&url) && queue.len() < BROWSER_URLS {
+            if matches!(c, Candidate::PageLink(_)) {
+                unchecked.push(url.clone());
+            }
+            queue.push(url);
         }
     }
-    // Links from loaded pages that are not their `citation_pdf_url`.
-    let mut unchecked: Vec<String> = Vec::new();
     println!("retrying in headless Chromium:");
     let browser = browser::Browser::launch()?;
     let mut i = 0;
@@ -3414,6 +3441,7 @@ fn try_in_browser(challenged: &[String], target: &Target) -> Result<Option<Saved
                     && let Err(why) = first_page_holds_title(target, &bytes)
                 {
                     println!("browser: {url}: linked PDF not taken: {why}");
+                    rejected.push(url);
                     continue;
                 }
                 return save_pdf(target, &bytes, &url).map(Some);
@@ -3459,7 +3487,7 @@ fn try_candidates(
     http: &Http,
     mut candidates: Vec<Candidate>,
     tried: &mut Vec<Candidate>,
-    challenged: &mut Vec<String>,
+    challenged: &mut Vec<Candidate>,
     rejected: &mut Vec<String>,
     mut page_doi: Option<&mut Option<Doi>>,
     target: &Target,
@@ -3526,7 +3554,7 @@ fn try_candidates(
         if found.is_empty() && pdf::is_js_challenge(reply.status, &reply.content_type, &reply.body)
         {
             println!("skip {url}: JavaScript check page (HTTP {})", reply.status);
-            challenged.push(url.to_owned());
+            challenged.push(candidate.clone());
         } else if matches!(candidate, Candidate::Landing(_)) && html {
             println!(
                 "skip {url}: landing page; {} PDF link(s) found on it",
@@ -4169,9 +4197,14 @@ mod tests {
                 "<html>An ordinary page without links</html>",
             ),
         ]);
+        // The challenged candidate is a page's link: the browser must still
+        // check its title, so it keeps its kind.
         let candidates: Vec<Candidate> = ["blocked.pdf", "limited.pdf", "challenge", "plain"]
             .iter()
-            .map(|p| Candidate::Landing(format!("{base}/{p}")))
+            .map(|p| match *p {
+                "challenge" => Candidate::PageLink(format!("{base}/{p}")),
+                _ => Candidate::Landing(format!("{base}/{p}")),
+            })
             .collect();
         let dir = std::env::temp_dir().join(format!("papers-browser-test-{}", std::process::id()));
         let config = config::Config::load(None, &dir).unwrap();
@@ -4198,7 +4231,10 @@ mod tests {
         server.join().unwrap();
         assert!(saved.unwrap().is_none());
         assert_eq!(tried.len(), 4);
-        assert_eq!(challenged, [format!("{base}/challenge")]);
+        assert_eq!(
+            challenged,
+            [Candidate::PageLink(format!("{base}/challenge"))]
+        );
         assert!(!dir.exists(), "nothing was saved");
     }
 
@@ -4719,6 +4755,51 @@ mod tests {
         records.into_iter().find(|r| r.key == "k").unwrap().texts
     }
 
+    /// The title check of a linked PDF: pdftotext's first page counts when
+    /// pdf-extract's lacks the title, and its staged copy is removed. An
+    /// unknown title takes any PDF.
+    #[test]
+    fn linked_pdf_title_check_falls_back_to_pdftotext() {
+        let dir = std::env::temp_dir().join(format!("papers-title-check-{}", std::process::id()));
+        let config = config::Config::load(None, &dir).unwrap();
+        let (titled, prints, absent) = (
+            pdf::tests::fake_program("titled"),
+            pdf::tests::fake_program("prints"),
+            pdf::tests::fake_program("absent"),
+        );
+        let target = |title: &str, pdftotext| Target {
+            config: &config,
+            dir: dir.clone(),
+            name: "check".into(),
+            title: title.into(),
+            extraction: registry::Extraction::Plain,
+            pdftotext,
+            docling: &[],
+        };
+        let staged =
+            std::env::temp_dir().join(format!("papers-{}-check.pdf.tmp", std::process::id()));
+        let other = tiny_pdf("Something Else Entirely");
+        let title = "On Readable Titles: A Study";
+        assert_eq!(
+            first_page_holds_title(&target(title, &titled), other.as_bytes()),
+            Ok(())
+        );
+        assert!(!staged.exists());
+        let err = first_page_holds_title(&target(title, &prints), other.as_bytes()).unwrap_err();
+        assert!(err.contains("and so does"), "{err}");
+        assert!(!staged.exists());
+        assert_eq!(
+            first_page_holds_title(&target(title, &prints), tiny_pdf(title).as_bytes()),
+            Ok(())
+        );
+        // Neither extractor reads this body, yet no title takes it.
+        assert_eq!(
+            first_page_holds_title(&target("", &absent), b"%PDF-"),
+            Ok(())
+        );
+        assert!(!dir.exists(), "nothing written to the text directory");
+    }
+
     /// A landing page's PDF link that is not its `citation_pdf_url`, such as
     /// a site-wide help sheet, is skipped when its first page lacks the
     /// entry's title; the page's next link, the paper, is registered.
@@ -4791,8 +4872,8 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// `read <URL> --key k --record --force` downloads the URL, not the
-    /// entry's own, and replaces the entry's text in one command.
+    /// `read <URL> --key k --record` downloads the URL, not the entry's own,
+    /// even without --force, and replaces the entry's text in one command.
     #[test]
     fn read_url_with_key_replaces_the_entrys_text() {
         use crate::http::response;
@@ -4818,7 +4899,8 @@ mod tests {
         );
         std::fs::write(root.join("sources/text/k.txt"), wrong).unwrap();
         let url = format!("{base}/files/paper.pdf");
-        assert_eq!(record_key(&root, Some(url.clone()), true), Ok(true));
+        // Without --force: the given URL is downloaded all the same.
+        assert_eq!(record_key(&root, Some(url.clone()), false), Ok(true));
         server.join().unwrap();
         let texts = texts_of_k(&root);
         assert_eq!(texts.len(), 1, "{texts:?}");
@@ -5505,7 +5587,7 @@ mod tests {
             docling: &[],
         };
         let mut retried = Vec::new();
-        let mut browse = |pages: &[String], _: &Target| {
+        let mut browse = |pages: &[Candidate], _: &Target, _: &mut Vec<String>| {
             retried.extend_from_slice(pages);
             Ok(Some(Saved::PdfOnly))
         };
@@ -5524,7 +5606,7 @@ mod tests {
         assert!(heads[1].starts_with("GET /files/paper.pdf "), "{heads:?}");
         assert!(heads[2].starts_with("GET /done "), "{heads:?}");
         assert!(matches!(saved, Ok(Some(Saved::PdfOnly))), "{heads:?}");
-        assert_eq!(retried, [format!("{base}/files/paper.pdf")]);
+        assert_eq!(retried, [Candidate::Pdf(format!("{base}/files/paper.pdf"))]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

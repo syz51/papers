@@ -31,7 +31,7 @@ text: <path>
 ### `read`
 
 - `read <ref>` for a registered paper prints the block first. `read --key <key>` prints the block of that entry first.
-- `read <ref> --key <key>` reads `<ref>` for that entry, instead of the entry's own ids. With `--record --force` it replaces the entry's text.
+- `read <ref> --key <key>` reads `<ref>` for that entry, instead of the entry's own ids. It always downloads `<ref>`, as `--force` does. With `--record` it replaces the entry's text.
 - A PDF linked from a landing page, other than its `citation_pdf_url`, is skipped with `skip <url>: linked PDF not taken: <reason>` when its first page lacks the title. When nothing else is found, `read` fails with an error that names those URLs.
 - Without `--key`, when a recorded text has its recorded sha256, `read` prints `already have <path> (sha256 matches); not downloading (--force to fetch again)` and then the text's manifest. It makes no request and writes no file. The exit code is 0.
 - `--force` downloads. `--extraction <mode>` downloads or extracts again when the recorded text has another mode; a text with no recorded mode counts as plain.

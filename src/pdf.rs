@@ -62,12 +62,22 @@ pub fn extract_text(bytes: &[u8]) -> Result<String, String> {
 }
 
 /// The text of a PDF's first page, as [`extract_text`] gives a whole PDF's.
+/// Only that page is extracted.
 pub fn first_page_text(bytes: &[u8]) -> Result<String, String> {
-    let pages = guarded(|| pdf_extract::extract_text_from_mem_by_pages(bytes))?;
-    match pages.into_iter().next() {
-        Some(text) if !text.trim().is_empty() => Ok(text),
-        _ => Err("the PDF's first page has no extractable text".to_owned()),
+    let text = guarded(|| -> Result<String, pdf_extract::OutputError> {
+        let mut doc = pdf_extract::Document::load_mem(bytes)?;
+        // As pdf-extract does for a whole PDF: an empty user password.
+        if doc.is_encrypted() {
+            doc.decrypt("")?;
+        }
+        let mut text = String::new();
+        pdf_extract::output_doc_page(&doc, &mut pdf_extract::PlainTextOutput::new(&mut text), 1)?;
+        Ok(text)
+    })?;
+    if text.trim().is_empty() {
+        return Err("the PDF's first page has no extractable text".to_owned());
     }
+    Ok(text)
 }
 
 /// Runs a pdf-extract call, reporting a parser panic as an error.
