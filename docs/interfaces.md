@@ -252,7 +252,7 @@ A table is a GitHub-style pipe table outside fenced code (```` ``` ```` or `~~~`
 | `text` | `{path, sha256}`: the registry text the card was made from, as recorded in `texts`, and its sha256 then. |
 | `model` | The model id, such as `claude-haiku-5-5`. |
 | `created` | UTC RFC 3339 time of the call. |
-| `items` | `[{field, value, quote, lines}]`. `field` is `task`, `dataset`, `method`, `metric`, `result` or `limit`. `value` is the model's statement. `quote` is verbatim text of the paper, at least 8 words (a CJK character counts as a word). `lines` is `[first, last]`, 1-based and inclusive, in the raw text. |
+| `items` | `[{field, value, quote, lines}]`. `field` is `task`, `dataset`, `method`, `metric`, `result` or `limit`. `value` is the model's statement. `quote` is verbatim text of the paper, at least 8 words (a Chinese or Japanese character counts as a word; punctuation is none). `lines` is `[first, last]`, 1-based and inclusive, in the raw text. |
 | `prompt_sha256` | The sha256 of the card prompt. |
 | `checker` | The quote checker, such as `claimcheck 0.10.0`. |
 | `usage` | `{input_tokens, output_tokens, cost_usd}`. Input tokens include cached ones. `cost_usd` is absent when the reply gives none. |

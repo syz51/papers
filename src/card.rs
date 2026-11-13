@@ -12,8 +12,8 @@
 //!
 //! An item that fails is dropped and counted. A card that keeps less than
 //! [`MIN_KEPT_PERCENT`] of its items is not stored. When quotes were not found,
-//! the text is a suspected extraction fault; when most drops are numbers, the
-//! reply is at fault ([`refusal`]).
+//! the text is a suspected extraction fault; when most drops are numbers, or
+//! the reply has no items, the reply is at fault ([`refusal`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -57,16 +57,30 @@ const TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const MAX_REPLY: u64 = 16 << 20;
 
 /// Why a card under [`MIN_KEPT_PERCENT`] is not stored, by its main cause.
-/// Quotes not found in the text, when they are at least half of the drops,
-/// point at the extraction; the other drops break the prompt's rules and
-/// point at the reply.
-pub fn refusal(dropped: &Dropped, path: &str, key: &str) -> String {
+/// A reply without items is at fault. Quotes not found in the text, when they
+/// are at least half of the drops, point at the extraction; the other drops
+/// break the prompt's rules and point at the reply. `docling`: the card was
+/// made from the entry's Docling text, so another Docling read is no cure.
+pub fn refusal(dropped: &Dropped, path: &str, key: &str, docling: bool) -> String {
+    let again = format!(
+        "papers card --key {key}{} --force",
+        if docling { " --docling" } else { "" }
+    );
+    if dropped.total() == 0 {
+        return format!(
+            "not stored: the reply has no items, a fault of the reply, not of {path} (try {again})"
+        );
+    }
     let head = format!("not stored: the card keeps under {MIN_KEPT_PERCENT}% of its items");
     let reply = dropped.number + dropped.short + dropped.field;
     if dropped.not_found < reply {
         format!(
-            "{head}; most dropped items break the prompt's rules (number not in quote {}, quote under {MIN_WORDS} words {}, unknown field {}), a fault of the reply, not of {path} (try papers card --key {key} --force)",
+            "{head}; most dropped items break the prompt's rules (number not in quote {}, quote under {MIN_WORDS} words {}, unknown field {}), a fault of the reply, not of {path} (try {again})",
             dropped.number, dropped.short, dropped.field
+        )
+    } else if docling {
+        format!(
+            "{head}; suspected text-extraction fault in {path}, which is already the Docling text: check that its PDF is this paper (papers read <URL> --key {key} --extraction docling --record reads one you have checked)"
         )
     } else {
         format!(
@@ -416,14 +430,20 @@ fn name_phrase(chars: &[char], t: &numbers::NumTok) -> Option<String> {
     }
 }
 
-/// The words of `s`: each CJK character is a word, as word processors count
-/// them, and the rest is split at white space and CJK punctuation.
+/// The words of `s`: each Chinese or Japanese character (Han, kana) is a word,
+/// as word processors count them, and the rest is split at white space and
+/// CJK punctuation. Korean spaces its words, so Hangul is split like Latin. A
+/// piece without a letter or digit, such as `，` or `(`, is no word.
 fn words(s: &str) -> usize {
-    let cjk = |c: char| matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF);
-    // CJK punctuation (`、`, `。`, `「`) separates words and is none itself.
-    let gap = |c: char| cjk(c) || matches!(c as u32, 0x3000..=0x303F);
+    let cjk = |c: char| matches!(c as u32, 0x3040..=0x309F | 0x30A1..=0x30FA | 0x30FC..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF);
+    // CJK punctuation (`、`, `。`, `「`, `・`) separates words and is none itself.
+    let gap = |c: char| cjk(c) || matches!(c as u32, 0x3000..=0x303F | 0x30A0 | 0x30FB);
     let other: String = s.chars().map(|c| if gap(c) { ' ' } else { c }).collect();
-    s.chars().filter(|c| cjk(*c)).count() + other.split_whitespace().count()
+    s.chars().filter(|c| cjk(*c)).count()
+        + other
+            .split_whitespace()
+            .filter(|w| w.chars().any(char::is_alphanumeric))
+            .count()
 }
 
 /// Checks each written item against `text` (see the module docs).
@@ -721,7 +741,7 @@ pub fn run(
     }
     if !checked.usable() {
         println!("{summary}");
-        println!("{}", refusal(&checked.dropped, &text.path, key));
+        println!("{}", refusal(&checked.dropped, &text.path, key, docling));
         return Ok(false);
     }
     if reply.is_some() {
@@ -929,6 +949,15 @@ mod tests {
         assert_eq!(words("書類管理番号は"), 7);
         assert_eq!(words("先頭 8 文字です。"), 7);
         assert_eq!(words("eight plain words in this short quote here"), 8);
+        // Full-width and ASCII punctuation, and the katakana middle dot, are
+        // no words.
+        assert_eq!(words("模型，数据，方法"), 6);
+        assert_eq!(words("模型(数据)：方法；"), 6);
+        assert_eq!(words("データ・モデル"), 6);
+        assert_eq!(words("a — b , c"), 3);
+        // Korean spaces its words: three words, not eleven syllables.
+        assert_eq!(words("연도 혼동을 완화하는 방법"), 4);
+        assert_eq!(words("검색 증강 생성"), 3);
     }
 
     #[test]
@@ -938,19 +967,35 @@ mod tests {
             not_found: 1,
             ..Dropped::default()
         };
-        let text = refusal(&numbers, "sources/text/4.txt", "4");
+        let text = refusal(&numbers, "sources/text/4.txt", "4", false);
         assert!(text.contains("number not in quote 4"), "{text}");
+        assert!(text.contains("(try papers card --key 4 --force)"), "{text}");
         assert!(!text.contains("extraction fault"), "{text}");
+        let text = refusal(&numbers, "sources/text/4.docling.md", "4", true);
+        assert!(
+            text.contains("(try papers card --key 4 --docling --force)"),
+            "{text}"
+        );
         let quotes = Dropped {
             number: 2,
             not_found: 2,
             ..Dropped::default()
         };
-        let text = refusal(&quotes, "sources/text/4.txt", "4");
+        let text = refusal(&quotes, "sources/text/4.txt", "4", false);
         assert!(
             text.contains("suspected text-extraction fault in sources/text/4.txt"),
             "{text}"
         );
+        assert!(text.contains("--extraction docling --record"), "{text}");
+        // From the Docling text, another Docling read is no cure.
+        let text = refusal(&quotes, "sources/text/4.docling.md", "4", true);
+        assert!(text.contains("already the Docling text"), "{text}");
+        assert!(!text.contains("then papers card"), "{text}");
+        // A reply without items is the reply's fault.
+        let text = refusal(&Dropped::default(), "sources/text/4.txt", "4", false);
+        assert!(text.contains("the reply has no items"), "{text}");
+        assert!(!text.contains("extraction fault"), "{text}");
+        assert!(!text.contains("under 80%"), "{text}");
     }
 
     #[test]
