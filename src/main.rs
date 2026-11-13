@@ -280,8 +280,9 @@ enum Command {
     /// headless Claude call on its local text, then a check of every item.
     /// An item is kept only when its quote, of at least 8 words, is found in
     /// the text and every number of its value is in its quote. A card that
-    /// keeps under 80% of its items is not stored (a suspected text-extraction
-    /// fault). Off unless `[papers] cards = true`.
+    /// keeps under 80% of its items is not stored; the message names the main
+    /// cause, the reply or a suspected text-extraction fault. Off unless
+    /// `[papers] cards = true`.
     Card {
         /// The registry key.
         #[arg(long, required_unless_present = "preflight")]
