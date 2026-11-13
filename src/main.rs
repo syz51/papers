@@ -920,8 +920,32 @@ fn record_pdfs(
             }
             text.set_pdf_sha256(pdf_sha256.clone());
             if !dry_run {
-                let line = serde_json::to_string(&text).expect("texts serialize");
-                std::fs::write(&manifest, format!("{line}\n")).map_err(|e| at(&manifest, e))?;
+                let line = format!(
+                    "{}\n",
+                    serde_json::to_string(&text).expect("texts serialize")
+                );
+                let written = match was {
+                    Some(_) => std::fs::write(&manifest, line),
+                    // `read` writes its manifest outside the registry's lock: one
+                    // written since the check above wins.
+                    None => std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&manifest)
+                        .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes())),
+                };
+                match written {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        println!(
+                            "not reproduced: {key} ({}): its manifest changed during the run",
+                            text.path
+                        );
+                        out.not_reproduced.push(key);
+                        continue;
+                    }
+                    Err(e) => return Err(at(&manifest, e)),
+                }
             }
             let mut in_registry = false;
             for t in records
@@ -5328,9 +5352,11 @@ mod tests {
         let texts = [
             old_text(&root, "a", &fake("a", false), None),
             old_text(&root, "b", &fake("b", true), Some(Layout)),
-            // A plain text recorded as layout, and a layout text as plain.
+            // A plain text recorded as layout, and a layout text with no mode.
             old_text(&root, "c", &fake("c", false), Some(Layout)),
             old_text(&root, "d", &fake("d", true), None),
+            // A layout text recorded as plain: not tried in layout mode.
+            old_text(&root, "f", &fake("f", true), Some(Plain)),
         ];
         let mut unknown = old_text(&root, "e", &fake("e", false), None);
         unknown.extra.insert("extraction".into(), "ocr".into());
@@ -5343,14 +5369,14 @@ mod tests {
         let absent = pdf::tests::fake_program("absent");
         let found = record_pdfs(&config, &dir, false, &absent).unwrap();
         assert_eq!(found.recorded, [""; 0]);
-        assert_eq!(found.not_reproduced, ["a", "b", "c", "d", "e"]);
+        assert_eq!(found.not_reproduced, ["a", "b", "c", "d", "e", "f"]);
         assert_eq!(manifest("a"), texts[0]);
         assert_eq!(manifest("d"), texts[3]);
 
         let prints = pdf::tests::fake_program("prints");
         let found = record_pdfs(&config, &dir, false, &prints).unwrap();
         assert_eq!(found.recorded, ["a", "b", "d"]);
-        assert_eq!(found.not_reproduced, ["c", "e"]);
+        assert_eq!(found.not_reproduced, ["c", "e", "f"]);
         let pdf_sha256 = http::sha256_hex(pdf.as_bytes());
         for (name, i, mode) in [("a", 0, Plain), ("b", 1, Layout), ("d", 3, Layout)] {
             let mut recorded = texts[i].clone();
@@ -5360,6 +5386,7 @@ mod tests {
         }
         assert_eq!(manifest("c"), texts[2]);
         assert_eq!(manifest("e"), unknown);
+        assert_eq!(manifest("f"), texts[4]);
         assert!(!config.registry.exists(), "no registry was created");
         std::fs::remove_dir_all(&root).unwrap();
     }
