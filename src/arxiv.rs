@@ -607,14 +607,28 @@ fn is_raw(query: &str) -> bool {
         })
 }
 
-/// The stderr line for a search with no results whose query is two or more plain
-/// words: `build_query` AND-ed them, so each word had to match.
-pub fn and_hint(words: &str, total: u64) -> Option<String> {
-    (total == 0 && !is_raw(words) && words.split_whitespace().nth(1).is_some()).then(|| {
+/// The stderr line for an arXiv search that finds nothing, when its query is two
+/// or more plain words: `build_query` AND-ed them, so each word had to match. The
+/// retries leave out `--source openalex` while `--category` is set, which only arXiv takes.
+pub fn and_hint(words: &str, categories: &[String], since: Option<Date>) -> Option<String> {
+    if is_raw(words) || words.split_whitespace().nth(1).is_none() {
+        return None;
+    }
+    let mut retries = vec!["fewer words", "ti:/abs: field syntax"];
+    if since.is_some() {
+        retries.push("an earlier --since");
+    }
+    retries.push(if categories.is_empty() {
+        "--source openalex"
+    } else {
+        "no --category"
+    });
+    let last = retries.pop().unwrap_or_default();
+    Some(format!(
         "papers: arXiv matched none: plain words are AND-ed, so every word must match; \
-         retry with fewer words, ti:/abs: field syntax, or --source openalex"
-            .to_owned()
-    })
+         retry with {}, or {last}",
+        retries.join(", ")
+    ))
 }
 
 /// Builds the `search_query` value: raw syntax passes through, plain words become
@@ -809,35 +823,24 @@ mod tests {
     }
 
     #[test]
-    fn empty_plain_word_search_names_the_and_rule() {
-        let empty = crate::http::response(
-            "200 OK",
-            &["Content-Type: application/atom+xml"],
-            include_str!("../tests/fixtures/arxiv-empty.xml"),
+    fn and_hint_names_the_retries_that_fit_the_filters() {
+        let plain = and_hint("funding rate", &[], None).unwrap();
+        assert_eq!(
+            plain,
+            "papers: arXiv matched none: plain words are AND-ed, so every word must match; \
+             retry with fewer words, ti:/abs: field syntax, or --source openalex"
         );
-        let (base, server) = crate::http::serve(vec![empty]);
-        let http = Http::new();
-        let endpoint = format!("{base}/api/query");
-        let words = "funding rate perpetual";
-        let query = build_query(words, &[], None);
-        let (total, papers) = Client::at(&http, &endpoint)
-            .search(&query, Sort::Submitted, 20)
-            .unwrap();
-        assert_eq!(server.join().unwrap().len(), 1);
-        assert_eq!((total, papers.len()), (0, 0));
-        let hint = and_hint(words, total).unwrap();
-        for part in ["AND-ed", "fewer words", "ti:/abs:", "--source openalex"] {
-            assert!(hint.contains(part), "{hint}");
-        }
-    }
-
-    #[test]
-    fn and_hint_needs_no_results_and_two_plain_words() {
-        assert!(and_hint("funding rate", 0).is_some());
-        assert_eq!(and_hint("funding rate", 3), None);
-        assert_eq!(and_hint("funding", 0), None);
+        let since = Date::constant(2026, 11, 1);
+        let filtered = and_hint("funding rate", &["q-fin.TR".to_owned()], Some(since)).unwrap();
+        assert!(
+            filtered.ends_with(
+                "retry with fewer words, ti:/abs: field syntax, an earlier --since, or no --category"
+            ),
+            "{filtered}"
+        );
+        assert_eq!(and_hint("funding", &[], None), None);
         for raw in ["ti:funding rate", "funding OR rate", "abs:basis"] {
-            assert_eq!(and_hint(raw, 0), None, "{raw}");
+            assert_eq!(and_hint(raw, &[], None), None, "{raw}");
         }
     }
 
