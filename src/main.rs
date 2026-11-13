@@ -2337,10 +2337,14 @@ fn search_source(
         },
     );
     let since_year = since.map(|d| i64::from(d.year()));
+    let mut fallback = None;
     let (total, hits) = match source {
         Source::Openalex => sources::openalex(http, query, since_text.as_deref(), max)?,
         Source::Dblp => {
-            let (total, mut hits) = sources::dblp(http, query, max)?;
+            let ((total, mut hits), via) = sources::dblp(http, query, max)?;
+            if via == sources::DblpVia::Sparql {
+                fallback = Some(sources::DblpVia::SPARQL_NOTE);
+            }
             if let Some(y) = since_year {
                 hits.retain(|h| h.year.is_some_and(|hy| hy >= y));
             }
@@ -2356,6 +2360,9 @@ fn search_source(
         source.name(),
         hits.len()
     );
+    if let Some(note) = fallback {
+        eprintln!("papers: {note}");
+    }
     let index = seen::Index::load(config)?;
     let found: Vec<searchlog::Found> = hits.iter().map(sources::Hit::found).collect();
     for (hit, f) in hits.iter().zip(&found) {
@@ -2363,7 +2370,7 @@ fn search_source(
     }
     if out.log {
         // Date filters other than OpenAlex's and CiNii's are applied to the year here.
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "max": max,
             "since": since_text,
             "since_applied": match source {
@@ -2373,6 +2380,9 @@ fn search_source(
             },
             "total": total,
         });
+        if let Some(note) = fallback {
+            params["fallback"] = serde_json::json!(note);
+        }
         let entry = searchlog::Entry::new(source.name(), query, params, &found, &index);
         searchlog::append(&config.search_log, &[entry])?;
     }

@@ -17,6 +17,9 @@ const S2_HOST: &str = "api.semanticscholar.org";
 const S2_SEARCH: &str = "https://api.semanticscholar.org/graph/v1/paper/search";
 pub const S2_FIELDS: &str = "title,year,authors,venue,externalIds,url,publicationDate,abstract";
 const DBLP_SEARCH: &str = "https://dblp.org/search/publ/api";
+const DBLP_SPARQL: &str = "https://sparql.dblp.org/sparql";
+const DBLP_SPARQL_HOST: &str = "sparql.dblp.org";
+const DBLP_REC: &str = "https://dblp.org/rec/";
 const CINII_SEARCH: &str = "https://cir.nii.ac.jp/opensearch/articles";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -208,23 +211,171 @@ pub fn parse_dblp(json: &str) -> Result<Page, String> {
     Ok((total, out))
 }
 
-pub fn dblp(http: &Http, query: &str, max: usize) -> Result<Page, String> {
-    let url = format!(
-        "{DBLP_SEARCH}?q={}&format=json&h={max}",
-        encode(query.trim(), b"")
-    );
+/// Which DBLP service answered a search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DblpVia {
+    /// The search API (`dblp.org/search/publ/api`), ranked by relevance.
+    Api,
+    /// The SPARQL endpoint, after the search API answered with a bot check.
+    Sparql,
+}
+
+impl DblpVia {
+    /// What the search log and the result line say about a fallback search.
+    pub const SPARQL_NOTE: &str = "the dblp.org search API answered with a bot check, \
+         so the search ran on sparql.dblp.org: every word must be in the title, \
+         newest first, no author lists or total";
+}
+
+pub fn dblp(http: &Http, query: &str, max: usize) -> Result<(Page, DblpVia), String> {
+    dblp_at(http, DBLP_SEARCH, DBLP_SPARQL, query, max)
+}
+
+/// The DBLP search with the services at `api` and `sparql`: tests pass a local server.
+fn dblp_at(
+    http: &Http,
+    api: &str,
+    sparql: &str,
+    query: &str,
+    max: usize,
+) -> Result<(Page, DblpVia), String> {
+    let url = format!("{api}?q={}&format=json&h={max}", encode(query.trim(), b""));
     let reply = http.get(&Get {
         cache: false,
         ..Get::api(&url, &[200, 202])
     })?;
-    if reply.status == 202 || reply.content_type.contains("html") {
-        return Err(format!(
-            "dblp.org answered with an HTML page (HTTP {}), likely a bot-check challenge; \
-             papers does not solve challenges, so try again later or use another --source",
-            reply.status
-        ));
+    if reply.status != 202 && !reply.content_type.contains("html") {
+        return Ok((parse_dblp(&reply.text())?, DblpVia::Api));
     }
-    parse_dblp(&reply.text())
+    let challenge = format!(
+        "dblp.org answered with an HTML page (HTTP {}), likely a bot-check challenge",
+        reply.status
+    );
+    dblp_sparql(http, sparql, query, max)
+        .map(|page| (page, DblpVia::Sparql))
+        .map_err(|e| {
+            format!(
+                "{challenge}; papers does not solve challenges. The fallback title query to \
+                 {DBLP_SPARQL_HOST} failed too: {e}. Try again later or use another --source"
+            )
+        })
+}
+
+/// `text` as the body of a double-quoted SPARQL string literal.
+fn sparql_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// A title search over DBLP's RDF: every word of `query`, lowercased, must be
+/// a substring of the lowercased title. Newest first, at most `max` rows. Author
+/// lists are left out: ordered authors need the signature join, which made the
+/// endpoint time out on a test query.
+pub fn dblp_sparql_query(query: &str, max: usize) -> String {
+    let filter = query
+        .split_whitespace()
+        .map(|w| format!("CONTAINS(?lt, \"{}\")", sparql_literal(&w.to_lowercase())))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    format!(
+        "PREFIX dblp: <https://dblp.org/rdf/schema#>\n\
+         SELECT ?p (SAMPLE(?t0) AS ?t) (SAMPLE(?y0) AS ?y) (SAMPLE(?v0) AS ?v) (SAMPLE(?d0) AS ?d) WHERE {{\n\
+         \x20 ?p dblp:title ?t0 . BIND(LCASE(STR(?t0)) AS ?lt)\n\
+         \x20 FILTER({filter})\n\
+         \x20 OPTIONAL {{ ?p dblp:yearOfPublication ?y0 }}\n\
+         \x20 OPTIONAL {{ ?p dblp:publishedIn ?v0 }}\n\
+         \x20 OPTIONAL {{ ?p dblp:doi ?d0 }}\n\
+         }} GROUP BY ?p ORDER BY DESC(?y) ?p LIMIT {max}\n"
+    )
+}
+
+/// One SPARQL request: no retry, so a bot check or overload is not pressed.
+fn dblp_sparql(http: &Http, endpoint: &str, query: &str, max: usize) -> Result<Page, String> {
+    let url = format!(
+        "{endpoint}?query={}",
+        encode(&dblp_sparql_query(query, max), b"")
+    );
+    let host = crate::http::host(&url)?;
+    let headers = [("accept", "application/sparql-results+json".to_owned())];
+    let reply = http.get(&Get {
+        attempts: 1,
+        retry_429: false,
+        headers: &headers,
+        headers_host: &host,
+        cache: false,
+        // QLever reports a query timeout as HTTP 429 with a JSON `exception`.
+        ..Get::api(&url, &[200, 400, 429])
+    });
+    // The URL holds the whole query; errors name the endpoint instead.
+    let reply = reply.map_err(|e| e.replace(&url, endpoint))?;
+    let text = reply.text();
+    if reply.status != 200 {
+        let reason = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v.get("exception")?.as_str().map(squash))
+            .unwrap_or_else(|| "no reason given".to_owned());
+        return Err(format!("HTTP {} from {host}: {reason}", reply.status));
+    }
+    parse_dblp_sparql(&text)
+}
+
+#[derive(Deserialize)]
+struct SparqlReply {
+    results: SparqlResults,
+}
+
+#[derive(Deserialize)]
+struct SparqlResults {
+    bindings: Vec<std::collections::HashMap<String, SparqlTerm>>,
+}
+
+#[derive(Deserialize)]
+struct SparqlTerm {
+    value: String,
+}
+
+/// Hits from a `sparql-results+json` reply to [`dblp_sparql_query`]. The ids
+/// are the `dblp:<key>` of the API path; SPARQL gives no total.
+pub fn parse_dblp_sparql(json: &str) -> Result<Page, String> {
+    let reply: SparqlReply =
+        serde_json::from_str(json).map_err(|e| format!("invalid DBLP SPARQL JSON: {e}"))?;
+    let hits = reply
+        .results
+        .bindings
+        .into_iter()
+        .map(|row| {
+            let get = |k: &str| row.get(k).map(|t| t.value.as_str());
+            let record = get("p").ok_or("a DBLP SPARQL row has no record")?;
+            let key = record
+                .strip_prefix(DBLP_REC)
+                .ok_or_else(|| format!("DBLP SPARQL record {record:?} is not under {DBLP_REC}"))?;
+            let doi = get("d").and_then(doi_text);
+            Ok(Hit {
+                id: format!("dblp:{key}"),
+                title: squash(get("t").unwrap_or_default().trim_end_matches('.')),
+                authors: Vec::new(),
+                year: get("y").and_then(|y| y.parse().ok()),
+                venue: get("v").map(squash).filter(|v| !v.is_empty()),
+                arxiv: doi.as_deref().and_then(arxiv_from_doi),
+                url: Some(
+                    doi.as_ref()
+                        .map_or_else(|| record.to_owned(), |d| format!("https://doi.org/{d}")),
+                ),
+                doi,
+                abstract_text: None,
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    Ok((None, hits))
 }
 
 // --- Semantic Scholar ------------------------------------------------------
@@ -469,6 +620,182 @@ mod tests {
         assert_eq!(hits[1].venue.as_deref(), Some("CoRR, abs/2601.00001"));
         assert_eq!(hits[1].arxiv.as_deref(), Some("2601.00001"));
         assert!(parse_dblp("<html>").is_err());
+    }
+
+    #[test]
+    fn dblp_sparql_query_matches_every_word_and_escapes_input() {
+        let q = dblp_sparql_query("Footnote  \"Financial\\ x\")}", 7);
+        assert!(
+            q.contains(
+                r#"FILTER(CONTAINS(?lt, "footnote") && CONTAINS(?lt, "\"financial\\") && CONTAINS(?lt, "x\")}"))"#
+            ),
+            "{q}"
+        );
+        assert!(q.contains("BIND(LCASE(STR(?t0)) AS ?lt)"), "{q}");
+        assert!(q.ends_with("LIMIT 7\n"), "{q}");
+        // Every quote in the query is either a delimiter or escaped.
+        let filter = q
+            .split("FILTER(")
+            .nth(1)
+            .unwrap()
+            .split('\n')
+            .next()
+            .unwrap();
+        let bare = filter.replace("\\\\", "").replace("\\\"", "");
+        assert_eq!(bare.matches('"').count(), 6, "{filter}");
+        assert_eq!(sparql_literal("a\nb\rc"), "a\\nb\\rc");
+    }
+
+    #[test]
+    fn parses_dblp_sparql_rows_with_missing_fields() {
+        let json = r#"{"head":{"vars":["p","t","y","v","d"]},"results":{"bindings":[
+          {"p":{"type":"uri","value":"https://dblp.org/rec/journals/ngc/PanLZ25"},
+           "t":{"type":"literal","value":"Synthetic  Footnotes."},
+           "y":{"datatype":"http://www.w3.org/2001/XMLSchema#gYear","type":"literal","value":"2025"},
+           "v":{"type":"literal","value":"New Gener. Comput."},
+           "d":{"type":"uri","value":"https://doi.org/10.1007/S00354-025-00301-9"}},
+          {"p":{"type":"uri","value":"https://dblp.org/rec/journals/corr/abs-2601-00001"},
+           "t":{"type":"literal","value":"Gadgets"},
+           "d":{"type":"uri","value":"https://doi.org/10.48550/arXiv.2601.00001"}},
+          {"p":{"type":"uri","value":"https://dblp.org/rec/conf/x/Y26"},"t":{"type":"literal","value":"Bare"}}]}}"#;
+        let (total, hits) = parse_dblp_sparql(json).unwrap();
+        assert_eq!(total, None);
+        assert_eq!(hits[0].id, "dblp:journals/ngc/PanLZ25");
+        assert_eq!(hits[0].title, "Synthetic Footnotes");
+        assert_eq!(hits[0].year, Some(2025));
+        assert_eq!(hits[0].venue.as_deref(), Some("New Gener. Comput."));
+        assert_eq!(hits[0].doi.as_deref(), Some("10.1007/s00354-025-00301-9"));
+        assert_eq!(
+            hits[0].url.as_deref(),
+            Some("https://doi.org/10.1007/s00354-025-00301-9")
+        );
+        assert_eq!(hits[1].arxiv.as_deref(), Some("2601.00001"));
+        assert_eq!((hits[1].year, hits[1].venue.as_deref()), (None, None));
+        let bare = &hits[2];
+        assert_eq!(
+            (bare.year, bare.venue.as_deref(), bare.doi.as_deref()),
+            (None, None, None)
+        );
+        assert_eq!(bare.url.as_deref(), Some("https://dblp.org/rec/conf/x/Y26"));
+        assert!(bare.authors.is_empty());
+        assert!(parse_dblp_sparql("<html>").is_err());
+        let foreign = r#"{"results":{"bindings":[{"p":{"value":"https://example.org/x"}}]}}"#;
+        assert!(parse_dblp_sparql(foreign).is_err());
+    }
+
+    #[test]
+    fn dblp_falls_back_to_one_sparql_query_after_a_bot_check() {
+        use crate::http::{response, serve};
+        let challenge = response(
+            "202 Accepted",
+            &["Content-Type: text/html"],
+            "<html>bot</html>",
+        );
+        let rows = r#"{"head":{"vars":["p","t"]},"results":{"bindings":[
+          {"p":{"value":"https://dblp.org/rec/conf/synth/LeeC25"},"t":{"value":"Synthetic Widgets."},
+           "y":{"value":"2025"}}]}}"#;
+        let answer = response(
+            "200 OK",
+            &["Content-Type: application/sparql-results+json"],
+            rows,
+        );
+        let (base, server) = serve(vec![challenge, answer]);
+        let ((total, hits), via) = dblp_at(
+            &Http::new(),
+            &format!("{base}/search/publ/api"),
+            &format!("{base}/sparql"),
+            "synthetic widgets",
+            5,
+        )
+        .unwrap();
+        let heads = server.join().unwrap();
+        assert_eq!(via, DblpVia::Sparql);
+        assert_eq!(total, None);
+        assert_eq!(hits[0].id, "dblp:conf/synth/LeeC25");
+        assert_eq!(
+            (hits[0].title.as_str(), hits[0].year),
+            ("Synthetic Widgets", Some(2025))
+        );
+        assert_eq!(heads.len(), 2);
+        assert!(
+            heads[0].starts_with("GET /search/publ/api?q=synthetic%20widgets"),
+            "{}",
+            heads[0]
+        );
+        let sparql = heads[1].to_lowercase();
+        assert!(sparql.starts_with("get /sparql?query=prefix"), "{sparql}");
+        assert!(
+            sparql.contains("contains%28%3flt%2c%20%22widgets%22%29"),
+            "{sparql}"
+        );
+        assert!(
+            sparql.contains("accept: application/sparql-results+json"),
+            "{sparql}"
+        );
+        assert!(
+            sparql.contains(&format!("user-agent: {}", crate::http::USER_AGENT)),
+            "{sparql}"
+        );
+    }
+
+    #[test]
+    fn dblp_sparql_failure_names_both_attempts_and_is_not_retried() {
+        use crate::http::{response, serve};
+        let challenge = response(
+            "200 OK",
+            &["Content-Type: text/html; charset=utf-8"],
+            "<html/>",
+        );
+        let timeout = response(
+            "429 Too Many Requests",
+            &["Content-Type: application/json"],
+            r#"{"exception":"Operation timed out.","query":"PREFIX dblp: …"}"#,
+        );
+        let (base, server) = serve(vec![challenge, timeout]);
+        let err = dblp_at(
+            &Http::new(),
+            &format!("{base}/search/publ/api"),
+            &format!("{base}/sparql"),
+            "widgets",
+            5,
+        )
+        .unwrap_err();
+        assert_eq!(server.join().unwrap().len(), 2);
+        assert!(
+            err.contains("HTML page (HTTP 200), likely a bot-check"),
+            "{err}"
+        );
+        assert!(
+            err.contains("fallback title query to sparql.dblp.org failed too"),
+            "{err}"
+        );
+        assert!(
+            err.contains("HTTP 429 from 127.0.0.1: Operation timed out."),
+            "{err}"
+        );
+        assert!(!err.contains("PREFIX"), "{err}");
+    }
+
+    #[test]
+    fn dblp_sparql_transport_errors_name_the_endpoint_not_the_query() {
+        use crate::http::{response, serve};
+        let challenge = response("202 Accepted", &["Content-Type: text/html"], "<html/>");
+        let busy = response("503 Service Unavailable", &[], "");
+        let (base, server) = serve(vec![challenge, busy]);
+        let err = dblp_at(
+            &Http::new(),
+            &format!("{base}/search/publ/api"),
+            &format!("{base}/sparql"),
+            "widgets",
+            5,
+        )
+        .unwrap_err();
+        assert_eq!(server.join().unwrap().len(), 2);
+        assert!(
+            err.contains(&format!("HTTP 503 from {base}/sparql. Try again")),
+            "{err}"
+        );
+        assert!(!err.contains("query=") && !err.contains("gave up"), "{err}");
     }
 
     #[test]
