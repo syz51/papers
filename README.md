@@ -283,16 +283,23 @@ Write order: Docling writes to `<name>.docling.md.tmp`. `read` then records the 
 
 ### `registry record-pdfs`
 
-`papers registry record-pdfs [--dir <dir>] [--dry-run] [--registry <path>]` records `pdf_sha256` for texts that `read` saved before it recorded that field. After it, `papers read --extraction <mode>` extracts such a text again from the saved PDF and makes no download. The command makes no network request.
+`papers registry record-pdfs [--dir <dir>] [--dry-run] [--registry <path>]` records `pdf_sha256` for texts that `read` saved before it recorded that field, and for texts attached by hand beside their PDF. After it, `papers read --extraction <mode>` extracts such a text again from the saved PDF and makes no download. The command makes no network request.
 
-It looks at each `<name>.json` manifest in `--dir`, which defaults to the directory that holds most of the registry's texts, else `<root>/sources/text`, that names `<name>.txt`, has no `pdf_sha256` and has `<name>.pdf` beside it. It extracts that PDF in the text's recorded mode, or in plain mode when none is recorded, with the extractors `read` uses:
+It looks at each `<name>.json` manifest in `--dir`, which defaults to the directory that holds most of the registry's texts, else `<root>/sources/text`, that names `<name>.txt`, has no `pdf_sha256` and has `<name>.pdf` beside it.
+
+It also looks at each `<name>.txt` that has `<name>.pdf` beside it and no `<name>.json`, such as a text attached by hand. Its manifest is the registry text that lists its path with the file's sha256: path, sha256, origin and recorded fields. When no registry entry lists the path, or none lists it with the file's sha256, it prints a `skipped:` line and writes no manifest.
+
+It extracts the PDF in the text's recorded mode with the extractors `read` uses:
 
 - Plain: `pdf-extract` first, then `pdftotext` if it is on `PATH`. `read` kept one or the other, depending on the title it knew then, so the text may have come from either.
 - Layout: `pdftotext -layout` only.
+- No recorded mode: plain, then layout.
 
 It records the PDF's sha256 only when an extractor gives a text with the recorded text sha256:
 
 - It writes `pdf_sha256` to the manifest and to each registry text with the same path and sha256, under the registry's lock. It prints a `recorded:` line that names the extractor.
+- A text with no recorded mode also gets the mode that reproduced it, `plain` or `layout`, in the manifest and in each such registry text without a mode.
+- A text without a manifest gets a new `<name>.json`. A `read` that writes the manifest during the run wins: the text is listed as not reproduced.
 - Any other text is left unchanged. It prints a `not reproduced:` line with the reason, such as `pdftotext is not on PATH`. `read` downloads again for a mode change of such a text.
 - A text is not reproduced when another version of an extractor wrote it and that version's output differs. Installing Poppler can reproduce more plain and layout texts; run the command again then.
 
