@@ -7,14 +7,11 @@ pub fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Removes accents (NFKD, then drops combining marks other than the kana
-/// voicing marks) and transliterates the common Latin letters that do not
-/// decompose. Non-ASCII output is recomposed (NFC), so kana and Hangul
-/// syllables stay whole.
+/// Removes accents (NFKD, then drops combining marks) and transliterates the
+/// common Latin letters that do not decompose.
 pub fn fold(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let kept = |c: char| !is_combining_mark(c) || matches!(c, '\u{3099}' | '\u{309A}');
-    for c in s.nfkd().filter(|&c| kept(c)) {
+    for c in s.nfkd().filter(|&c| !is_combining_mark(c)) {
         match c {
             'ø' => out.push('o'),
             'Ø' => out.push('O'),
@@ -33,11 +30,7 @@ pub fn fold(s: &str) -> String {
             _ => out.push(c),
         }
     }
-    if out.is_ascii() {
-        out
-    } else {
-        out.nfc().collect()
-    }
+    out
 }
 
 /// Case-, punctuation-, whitespace-, and accent-insensitive comparison key.
@@ -162,11 +155,17 @@ pub fn venue_key(s: &str) -> String {
     words[start..].concat()
 }
 
-/// Han, kana and Hangul: scripts written without spaces between words.
+/// Letters of Han, kana and Hangul, scripts written without spaces between
+/// words. Kana punctuation (・, ゠) and the voicing marks are not letters.
 fn is_cjk(c: char) -> bool {
     matches!(c,
         '\u{1100}'..='\u{11FF}' // Hangul Jamo
-        | '\u{3040}'..='\u{30FF}' // Hiragana, Katakana
+        | '\u{3005}'..='\u{3007}' // 々 〆 〇
+        | '\u{303B}' // 〻
+        | '\u{3041}'..='\u{3096}' // Hiragana
+        | '\u{309D}'..='\u{309F}' // Hiragana iteration marks, ゟ
+        | '\u{30A1}'..='\u{30FA}' // Katakana
+        | '\u{30FC}'..='\u{30FF}' // ー, Katakana iteration marks, ヿ
         | '\u{3130}'..='\u{318F}' // Hangul Compatibility Jamo
         | '\u{31F0}'..='\u{31FF}' // Katakana Phonetic Extensions
         | '\u{3400}'..='\u{4DBF}' // Han Extension A
@@ -318,8 +317,6 @@ mod tests {
         );
         assert_eq!(key("Évaluation des marchés"), key("Evaluation des Marches"));
         assert_eq!(key("Ørsted: a Study"), "orstedastudy");
-        assert_ne!(key("ガバナンス"), key("カハナンス"));
-        assert_eq!(key("ｶﾞﾊﾞﾅﾝｽ"), key("ガバナンス"));
         assert_ne!(
             key("Synthetic Market Making"),
             key("Synthetic Market Maker")
@@ -414,8 +411,10 @@ mod tests {
         assert!(s > 0.3, "{s}");
         let s = similarity(ja, "ブロックチェーン技術の金融応用");
         assert!(s < 0.3, "{s}");
-        // Voiced kana differ from their unvoiced forms.
-        assert!(similarity("ガバナンス", "カハナンス") < 1.0);
+        // 々 stays in its run; ・ separates runs like a space.
+        assert_eq!(title_tokens("様々な"), ["様々", "々な"]);
+        assert_eq!(title_tokens("データ・サイ"), ["デー", "ータ", "サイ"]);
+        assert_eq!(title_tokens("AI と 株"), ["ai", "と", "株"]);
 
         let ko = "딥러닝 기반 주가 예측";
         assert!(similarity(ko, "딥러닝 기반 주가 예측 연구") > 0.8);
