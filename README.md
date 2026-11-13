@@ -518,9 +518,9 @@ The documentation listed here was checked on 2026-11-07. Behaviour marked "live"
 - The search API FAQ (https://dblp.org/faq/How+to+use+the+dblp+search+API.html) and the API itself (`dblp.org` and `dblp.uni-trier.de`) answered with an Anubis bot challenge (HTTP 202 for the API).
 - `papers` does not solve the challenge. The parser follows dblp's published JSON format (`result.hits.hit[].info`) but is unverified against a live response.
 - When the search API answers with HTTP 202 or an HTML page, `papers` sends one title query to the SPARQL endpoint `https://sparql.dblp.org/sparql` (QLever) instead. It has no retry.
-- The fallback query matches titles only. Every word of the query must be a case-insensitive substring of the title. The results are newest first, at most `--max`, with the `dblp:<key>` ids, year, venue and DOI of the API path. They have no author list and no total: an ordered author list needs a join that timed out on the endpoint.
+- The fallback query matches titles only. Every word of the query must be a case-insensitive substring of the title. Of dblp's search syntax, `a|b` matches either word. Quotes and a trailing `$` are dropped, so a phrase matches its words in any order and an exact word matches as a substring. The results are newest first, at most `--max`, with the `dblp:<key>` ids, year, venue and DOI of the API path. They have no author list and no total: an ordered author list needs a join that timed out on the endpoint.
 - `search` then prints `papers: the dblp.org search API answered with a bot check, so the search ran on sparql.dblp.org: …` on stderr. The search log entry records the same text in `params.fallback`.
-- When the SPARQL query fails too, `search` fails with an error that names both attempts. QLever reports a query timeout as HTTP 429 with an `exception`; the error gives that reason.
+- When the SPARQL query fails too, `search` fails with an error that names both attempts. QLever reports a query timeout as HTTP 429 with an `exception`; the error gives that reason. A reply that is not JSON is reported as a likely bot check on the endpoint.
 - On 2026-11-13 a two-word title query took 12 to 14 s.
 
 **CiNii Research OpenSearch**
