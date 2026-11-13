@@ -412,7 +412,7 @@ Every `search`, `fetch`, `refs` and `cited-by` appends one JSON line per query t
 | `at` | RFC 3339 UTC. |
 | `source` | `arxiv`, `crossref`, `openalex`, `dblp`, `s2` or `cinii`. |
 | `query` | The user's words, or the work for `refs` and `cited-by`. |
-| `params` | Source-specific options. `fetch`, `refs` and `cited-by` record `{"command": …}`. |
+| `params` | Source-specific options. `fetch`, `refs` and `cited-by` record `{"command": …}`. A DBLP search that ran on the SPARQL fallback records `fallback`. |
 | `results[].id` | Source-prefixed: `arxiv:IDvN`, `doi:…`, `openalex:W…`, `dblp:…`, `s2:…` or `cinii:…`. |
 | `seen` | Archive keys (registry or notes) among the results. |
 
@@ -502,7 +502,7 @@ The documentation listed here was checked on 2026-11-07. Behaviour marked "live"
 | Crossref (`api.crossref.org`) | 1 s | Not re-checked in this session. |
 | OpenAlex (`api.openalex.org`) | 1 s | https://help.openalex.org/api/authentication/ and https://help.openalex.org/api/llm-quick-reference/ (pages dated 2026-11-03; docs.openalex.org redirects there). See the notes below the table. |
 | Semantic Scholar (`api.semanticscholar.org`) | 1 s | https://www.semanticscholar.org/product/api documents 1000 requests per second shared by all unauthenticated users, and 1 request per second with an introductory key. See the notes below the table. |
-| DBLP (`dblp.org`) | 1 s | Not retrievable. See the notes below the table. |
+| DBLP (`dblp.org`, `sparql.dblp.org`) | 1 s | Not retrievable. See the notes below the table. |
 | CiNii Research OpenSearch (`cir.nii.ac.jp`) | 1 s | https://support.nii.ac.jp/en/cir/r_opensearch (updated 2025-11-25). See the notes below the table. |
 
 **OpenAlex**
@@ -516,7 +516,12 @@ The documentation listed here was checked on 2026-11-07. Behaviour marked "live"
 
 **DBLP**
 - The search API FAQ (https://dblp.org/faq/How+to+use+the+dblp+search+API.html) and the API itself (`dblp.org` and `dblp.uni-trier.de`) answered with an Anubis bot challenge (HTTP 202 for the API).
-- `papers` reports the challenge and does not solve it. The parser follows dblp's published JSON format (`result.hits.hit[].info`) but is unverified against a live response.
+- `papers` does not solve the challenge. The parser follows dblp's published JSON format (`result.hits.hit[].info`) but is unverified against a live response.
+- When the search API answers with HTTP 202 or an HTML page, `papers` sends one title query to the SPARQL endpoint `https://sparql.dblp.org/sparql` (QLever) instead. It has no retry.
+- The fallback query matches titles only. Every word of the query must be a case-insensitive substring of the title. Of dblp's search syntax, `a|b` matches either word. Quotes and a trailing `$` are dropped, so a phrase matches its words in any order and an exact word matches as a substring. The results are newest first, at most `--max`, with the `dblp:<key>` ids, year, venue and DOI of the API path. They have no author list and no total: an ordered author list needs a join that timed out on the endpoint.
+- `search` then prints `papers: the dblp.org search API answered with a bot check, so the search ran on sparql.dblp.org: …` on stderr. The search log entry records the same text in `params.fallback`.
+- When the SPARQL query fails too, `search` fails with an error that names both attempts. QLever reports a query timeout as HTTP 429 with an `exception`; the error gives that reason. A reply that is not JSON is reported as a likely bot check on the endpoint.
+- On 2026-11-13 a two-word title query took 12 to 14 s.
 
 **CiNii Research OpenSearch**
 - Endpoint: `/opensearch/articles` with `q`, `count` (1–200), `from=YYYY` and `format=json`.

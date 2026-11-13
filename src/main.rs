@@ -2337,10 +2337,14 @@ fn search_source(
         },
     );
     let since_year = since.map(|d| i64::from(d.year()));
+    let mut fallback = None;
     let (total, hits) = match source {
         Source::Openalex => sources::openalex(http, query, since_text.as_deref(), max)?,
         Source::Dblp => {
-            let (total, mut hits) = sources::dblp(http, query, max)?;
+            let ((total, mut hits), via) = sources::dblp(http, query, max)?;
+            if via == sources::DblpVia::Sparql {
+                fallback = Some(sources::DblpVia::SPARQL_NOTE);
+            }
             if let Some(y) = since_year {
                 hits.retain(|h| h.year.is_some_and(|hy| hy >= y));
             }
@@ -2356,27 +2360,47 @@ fn search_source(
         source.name(),
         hits.len()
     );
+    if let Some(note) = fallback {
+        eprintln!("papers: {note}");
+    }
     let index = seen::Index::load(config)?;
     let found: Vec<searchlog::Found> = hits.iter().map(sources::Hit::found).collect();
     for (hit, f) in hits.iter().zip(&found) {
         println!("{}", hit_text(hit, &searchlog::seen_keys(&index, f), out));
     }
     if out.log {
-        // Date filters other than OpenAlex's and CiNii's are applied to the year here.
-        let params = serde_json::json!({
-            "max": max,
-            "since": since_text,
-            "since_applied": match source {
-                Source::Openalex => "server, publication date",
-                Source::Cinii => "server, year",
-                _ => "client, year",
-            },
-            "total": total,
-        });
+        let params = source_log_params(source, max, since_text.as_deref(), total, fallback);
         let entry = searchlog::Entry::new(source.name(), query, params, &found, &index);
         searchlog::append(&config.search_log, &[entry])?;
     }
     Ok(true)
+}
+
+/// The search-log `params` of a non-arXiv search; `fallback` says how a DBLP
+/// search left its search API.
+fn source_log_params(
+    source: sources::Source,
+    max: usize,
+    since: Option<&str>,
+    total: Option<u64>,
+    fallback: Option<&str>,
+) -> serde_json::Value {
+    use sources::Source;
+    // Date filters other than OpenAlex's and CiNii's are applied to the year here.
+    let mut params = serde_json::json!({
+        "max": max,
+        "since": since,
+        "since_applied": match source {
+            Source::Openalex => "server, publication date",
+            Source::Cinii => "server, year",
+            _ => "client, year",
+        },
+        "total": total,
+    });
+    if let Some(note) = fallback {
+        params["fallback"] = serde_json::json!(note);
+    }
+    params
 }
 
 fn citations(
@@ -4009,6 +4033,17 @@ fn stub(http: &Http, config: &config::Config, input: &str, write: bool) -> Resul
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn source_log_params_record_the_dblp_fallback() {
+        let note = sources::DblpVia::SPARQL_NOTE;
+        let params = source_log_params(sources::Source::Dblp, 5, None, None, Some(note));
+        assert_eq!(params["fallback"], note);
+        assert_eq!(params["since_applied"], "client, year");
+        let api = source_log_params(sources::Source::Dblp, 5, None, Some(3), None);
+        assert!(api.get("fallback").is_none());
+        assert_eq!(api["total"], 3);
+    }
 
     #[test]
     fn note_index_paths_are_relative_to_the_project_root() {
