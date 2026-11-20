@@ -83,7 +83,7 @@ impl Subject {
             }),
             version: r.version.clone(),
             author_variants: r.author_variants.clone(),
-            checked: None,
+            checked: r.checked.clone(),
             duplicate_of: r.duplicate_of.clone(),
             invalid: None,
             evidence: r
@@ -463,6 +463,8 @@ impl Outcome {
                 },
             )),
             Outcome::NotFound { against, .. } => Some((against, "not-found")),
+            // The hand check the note records, not an index.
+            Outcome::Manual(_) => Some(("note", "manual")),
             _ => None,
         }
     }

@@ -161,7 +161,7 @@ pub fn check(records: &[Reference]) -> Vec<Finding> {
                         VERIFIED_STATUSES.join(", ")
                     ),
                 ));
-            } else if v.status != "match" {
+            } else if !matches!(v.status.as_str(), "match" | "manual") {
                 found.push(Finding::new(
                     "verified-mismatch",
                     Severity::Warn,
@@ -555,6 +555,7 @@ mod tests {
             verified("4", "2026-11-12", "checked"),
             verified("5", "12 November", "match"),
             verified("6", "12 November", "checked"),
+            verified("7", "2026-11-12", "manual"),
         ];
         let found = check(&records);
         let got = rules(&found);

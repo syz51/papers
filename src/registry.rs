@@ -22,7 +22,7 @@ pub const DEPTHS: [&str; 6] = [
     "reproduced",
 ];
 /// The `verified.status` values `verify --record` writes.
-pub const VERIFIED_STATUSES: [&str; 3] = ["match", "mismatch", "not-found"];
+pub const VERIFIED_STATUSES: [&str; 4] = ["match", "mismatch", "not-found", "manual"];
 pub const TYPES: [&str; 6] = ["paper", "dataset", "software", "web", "standard", "other"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,6 +54,11 @@ pub struct Reference {
     /// its metadata misspells the name. `verify` accepts any of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub author_variants: Vec<String>,
+    /// Optional: the date the metadata was confirmed by hand, for a work no
+    /// index lists. Copied from a note's frontmatter; `verify` then reports
+    /// `verify-manual` instead of searching by title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<String>,
     /// Fields this version does not know, kept when the registry is rewritten.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -169,7 +174,7 @@ pub struct Verified {
     /// `YYYY-MM-DD`.
     pub at: String,
     pub against: String,
-    /// `match`, `mismatch`, or `not-found`.
+    /// `match`, `mismatch`, `not-found`, or `manual`.
     pub status: String,
 }
 
@@ -209,11 +214,13 @@ impl Reference {
             verified: None,
             authors_truncated: false,
             author_variants: Vec::new(),
+            checked: None,
             extra: Map::new(),
         }
     }
 
-    /// True when the bibliographic fields (what `verify` checks) are equal.
+    /// True when the bibliographic fields (what `verify` checks) and the
+    /// hand-check date are equal.
     fn same_metadata(&self, other: &Reference) -> bool {
         self.title == other.title
             && self.authors == other.authors
@@ -221,6 +228,7 @@ impl Reference {
             && self.venue == other.venue
             && self.ids.doi == other.ids.doi
             && self.ids.arxiv == other.ids.arxiv
+            && self.checked == other.checked
     }
 }
 
