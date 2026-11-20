@@ -1498,6 +1498,7 @@ fn structure_of(
             extraction,
         },
         markdown,
+        &structure::heading_patterns(&config.structure_headings)?,
         &structure::Targets::new(records, &own),
         format!("papers {}", env!("CARGO_PKG_VERSION")),
     );
@@ -3798,7 +3799,7 @@ fn docling_text(
     })?;
     println!(
         "text: {} words, extracted by docling {version}",
-        text.split_whitespace().count()
+        text::words(&text)
     );
     if !pdf::has_title(&text, &target.title) {
         println!(
@@ -3877,7 +3878,7 @@ fn extract_pdf(
     derivative::stage(&txt_path, text.as_bytes())?;
     println!(
         "text: {} words, extracted by {extractor}",
-        text.split_whitespace().count()
+        text::words(&text)
     );
     if !pdf::has_title(&text, &target.title) {
         println!(

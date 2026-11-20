@@ -125,6 +125,7 @@ card_model = "claude-haiku-5-5"    # default: the model a card is made with
 status_depth = { read = "full" }    # note status -> registry depth; default read = "method", skimmed = "abstract"
 cite_patterns = ['\[@(?P<key>[\w.-]+)\]']    # default: the two patterns under "cite"
 cite_replace = "[{n}]"              # default
+structure_headings = ['^論語.{2,4}第[一二三四五六七八九十]+\s']  # none by default: regexes for the body headings of plain texts (see "Structure sidecars")
 ```
 
 ### Environment variables
@@ -335,7 +336,13 @@ The sidecar holds, as raw line ranges of the text:
 - for each reference, the registry key it cites, matched by DOI, arXiv id or normalised title;
 - in a Markdown text, each pipe table with its header row's line and column labels. A plain text gives `unknown`.
 
-The command reads only the text and the registry. It makes no network request, never changes a text, and works for a text of any `extraction` value and for Markdown texts. What detection does not find is `unknown` or a warning, never a guess. It prints one line per text, then the text's warnings, then the counts of texts with a reference list and with an abstract span. Texts without a reference heading are counted in two groups: short texts, under 2000 words, and paper-length texts, which it names. A paper-length text in that group is worth a look: its heading may have a form that detection misses. `--dry-run` prints the same and writes nothing. A sidecar is rewritten only when its content changes. It records its text's sha256; `registry check` reports `derivative-stale` when the text no longer has it.
+The command reads only the text and the registry. It makes no network request, never changes a text, and works for a text of any `extraction` value and for Markdown texts. What detection does not find is `unknown` or a warning, never a guess. It prints one line per text, then the text's warnings, then the counts of texts with a reference list and with an abstract span. Texts without a reference heading are counted in two groups: short texts, under 2000 words, and paper-length texts, which it names. A Chinese or Japanese character (Han, kana) counts as one word, as for a card's quote; `papers read` counts the words of the text it prints the same way. A paper-length text in that group is worth a look: its heading may have a form that detection misses. `--dry-run` prints the same and writes nothing. A sidecar is rewritten only when its content changes. It records its text's sha256; `registry check` reports `derivative-stale` when the text no longer has it.
+
+Chinese texts:
+
+- A line that starts with `摘要：`, `摘 要：`, `内容提要：` or `【摘要】` starts the abstract span, with the heading `摘要`. A keywords line (`关键词：`) ends it; the lines from there to the next heading are `unknown`.
+- `一 引言` and `二、方法` are level 1 headings, and `（一）材料` is a level 2 heading under one. The numbers must come in order, and the title must not read as a sentence.
+- A classical text has headings of its own form. `[papers] structure_headings` lists regexes for them: in a plain text, a line that one of them matches is a level 1 `body` heading. With `structure_headings = ['^論語.{2,4}第[一二三四五六七八九十]+\s']`, the line `論語學而第一 何晏集解` starts a section. A pattern that is no regex is an error. Run `papers structure --all` after a change of the patterns.
 
 [docs/interfaces.md](docs/interfaces.md) defines the schema, the line numbering and what a search index does with the sidecar.
 

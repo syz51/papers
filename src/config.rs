@@ -44,6 +44,9 @@ struct RawPapers {
     /// Citation patterns for `papers cite`; each has a `key` group.
     #[serde(default)]
     cite_patterns: Vec<String>,
+    /// Heading patterns for `papers structure` on plain texts.
+    #[serde(default)]
+    structure_headings: Vec<String>,
     /// Replacement for each citation in renumbered copies (`{n}`, `{key}`, `{citekey}`).
     cite_replace: Option<String>,
     /// The command that runs Python with Docling importable; `read
@@ -80,6 +83,9 @@ pub struct Config {
     /// `[papers] cite_patterns`; empty means the built-in patterns.
     pub cite_patterns: Vec<String>,
     pub cite_replace: Option<String>,
+    /// `[papers] structure_headings`: regexes; in a plain text, a line that
+    /// one of them matches is a top body heading.
+    pub structure_headings: Vec<String>,
     /// `[papers] docling`, else [`DEFAULT_DOCLING`].
     pub docling: Vec<String>,
     /// `[papers] cards`: whether `papers card` may run (default off).
@@ -185,6 +191,7 @@ impl Config {
                 .collect(),
             cite_patterns: p.cite_patterns,
             cite_replace: p.cite_replace,
+            structure_headings: p.structure_headings,
             docling: p
                 .docling
                 .unwrap_or_else(|| DEFAULT_DOCLING.map(str::to_owned).to_vec()),
