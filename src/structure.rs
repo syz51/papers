@@ -528,15 +528,17 @@ struct Heading {
     kind: Kind,
 }
 
-const ABSTRACTS: [&str; 8] = [
+const ABSTRACTS: [&str; 10] = [
     "abstract",
     "概要",
     "要旨",
     "あらまし",
     "摘要",
     "内容摘要",
+    "內容摘要",
     "提要",
     "内容提要",
+    "內容提要",
 ];
 const REFERENCES: [&str; 7] = [
     "references",
@@ -580,7 +582,7 @@ static INLINE_ABSTRACT: LazyLock<Regex> =
 /// brackets: `摘要` also starts a sentence.
 static CJK_INLINE_ABSTRACT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^(?:[\[【［〔]\s*(?:内\s*容\s*)?(?:摘|提)\s*要\s*[\]】］〕]\s*[:：]?|(?:内\s*容\s*)?(?:摘|提)\s*要\s*[:：])\s*\S",
+        r"^(?:[\[【［〔]\s*(?:[内內]\s*容\s*)?(?:摘|提)\s*要\s*[\]】］〕]\s*[:：]?|(?:[内內]\s*容\s*)?(?:摘|提)\s*要\s*[:：])\s*\S",
     )
     .unwrap()
 });
@@ -765,8 +767,12 @@ fn plain_headings(
     let mut major = 0u32;
     let mut roman_major = 0u32;
     // The last accepted Chinese numbers: `三`, and `（二）` under it.
+    // A text numbers its sections in one way: these count only while no
+    // Arabic or Roman number is accepted, and then no Arabic number counts.
     let mut cjk_major = 0u32;
     let mut cjk_minor = 0u32;
+    // The lines of the headings with Chinese numbers since the last start.
+    let mut cjk_lines: Vec<usize> = Vec::new();
     let mut in_refs = false;
     let mut in_appendix = false;
     let mut letter: Option<char> = None;
@@ -829,13 +835,21 @@ fn plain_headings(
         };
         // A configured pattern is the project's word on its corpus: its
         // heading counts anywhere, and ends a reference list or an appendix.
+        // The numbers of its sections start again.
         if configured.iter().any(|p| p.is_match(&c)) {
-            (in_refs, in_appendix) = (false, false);
+            (in_refs, in_appendix, letter) = (false, false, None);
+            (major, roman_major, cjk_major, cjk_minor) = (0, 0, 0, 0);
+            cjk_lines.clear();
             out.push(heading(&c, 1, Kind::Body));
             continue;
         }
         if !abstract_seen && !in_refs && !in_appendix {
-            if ABSTRACTS.contains(&tight(&c).as_str()) && c.chars().count() <= 20 {
+            // `【摘要】` alone on its line is the label too.
+            let label = tight(&c);
+            let label = label
+                .trim_start_matches(['[', '【', '［', '〔'])
+                .trim_end_matches([']', '】', '］', '〕']);
+            if ABSTRACTS.contains(&label) && c.chars().count() <= 20 {
                 abstract_seen = true;
                 out.push(heading(&c, 1, Kind::Abstract));
                 continue;
@@ -928,7 +942,8 @@ fn plain_headings(
             }
             continue;
         }
-        if let Some(m) = NUMBERED.captures(&c)
+        if cjk_major == 0
+            && let Some(m) = NUMBERED.captures(&c)
             && is_title(&m[3])
         {
             let n: u32 = m[1].parse().expect("digits");
@@ -976,12 +991,32 @@ fn plain_headings(
             out.push(heading(&c, 1, Kind::Body));
             continue;
         }
-        if let Some(m) = CJK_NUMBERED.captures(&c)
+        if major == 0
+            && roman_major == 0
+            && let Some(m) = CJK_NUMBERED.captures(&c)
             && is_cjk_title(&m[2])
-            && cjk_number(&m[1]) == Some(cjk_major + 1)
         {
-            (cjk_major, cjk_minor) = (cjk_major + 1, 0);
-            out.push(heading(&c, 1, Kind::Body));
+            let n = cjk_number(&m[1]);
+            // `一` again after a close run of such headings: that run was a
+            // table of contents.
+            let contents = n == Some(1)
+                && cjk_major >= 2
+                && cjk_lines[cjk_lines.len() - 1] - cjk_lines[0] <= 4 * cjk_lines.len();
+            if contents {
+                warnings.push(format!(
+                    "lines {}-{} read as a table of contents; its headings are not sections",
+                    cjk_lines[0] + 1,
+                    cjk_lines[cjk_lines.len() - 1] + 1
+                ));
+                out.retain(|h| !cjk_lines.contains(&h.line));
+                cjk_lines.clear();
+                cjk_major = 0;
+            }
+            if n == Some(cjk_major + 1) {
+                (cjk_major, cjk_minor) = (cjk_major + 1, 0);
+                cjk_lines.push(i);
+                out.push(heading(&c, 1, Kind::Body));
+            }
             continue;
         }
         if cjk_major > 0
@@ -990,6 +1025,7 @@ fn plain_headings(
             && cjk_number(&m[1]) == Some(cjk_minor + 1)
         {
             cjk_minor += 1;
+            cjk_lines.push(i);
             out.push(heading(&c, 2, Kind::Body));
             continue;
         }
@@ -1666,6 +1702,7 @@ mod tests {
             "摘要：",
             "摘　要:",
             "内容提要：",
+            "內容提要：",
             "【摘要】",
             "［摘 要］：",
             "[内容摘要] ",
@@ -1690,6 +1727,20 @@ mod tests {
             &Targets::default(),
         );
         assert_eq!(headed(&s)[1], (Kind::Abstract, Some("摘要："), 1, 2, 3));
+        let s = structure(
+            "题目\n【摘 要】\n本文讨论学。\n关键词：学\n一、引言\n正文。\n",
+            false,
+            &Targets::default(),
+        );
+        assert_eq!(
+            spans(&s),
+            [
+                (Kind::Front, 1, 1),
+                (Kind::Abstract, 2, 3),
+                (Kind::Unknown, 4, 4),
+                (Kind::Body, 5, 6),
+            ]
+        );
         // A sentence that starts with the word is no label.
         let s = structure(
             "题目\n摘要是一篇文章的概括。\n正文。\n",
@@ -1733,6 +1784,74 @@ mod tests {
         assert_eq!(cjk_number("九十九"), Some(99));
         assert_eq!(cjk_number("十十"), None);
         assert_eq!(cjk_number("一二"), None);
+    }
+
+    #[test]
+    fn chinese_numbers_with_arabic_numbers_a_contents_list_and_chapters() {
+        let headings = |s: &Structure| -> Vec<(String, u8)> {
+            s.sections
+                .iter()
+                .filter_map(|x| Some((x.heading.clone()?, x.level)))
+                .collect()
+        };
+        let h = |t: &str, level: u8| (t.to_owned(), level);
+        // Arabic items under Chinese headings are no headings, and they do
+        // not remove the Chinese ones as a table of contents.
+        let text = "一、引言\n1. 背景\n2. 意义\n二、方法\n1. 材料\n正文\n";
+        let s = structure(text, false, &Targets::default());
+        assert_eq!(headings(&s), [h("一、引言", 1), h("二、方法", 1)]);
+        assert!(
+            !s.warnings.iter().any(|w| w.contains("contents")),
+            "{:?}",
+            s.warnings
+        );
+        // Chinese items under Arabic headings are no headings.
+        let text = "1 Introduction\n一、背景\n二、意义\n2 Method\n正文\n";
+        let s = structure(text, false, &Targets::default());
+        assert_eq!(headings(&s), [h("1 Introduction", 1), h("2 Method", 1)]);
+        // A contents list, then the sections.
+        let text =
+            "目录\n一 引言\n二 方法\n三 结语\n\n一 引言\n正文\n（一）背景\n正文\n二 方法\n正文\n";
+        let s = structure(text, false, &Targets::default());
+        assert_eq!(
+            headed(&s),
+            [
+                (Kind::Front, None, 0, 1, 5),
+                (Kind::Body, Some("一 引言"), 1, 6, 7),
+                (Kind::Body, Some("（一）背景"), 2, 8, 9),
+                (Kind::Body, Some("二 方法"), 1, 10, 11),
+            ]
+        );
+        assert!(
+            s.warnings.contains(
+                &"lines 2-4 read as a table of contents; its headings are not sections".to_owned()
+            ),
+            "{:?}",
+            s.warnings
+        );
+        // Under configured chapter lines, the numbers start again.
+        let patterns = heading_patterns(&["^第.章".to_owned()]).unwrap();
+        let text = "第一章 学\n一 引言\n正文\n二 方法\n正文\n三 结语\n正文\n正文\n正文\n正文\n正文\n正文\n正文\n第二章 政\n一 引言\n正文\n二 方法\n";
+        let s = build(
+            text,
+            info(),
+            false,
+            &patterns,
+            &Targets::default(),
+            "papers test".into(),
+        );
+        assert_eq!(
+            headings(&s),
+            [
+                h("第一章 学", 1),
+                h("一 引言", 1),
+                h("二 方法", 1),
+                h("三 结语", 1),
+                h("第二章 政", 1),
+                h("一 引言", 1),
+                h("二 方法", 1),
+            ]
+        );
     }
 
     #[test]

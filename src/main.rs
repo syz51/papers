@@ -1463,6 +1463,7 @@ fn seen(
 fn structure_of(
     config: &config::Config,
     records: &[registry::Reference],
+    headings: &[regex::Regex],
     path: &str,
 ) -> Result<structure::Structure, String> {
     let file = config.root.join(path);
@@ -1498,7 +1499,7 @@ fn structure_of(
             extraction,
         },
         markdown,
-        &structure::heading_patterns(&config.structure_headings)?,
+        headings,
         &structure::Targets::new(records, &own),
         format!("papers {}", env!("CARGO_PKG_VERSION")),
     );
@@ -1555,11 +1556,12 @@ fn structure_cmd(
             None => add(config.display(&config::normalize(&cwd.join(target)))),
         }
     }
+    let headings = structure::heading_patterns(&config.structure_headings)?;
     let mut ok = true;
     let (mut with_refs, mut with_abstract) = (0, 0);
     let mut unlisted = structure::Unlisted::default();
     for path in &paths {
-        let built = match structure_of(config, &records, path) {
+        let built = match structure_of(config, &records, &headings, path) {
             Ok(built) => built,
             Err(e) => {
                 eprintln!("papers: {e}");
@@ -3132,7 +3134,9 @@ fn structure_after_read(
         unregistered.texts.push(saved);
         records.push(unregistered);
     }
-    match structure_of(config, &records, &path).and_then(|b| write_structure(config, &b)) {
+    let built = structure::heading_patterns(&config.structure_headings)
+        .and_then(|headings| structure_of(config, &records, &headings, &path));
+    match built.and_then(|b| write_structure(config, &b)) {
         Ok(written) => println!("structure: {}", config.display(&written)),
         Err(e) => eprintln!(
             "papers: structure sidecar not written (`papers structure {path}` builds it): {e}"

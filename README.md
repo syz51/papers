@@ -341,8 +341,8 @@ The command reads only the text and the registry. It makes no network request, n
 Chinese texts:
 
 - A line that starts with `摘要：`, `摘 要：`, `内容提要：` or `【摘要】` starts the abstract span, with the heading `摘要`. A keywords line (`关键词：`) ends it; the lines from there to the next heading are `unknown`.
-- `一 引言` and `二、方法` are level 1 headings, and `（一）材料` is a level 2 heading under one. The numbers must come in order, and the title must not read as a sentence.
-- A classical text has headings of its own form. `[papers] structure_headings` lists regexes for them: in a plain text, a line that one of them matches is a level 1 `body` heading. With `structure_headings = ['^論語.{2,4}第[一二三四五六七八九十]+\s']`, the line `論語學而第一 何晏集解` starts a section. A pattern that is no regex is an error. Run `papers structure --all` after a change of the patterns.
+- `一 引言` and `二、方法` are level 1 headings, and `（一）材料` is a level 2 heading under one. The numbers must come in order, and the title must not read as a sentence. They count only in a text with no Arabic or Roman section numbers before them, and Arabic numbers under them are no headings.
+- A classical text has headings of its own form. `[papers] structure_headings` lists regexes for them: in a plain text, a line that one of them matches is a level 1 `body` heading, and the section numbers start again under it. With `structure_headings = ['^論語.{2,4}第[一二三四五六七八九十]+\s']`, the line `論語學而第一 何晏集解` starts a section. A pattern that is no regex is an error. Run `papers structure --all` after a change of the patterns.
 
 [docs/interfaces.md](docs/interfaces.md) defines the schema, the line numbering and what a search index does with the sidecar.
 
