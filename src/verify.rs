@@ -5,7 +5,7 @@
 //! | --- | --- | --- |
 //! | `verify-title` | error | no source title equals ours (case, accents, punctuation ignored) |
 //! | `verify-first-author` | error | our first author lacks the source's first surname |
-//! | `verify-author-script` | info | our first author's name has no Latin letters and the source's surname is in Latin letters; the names were not compared |
+//! | `verify-author-script` | info | our first author's name and the source's surname are in different scripts, one Latin and one not; the names were not compared |
 //! | `verify-author-count` | error | author counts differ (skipped for "et al." lists) |
 //! | `verify-year` | error | notes: not the arXiv v1 year, or after the earliest Crossref/OpenAlex date; registry: outside the years the source reports |
 //! | `verify-venue` | warn | our venue does not name the source's journal (journal articles only) |
@@ -181,16 +181,15 @@ fn matches(diffs: &[Diff]) -> bool {
     diffs.iter().all(|d| d.severity == Severity::Info)
 }
 
-/// True when `name` has letters and none of them is a Latin letter, as a
-/// name in Chinese characters has.
-fn without_latin_letters(name: &str) -> bool {
-    let mut letters = name.chars().filter(|c| c.is_alphabetic()).peekable();
-    letters.peek().is_some()
-        && letters.all(|c| {
-            !text::fold(&c.to_string())
-                .chars()
-                .any(|f| f.is_ascii_alphabetic())
-        })
+/// Whether `name` has Latin letters, and whether it has letters of another
+/// script, such as Chinese characters. Accents are folded away first.
+fn scripts(name: &str) -> (bool, bool) {
+    let folded = text::fold(name);
+    let latin = folded.chars().any(|c| c.is_ascii_alphabetic());
+    let other = folded
+        .chars()
+        .any(|c| c.is_alphabetic() && !c.is_ascii_alphabetic());
+    (latin, other)
 }
 
 /// Title and author checks shared by every source.
@@ -223,42 +222,37 @@ fn compare_people(
         && !names().any(|name| text::has_surname(name, family))
     {
         let theirs = authors.first().map_or("", String::as_str);
-        // A name in Chinese characters cannot hold a romanised surname, so
-        // the two are not compared. A Latin spelling in `author_variants`
-        // is compared, and a wrong one is an error.
-        if names().all(without_latin_letters) && !without_latin_letters(family) {
+        // A name in Chinese characters cannot hold a romanised surname, nor
+        // a romanised name a surname in Chinese characters, so the two are
+        // not compared. A spelling in the source's script in
+        // `author_variants` is compared, and a wrong one is an error.
+        let apart = match scripts(family) {
+            (true, false) => names().all(|n| scripts(n) == (false, true)),
+            (false, true) => names().all(|n| scripts(n) == (true, false)),
+            _ => false,
+        };
+        if apart {
             diffs.push(diff(
                 "verify-author-script",
                 format!(
-                    "first author: ours {first:?} has no Latin letters and {src} has {theirs:?}; \
+                    "first author: ours {first:?} and {src} {theirs:?} are in different scripts; \
                      not compared (add the {src} spelling to author_variants to compare them)"
                 ),
             ));
-            return with_author_count(s, src, ours, authors, diffs);
-        }
-        let tried = if variants.is_empty() {
-            String::new()
         } else {
-            format!(" or author_variants {variants:?}")
-        };
-        diffs.push(diff(
-            "verify-first-author",
-            format!(
-                "first author: ours {first:?}{tried} lacks {src} surname {family:?} ({})",
-                authors.first().map_or("", String::as_str)
-            ),
-        ));
+            let tried = if variants.is_empty() {
+                String::new()
+            } else {
+                format!(" or author_variants {variants:?}")
+            };
+            diffs.push(diff(
+                "verify-first-author",
+                format!(
+                    "first author: ours {first:?}{tried} lacks {src} surname {family:?} ({theirs})"
+                ),
+            ));
+        }
     }
-    with_author_count(s, src, ours, authors, diffs)
-}
-
-fn with_author_count(
-    s: &Subject,
-    src: &str,
-    ours: &[String],
-    authors: &[String],
-    mut diffs: Vec<Diff>,
-) -> Vec<Diff> {
     if !s.authors_truncated && ours.len() != authors.len() {
         diffs.push(diff(
             "verify-author-count",
@@ -892,6 +886,18 @@ mod tests {
         assert_eq!(rules(&diffs), ["verify-first-author"]);
         assert_eq!(diffs[0].severity, Severity::Error);
 
+        // The other direction: our Latin name, the source's Chinese one.
+        let p = paper(title, &["陈赟"]);
+        let mut s = subject(title, &["Yun Chen"], 2022, false);
+        assert_eq!(rules(&compare_paper(&s, &p)), ["verify-author-script"]);
+        s.author_variants = vec!["李零".into()];
+        assert_eq!(rules(&compare_paper(&s, &p)), ["verify-first-author"]);
+
+        // A name in both scripts is compared.
+        let p = paper(title, &["Yun Chen"]);
+        let s = subject(title, &["陈赟 (Yun Chan)"], 2022, false);
+        assert_eq!(rules(&compare_paper(&s, &p)), ["verify-first-author"]);
+
         // A Latin name with a wrong surname is still an error.
         let p = paper(title, &["Yun Chen"]);
         let s = subject(title, &["Yun Chan"], 2022, false);
@@ -1072,6 +1078,32 @@ mod tests {
             latest_year: years.map(|y| y.1),
             year_basis: "published-online 2024-02-16".into(),
             journal: journal.map(str::to_owned),
+        }
+    }
+
+    /// The path of a Crossref or OpenAlex record, whose surname is a field.
+    #[test]
+    fn a_record_in_another_script_is_not_compared_by_name() {
+        let title = "学而时习之与《论语》的开端";
+        let rec = |surname: &str| Record {
+            source: "OpenAlex",
+            titles: vec![title.into()],
+            authors: vec!["Yun Chen".into()],
+            first_surname: Some(surname.into()),
+            earliest_year: Some(2012),
+            latest_year: Some(2012),
+            year_basis: "publication_year".into(),
+            journal: None,
+        };
+        let s = subject(title, &["陈赟"], 2012, false);
+        let diffs = compare_record(&s, &rec("Chen"));
+        assert_eq!(rules(&diffs), ["verify-author-script"]);
+        assert!(matches(&diffs));
+        // A surname without a letter is no Latin surname.
+        for surname in ["", "2012"] {
+            let diffs = compare_record(&s, &rec(surname));
+            assert_eq!(rules(&diffs), ["verify-first-author"], "{surname:?}");
+            assert!(!matches(&diffs));
         }
     }
 
