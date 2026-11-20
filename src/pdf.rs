@@ -13,9 +13,23 @@ use crate::http::{host, resolve};
 /// PDF links taken from one landing page.
 const MAX_PAGE_LINKS: usize = 3;
 
-/// A real PDF: a PDF content type and the `%PDF-` magic bytes.
+/// Content types of a plain download, which say nothing about the file.
+const DOWNLOAD_TYPES: [&str; 5] = [
+    "application/octet-stream",
+    "binary/octet-stream",
+    "application/x-download",
+    "application/force-download",
+    "application/download",
+];
+
+/// A real PDF: the `%PDF-` magic bytes, and a content type that names PDF,
+/// is one of [`DOWNLOAD_TYPES`] or is missing. Some journal systems send
+/// their PDFs as plain downloads, so for those the bytes decide.
 pub fn is_pdf(content_type: &str, body: &[u8]) -> bool {
-    content_type.to_ascii_lowercase().contains("pdf") && body.starts_with(b"%PDF-")
+    let content_type = content_type.to_ascii_lowercase();
+    let media = content_type.split(';').next().unwrap_or_default().trim();
+    (content_type.contains("pdf") || media.is_empty() || DOWNLOAD_TYPES.contains(&media))
+        && body.starts_with(b"%PDF-")
 }
 
 /// Pages larger than this are real pages, not check interstitials.
@@ -585,6 +599,19 @@ pub(crate) mod tests {
         assert!(is_pdf("Application/PDF; charset=binary", b"%PDF-1.4"));
         assert!(!is_pdf("text/html", b"%PDF-1.4"));
         assert!(!is_pdf("application/pdf", b"<!DOCTYPE html>"));
+        // A generic or missing type: the bytes decide.
+        assert!(is_pdf("application/octet-stream", b"%PDF-1.6"));
+        assert!(is_pdf(
+            "Application/Octet-Stream; charset=binary",
+            b"%PDF-1.6"
+        ));
+        assert!(is_pdf("", b"%PDF-1.6"));
+        assert!(!is_pdf("application/octet-stream", b"PK\x03\x04"));
+        assert!(!is_pdf("", b"<!DOCTYPE html>"));
+        assert!(is_pdf("binary/octet-stream", b"%PDF-1.6"));
+        assert!(is_pdf("application/x-download", b"%PDF-1.6"));
+        assert!(is_pdf("text/plain; name=\"paper.pdf\"", b"%PDF-1.6"));
+        assert!(!is_pdf("application/zip", b"%PDF-1.6"));
     }
 
     #[test]
