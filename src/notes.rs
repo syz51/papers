@@ -20,6 +20,11 @@ pub struct Meta {
     pub venue: Option<String>,
     pub url: Option<String>,
     pub doi: Option<String>,
+    /// The registry `type`; a note without one is a paper.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    /// The work's OpenAlex id (`W123`, `openalex:W123`, or its URL).
+    pub openalex: Option<String>,
     /// Date the metadata was confirmed by hand, for papers no index lists.
     pub checked: Option<String>,
     /// Earlier titles of the same paper (indexes often keep the first posting's).
@@ -111,7 +116,12 @@ impl Note {
         let Ok(meta) = &self.meta else {
             return r;
         };
-        r.kind = Some("paper".to_owned());
+        r.kind = Some(meta.kind.clone().unwrap_or_else(|| "paper".to_owned()));
+        // A value that names no work id stays as written, for `registry check`.
+        r.ids.openalex = meta
+            .openalex
+            .as_deref()
+            .map(|id| crate::openalex::parse_id(id).unwrap_or_else(|| id.trim().to_owned()));
         r.title = meta.title.clone();
         r.authors = (!meta.authors.is_empty()).then(|| meta.authors.clone());
         r.author_variants = meta.author_variants.clone();
@@ -197,6 +207,8 @@ pub struct StubFields {
     pub year_comment: Option<String>,
     pub venue: String,
     pub url: String,
+    /// The OpenAlex id, for a work found there by id or title.
+    pub openalex: Option<String>,
 }
 
 impl StubFields {
@@ -211,18 +223,30 @@ impl StubFields {
                 .clone()
                 .unwrap_or_else(|| format!("arXiv:{}", paper.id)),
             url: paper.abs_url.clone(),
+            openalex: None,
         }
+    }
+
+    /// The first author's surname in ASCII; `None` when there is no author
+    /// or the name has no Latin letters (a name in Chinese characters).
+    fn family(&self) -> Option<String> {
+        self.authors
+            .first()
+            .map(|a| crate::text::ascii_words(surname(a)).join("-"))
+            .filter(|s| !s.is_empty())
     }
 
     /// Note id: `<year>-<first-author-surname>-<title-slug>`.
     pub fn note_id(&self) -> String {
-        let family = self
-            .authors
-            .first()
-            .map(|a| crate::text::ascii_words(surname(a)).join("-"))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "anonymous".to_owned());
+        let family = self.family().unwrap_or_else(|| "anonymous".to_owned());
         format!("{}-{family}-{}", self.year, title_slug(&self.title))
+    }
+
+    /// True when the note id lacks a part because the author's name or the
+    /// title has no Latin letters; the id then needs a romanisation by hand.
+    fn id_needs_romanising(&self) -> bool {
+        (!self.authors.is_empty() && self.family().is_none())
+            || (!self.title.trim().is_empty() && crate::text::ascii_words(&self.title).is_empty())
     }
 }
 
@@ -240,6 +264,10 @@ pub fn stub_fields(fields: &StubFields, template: &str, added: &str) -> Result<S
         .iter()
         .map(|a| yaml_scalar(a, true))
         .collect();
+    let has_openalex = template_meta
+        .lines()
+        .filter_map(template_field)
+        .any(|(field, ..)| field == "openalex");
     let mut out = String::from("---\n");
     for line in template_meta.lines() {
         let Some((field, example, hint)) = template_field(line) else {
@@ -248,6 +276,14 @@ pub fn stub_fields(fields: &StubFields, template: &str, added: &str) -> Result<S
             continue;
         };
         let value = match field {
+            "id" if fields.id_needs_romanising() => {
+                let line = format!("id: {id}");
+                let _ = writeln!(
+                    out,
+                    "{line:<35} # TODO: romanise by hand; the author or the title has no Latin letters"
+                );
+                continue;
+            }
             "id" => id.clone(),
             "title" => yaml_scalar(&fields.title, false),
             "authors" => format!("[{}]", authors.join(", ")),
@@ -264,7 +300,12 @@ pub fn stub_fields(fields: &StubFields, template: &str, added: &str) -> Result<S
                 continue;
             }
             "venue" => yaml_scalar(&fields.venue, false),
-            "url" => fields.url.clone(),
+            // A template without the field gets the id after the URL.
+            "url" => match &fields.openalex {
+                Some(id) if !has_openalex => format!("{}\nopenalex: {id}", fields.url),
+                _ => fields.url.clone(),
+            },
+            "openalex" if let Some(id) = &fields.openalex => id.clone(),
             "added" => added.to_owned(),
             _ => {
                 let placeholder = empty_like(example);
@@ -471,6 +512,8 @@ mod tests {
             venue: None,
             url: url.map(str::to_owned),
             doi: doi.map(str::to_owned),
+            kind: None,
+            openalex: None,
             checked: None,
             former_titles: vec![],
             author_variants: vec![],
@@ -574,6 +617,7 @@ mod tests {
             year_comment: Some("TODO: confirm the first public version's year".into()),
             venue: "Journal of Synthetic Finance 12(3), 101-120 (2020)".into(),
             url: "https://doi.org/10.5555/j.synth.2019.07.001".into(),
+            openalex: None,
         };
         let text = stub_fields(&fields, TEMPLATE, "2026-11-05").unwrap();
         assert!(text.contains(
@@ -585,5 +629,78 @@ mod tests {
         assert_eq!(meta.year, 2018);
         assert_eq!(meta.venue, fields.venue);
         assert_eq!(meta.url, fields.url);
+    }
+
+    fn reference_of(frontmatter: &str) -> crate::registry::Reference {
+        let note = Note {
+            path: PathBuf::from("research/papers/2012-chen-xue-er.md"),
+            meta: parse_meta(&format!("---\n{frontmatter}---\n")),
+        };
+        note.to_reference("research/papers/2012-chen-xue-er.md", &Default::default())
+    }
+
+    #[test]
+    fn a_note_sets_the_registry_type_and_openalex_id() {
+        let r = reference_of("title: 論語集解\nkind: edition\ntype: other\nopenalex: W123\n");
+        assert_eq!(r.kind.as_deref(), Some("other"));
+        assert_eq!(r.ids.openalex.as_deref(), Some("W123"));
+        // Each accepted form gives the short id.
+        for form in ["openalex:w123", "https://openalex.org/W123"] {
+            let r = reference_of(&format!("title: T\nopenalex: {form}\n"));
+            assert_eq!(r.ids.openalex.as_deref(), Some("W123"), "{form}");
+        }
+        // A note without them is a paper with no OpenAlex id, as before.
+        let plain = reference_of("title: T\nkind: empirical\n");
+        assert_eq!(plain.kind.as_deref(), Some("paper"));
+        assert_eq!(plain.ids.openalex, None);
+        // A value that is no id stays, so `registry check` can report it.
+        let bad = reference_of("title: T\nopenalex: 2345273518\n");
+        assert_eq!(bad.ids.openalex.as_deref(), Some("2345273518"));
+    }
+
+    fn openalex_fields() -> StubFields {
+        StubFields {
+            title: "“学而时习之”与《论语》的开端".into(),
+            authors: vec!["陈赟".into()],
+            year: 2012,
+            year_comment: None,
+            venue: "华东师范大学学报".into(),
+            url: "https://openalex.org/W2345273518".into(),
+            openalex: Some("W2345273518".into()),
+        }
+    }
+
+    #[test]
+    fn stub_of_an_openalex_work_holds_its_id_and_asks_for_a_latin_note_id() {
+        let text = stub_fields(&openalex_fields(), TEMPLATE, "2026-11-20").unwrap();
+        let (yaml, _) = split_frontmatter(&text).unwrap();
+        assert!(
+            yaml.contains("url: https://openalex.org/W2345273518\nopenalex: W2345273518\n"),
+            "{yaml}"
+        );
+        assert!(
+            yaml.contains("id: 2012-anonymous-paper")
+                && yaml.contains(
+                    "# TODO: romanise by hand; the author or the title has no Latin letters"
+                ),
+            "{yaml}"
+        );
+        let meta: Meta = yaml_serde::from_str(yaml).unwrap();
+        assert_eq!(meta.title.as_deref(), Some("“学而时习之”与《论语》的开端"));
+        assert_eq!(meta.authors, ["陈赟"]);
+        assert_eq!(meta.openalex.as_deref(), Some("W2345273518"));
+        // A template with the field has it filled in place, once.
+        let template = TEMPLATE.replace("topics:", "openalex: W0000000000\ntopics:");
+        let text = stub_fields(&openalex_fields(), &template, "2026-11-20").unwrap();
+        assert_eq!(text.matches("openalex: W2345273518").count(), 1, "{text}");
+        assert!(text.contains("openalex: W2345273518\ntopics:"), "{text}");
+        // A Latin name and title give a plain id line.
+        let latin = StubFields {
+            title: "A Synthetic Title".into(),
+            authors: vec!["Ann Lee".into()],
+            ..openalex_fields()
+        };
+        let text = stub_fields(&latin, TEMPLATE, "2026-11-20").unwrap();
+        assert!(text.contains("id: 2012-lee-synthetic-title\n"), "{text}");
     }
 }

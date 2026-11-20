@@ -86,7 +86,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Print metadata for arXiv ids, DOIs, or SSRN/NBER URLs, in input order.
+    /// Print metadata for arXiv ids, DOIs, SSRN/NBER URLs, or OpenAlex work ids
+    /// (openalex:W123), in input order.
     Fetch {
         #[arg(
             required_unless_present = "title",
@@ -324,9 +325,18 @@ enum Command {
     },
     /// Print a paper note filled from arXiv or Crossref/OpenAlex, using the archive's
     /// template ([papers] template, else <notes>/../_templates/paper.md).
+    /// An OpenAlex work id (openalex:W123) fills the note from OpenAlex alone.
     Stub {
-        #[arg(value_name = "REF")]
-        id: String,
+        #[arg(
+            required_unless_present = "title",
+            conflicts_with = "title",
+            value_name = "REF"
+        )]
+        id: Option<String>,
+        /// Fill the note from the OpenAlex work with this title; for a work
+        /// with no DOI or arXiv id.
+        #[arg(long, value_name = "TITLE")]
+        title: Option<String>,
         /// Create <papers>/<id>.md instead of printing (never overwrites).
         #[arg(long)]
         write: bool,
@@ -1142,7 +1152,14 @@ fn main() -> ExitCode {
                 format,
             },
         ),
-        Command::Stub { id, write } => stub(&http, &config, &id, write),
+        Command::Stub { id, title, write } => {
+            let work = match (id, title) {
+                (Some(id), _) => StubWork::Ref(id),
+                (None, Some(title)) => StubWork::Title(title),
+                (None, None) => unreachable!("clap requires a reference or --title"),
+            };
+            stub(&http, &config, &work, write)
+        }
         Command::Seen {
             reference,
             title,
@@ -2098,6 +2115,20 @@ fn fetch(
             continue;
         }
         let result = match reference {
+            Err(_) if let Some(id) = openalex::parse_id(input) => {
+                match openalex::Client::new(http).by_id(&id) {
+                    Ok(Some(w)) => {
+                        print_work(&index, &w, None, with_abstract, json);
+                        logged.push((input.clone(), "openalex", vec![work_found(&w)]));
+                        Ok(())
+                    }
+                    Ok(None) => {
+                        logged.push((input.clone(), "openalex", Vec::new()));
+                        Err(format!("not found: OpenAlex has no work {id}"))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             Err(message) => Err(message),
             Ok(Ref::Arxiv(_)) => match looked_up.next().expect("one result per arXiv id") {
                 Ok(paper) => {
@@ -2166,6 +2197,70 @@ fn fetch(
     Ok(all_ok)
 }
 
+/// Prints an OpenAlex work; `score` is its title's similarity to a searched title.
+fn print_work(
+    index: &seen::Index,
+    w: &openalex::Work,
+    score: Option<f64>,
+    with_abstract: bool,
+    json: bool,
+) {
+    let note = w
+        .doi
+        .as_ref()
+        .and_then(|d| doi_note(index, d))
+        .map(str::to_owned);
+    if json {
+        #[derive(Serialize)]
+        struct Line<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            similarity: Option<f64>,
+            #[serde(flatten)]
+            work: &'a openalex::Work,
+            note: Option<String>,
+        }
+        let line = Line {
+            similarity: score.map(|s| (s * 100.0).round() / 100.0),
+            work: w,
+            note,
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&line).expect("OpenAlex work serializes to JSON")
+        );
+        return;
+    }
+    let mut head = match score {
+        Some(score) => format!("similarity {score:.2} · OpenAlex {}", w.id),
+        None => format!("OpenAlex {}", w.id),
+    };
+    if let Some(d) = &w.doi {
+        head += &format!(" · doi:{d}");
+    }
+    if let Some(y) = w.publication_year {
+        head += &format!(" · {y}");
+    }
+    if let Some(k) = &w.kind {
+        head += &format!(" · {k}");
+    }
+    let mut out = format!("{head}\n{}\n{}", w.title, w.authors.join(", "));
+    if let Some(v) = &w.venue {
+        out += &format!("\n{v}");
+    }
+    if let Some(n) = &note {
+        out += &format!("\nnote: {n}");
+    }
+    if with_abstract {
+        out += &format!(
+            "\n{}",
+            w.abstract_text
+                .as_deref()
+                .unwrap_or("(no abstract from OpenAlex)")
+        );
+    }
+    println!("{out}\n");
+}
+
 fn fetch_title(
     http: &Http,
     config: &config::Config,
@@ -2205,56 +2300,7 @@ fn fetch_title(
     }
     for w in &results {
         let score = text::similarity(title, &w.title);
-        let note = w
-            .doi
-            .as_ref()
-            .and_then(|d| doi_note(&index, d))
-            .map(str::to_owned);
-        if json {
-            #[derive(Serialize)]
-            struct Line<'a> {
-                similarity: f64,
-                #[serde(flatten)]
-                work: &'a openalex::Work,
-                note: Option<String>,
-            }
-            let line = Line {
-                similarity: (score * 100.0).round() / 100.0,
-                work: w,
-                note,
-            };
-            println!(
-                "{}",
-                serde_json::to_string(&line).expect("OpenAlex work serializes to JSON")
-            );
-            continue;
-        }
-        let mut head = format!("similarity {score:.2} · OpenAlex {}", w.id);
-        if let Some(d) = &w.doi {
-            head += &format!(" · doi:{d}");
-        }
-        if let Some(y) = w.publication_year {
-            head += &format!(" · {y}");
-        }
-        if let Some(k) = &w.kind {
-            head += &format!(" · {k}");
-        }
-        let mut out = format!("{head}\n{}\n{}", w.title, w.authors.join(", "));
-        if let Some(v) = &w.venue {
-            out += &format!("\n{v}");
-        }
-        if let Some(n) = &note {
-            out += &format!("\nnote: {n}");
-        }
-        if with_abstract {
-            out += &format!(
-                "\n{}",
-                w.abstract_text
-                    .as_deref()
-                    .unwrap_or("(no abstract from OpenAlex)")
-            );
-        }
-        println!("{out}\n");
+        print_work(&index, w, Some(score), with_abstract, json);
     }
     Ok(true)
 }
@@ -3983,12 +4029,86 @@ fn doi_stub_fields(r: &Resolved) -> Result<notes::StubFields, String> {
         )),
         venue: r.venue().unwrap_or_default(),
         url: r.doi.url(),
+        openalex: None,
     })
 }
 
-fn stub(http: &Http, config: &config::Config, input: &str, write: bool) -> Result<bool, String> {
+/// Frontmatter values for a stub of an OpenAlex work. The URL is the work's
+/// DOI when it has one, else its OpenAlex page.
+fn work_stub_fields(w: &openalex::Work) -> Result<notes::StubFields, String> {
+    let year = w
+        .publication_year
+        .ok_or_else(|| format!("openalex:{}: OpenAlex reports no year", w.id))?;
+    Ok(notes::StubFields {
+        title: w.title.clone(),
+        authors: w.authors.clone(),
+        year,
+        year_comment: None,
+        venue: w.venue.clone().unwrap_or_default(),
+        url: w
+            .doi
+            .as_ref()
+            .map_or_else(|| format!("https://openalex.org/{}", w.id), Doi::url),
+        openalex: Some(w.id.clone()),
+    })
+}
+
+/// The work a stub is for.
+enum StubWork {
+    /// An arXiv id, a DOI, an SSRN/NBER URL, or an OpenAlex work id.
+    Ref(String),
+    /// A title to find on OpenAlex.
+    Title(String),
+}
+
+/// The OpenAlex work whose title equals `title` after normalization. Other
+/// results are listed in the error, so the caller can choose one by id.
+fn work_by_title(client: &openalex::Client, title: &str) -> Result<openalex::Work, String> {
+    let mut results = client.search_title(title, TITLE_RESULTS)?;
+    if let Some(i) = results
+        .iter()
+        .position(|w| notes::title_matches(title, &w.title))
+    {
+        return Ok(results.swap_remove(i));
+    }
+    if results.is_empty() {
+        return Err(format!("OpenAlex found no works for title {title:?}"));
+    }
+    let list: Vec<String> = results
+        .iter()
+        .map(|w| format!("openalex:{} {:?}", w.id, w.title))
+        .collect();
+    Err(format!(
+        "no OpenAlex work has the title {title:?}; the closest are {}; \
+         run papers stub with the id of the right one",
+        list.join(", ")
+    ))
+}
+
+fn stub(
+    http: &Http,
+    config: &config::Config,
+    work: &StubWork,
+    write: bool,
+) -> Result<bool, String> {
     let papers = config.notes.as_path();
-    let fields = match Ref::parse(input)? {
+    let fields = match work {
+        StubWork::Title(title) => {
+            work_stub_fields(&work_by_title(&openalex::Client::new(http), title)?)?
+        }
+        StubWork::Ref(input) => stub_ref_fields(http, input)?,
+    };
+    write_stub(config, papers, &fields, write)
+}
+
+fn stub_ref_fields(http: &Http, input: &str) -> Result<notes::StubFields, String> {
+    if let Some(id) = openalex::parse_id(input) {
+        let w = openalex::Client::new(http)
+            .by_id(&id)?
+            .ok_or_else(|| format!("{input}: not found: OpenAlex has no work {id}"))?;
+        return work_stub_fields(&w);
+    }
+    Ok(match Ref::parse(input)? {
         Ref::Arxiv(id) => {
             let paper = Client::new(http)
                 .fetch(std::slice::from_ref(&id))
@@ -4002,12 +4122,20 @@ fn stub(http: &Http, config: &config::Config, input: &str, write: bool) -> Resul
             })?;
             doi_stub_fields(&r)?
         }
-    };
+    })
+}
+
+fn write_stub(
+    config: &config::Config,
+    papers: &Path,
+    fields: &notes::StubFields,
+    write: bool,
+) -> Result<bool, String> {
     let template_path = &config.template;
     let template = std::fs::read_to_string(template_path)
         .map_err(|e| format!("template {}: {e}", template_path.display()))?;
     let added = jiff::Zoned::now().date().to_string();
-    let note = notes::stub_fields(&fields, &template, &added)?;
+    let note = notes::stub_fields(fields, &template, &added)?;
     if !write {
         print!("{note}");
         return Ok(true);
@@ -6117,5 +6245,43 @@ mod tests {
                 Candidate::Landing("https://doi.org/10.5555/sap-2026-13".into()),
             ]
         );
+    }
+
+    #[test]
+    fn stub_fields_come_from_an_openalex_work() {
+        let search = include_str!("../tests/fixtures/openalex-search.json");
+        let (base, server) = http::serve(vec![
+            http::response("200 OK", &["Content-Type: application/json"], search),
+            http::response("200 OK", &["Content-Type: application/json"], search),
+        ]);
+        let endpoint = format!("{base}/works");
+        let http = Http::new();
+        let client = openalex::Client::at(&http, &endpoint);
+        // The second result has the title; the first is not taken for it.
+        let w = work_by_title(&client, "wash trading measures for toy markets").unwrap();
+        assert_eq!(w.title, "Wash Trading Measures for Toy Markets");
+        let fields = work_stub_fields(&w).unwrap();
+        assert_eq!(fields.openalex.as_deref(), Some(w.id.as_str()));
+        assert_eq!(fields.title, w.title);
+        assert_eq!(fields.authors, w.authors);
+        assert_eq!(Some(fields.year), w.publication_year);
+        let expected = match &w.doi {
+            Some(doi) => doi.url(),
+            None => format!("https://openalex.org/{}", w.id),
+        };
+        assert_eq!(fields.url, expected);
+        // No result with the title: the error names the candidates by id.
+        let e = work_by_title(&client, "Another Title").unwrap_err();
+        assert!(e.contains("openalex:W9000000011"), "{e}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn stub_takes_a_reference_or_a_title() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|_| ());
+        assert!(parse(&["papers", "stub", "openalex:W1"]).is_ok());
+        assert!(parse(&["papers", "stub", "--title", "A Title"]).is_ok());
+        assert!(parse(&["papers", "stub"]).is_err());
+        assert!(parse(&["papers", "stub", "openalex:W1", "--title", "A Title"]).is_err());
     }
 }

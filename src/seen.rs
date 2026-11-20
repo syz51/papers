@@ -175,9 +175,17 @@ impl Index {
 }
 
 /// The identifiers in user input: an arXiv id or URL, a DOI or DOI URL, an
-/// SSRN/NBER URL (mapped to its DOI), or any other http(s) URL.
+/// SSRN/NBER URL (mapped to its DOI), an OpenAlex work id, or any other
+/// http(s) URL.
 pub fn parse_input(input: &str) -> Result<Query, String> {
     let url = text::normalize_url(input).map(|_| input.trim().to_owned());
+    if let Some(id) = crate::openalex::parse_id(input) {
+        return Ok(Query {
+            openalex: Some(id),
+            url,
+            ..Query::default()
+        });
+    }
     let (doi, arxiv) = match Ref::parse(input) {
         Ok(Ref::Arxiv(id)) => (None, Some(id.id)),
         Ok(Ref::Doi(doi)) => (Some(doi.as_str().to_owned()), None),
@@ -281,5 +289,18 @@ mod tests {
             ..Query::default()
         };
         assert_eq!(keys(&by_title), ["9"]);
+    }
+
+    #[test]
+    fn an_openalex_id_in_user_input_finds_its_entry() {
+        let mut r = Reference::new("9".into());
+        r.ids.openalex = Some("W77".into());
+        let mut i = Index::default();
+        i.add(&r, REGISTRY);
+        let q = parse_input("openalex:w77").unwrap();
+        assert_eq!(q.openalex.as_deref(), Some("W77"));
+        assert_eq!(i.lookup(&q)[0].by, "openalex");
+        let by_url = parse_input("https://openalex.org/W77").unwrap();
+        assert_eq!(i.lookup(&by_url)[0].by, "openalex");
     }
 }

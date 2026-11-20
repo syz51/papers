@@ -10,7 +10,7 @@
 //! | `malformed-doi` | warn | a `doi` that does not parse, or that ends in a character other than an ASCII letter, an ASCII digit or `)` |
 //! | `no-identifier` | warn | no DOI, arXiv id, or URL |
 //! | `malformed-date` | error (warn for reported dates) | an access, reported, `checked` or `verified.at` date that is not a calendar date |
-//! | `invalid-value` | error | `type`, `depth` or `verified.status` outside the `rf.reference/1` vocabulary |
+//! | `invalid-value` | error | `type`, `depth` or `verified.status` outside the `rf.reference/1` vocabulary, or `ids.openalex` that is no work id |
 //! | `key-mismatch` | error | the heading number and the `[N]` entry number differ |
 //! | plus the parser's `entry-unnumbered`, `entry-missing`, `duplicate-key`, `duplicate-annotation-conflict`, `ambiguous-id`, `authors-unparsed`, `frontmatter-invalid`, `depth-invalid`, `depth-unparsed`, `depth-missing` |
 
@@ -126,6 +126,19 @@ pub fn check(records: &[Reference]) -> Vec<Finding> {
                     Severity::Warn,
                     r.key.clone(),
                     "the entry has no DOI, arXiv id, or URL".to_owned(),
+                ),
+                r,
+            ));
+        }
+        if let Some(id) = &r.ids.openalex
+            && crate::openalex::parse_id(id).is_none()
+        {
+            out.push(with_source(
+                Finding::new(
+                    "invalid-value",
+                    Severity::Error,
+                    r.key.clone(),
+                    format!("ids.openalex {id:?} is not an OpenAlex work id such as W2345273518"),
                 ),
                 r,
             ));
@@ -588,5 +601,36 @@ mod tests {
                 ("malformed-date", Severity::Error, "8"),
             ]
         );
+    }
+
+    #[test]
+    fn an_openalex_id_that_is_no_work_id_is_reported() {
+        let with = |key: &str, id: &str| {
+            let mut r = rec(key);
+            r.ids.url = Some(format!("https://example.org/{key}"));
+            r.ids.openalex = Some(id.into());
+            r
+        };
+        let records = [
+            with("1", "W2345273518"),
+            with("2", "https://openalex.org/W2345273518"),
+            with("3", "2345273518"),
+        ];
+        let got: Vec<(&str, &str)> = check(&records)
+            .iter()
+            .map(|f| (f.rule, f.message.as_str()))
+            .filter(|(rule, _)| *rule == "invalid-value")
+            .map(|(rule, m)| {
+                (
+                    rule,
+                    if m.contains("ids.openalex") {
+                        "openalex"
+                    } else {
+                        "other"
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(got, [("invalid-value", "openalex")]);
     }
 }
