@@ -9,7 +9,7 @@
 //! | `verified-mismatch` | warn | `verify --record` found the entry's metadata differs from its index, or not there |
 //! | `malformed-doi` | warn | a `doi` that does not parse, or that ends in a character other than an ASCII letter, an ASCII digit or `)` |
 //! | `no-identifier` | warn | no DOI, arXiv id, or URL |
-//! | `malformed-date` | error (warn for reported dates) | an access, reported or `verified.at` date that is not a calendar date |
+//! | `malformed-date` | error (warn for reported dates) | an access, reported, `checked` or `verified.at` date that is not a calendar date |
 //! | `invalid-value` | error | `type`, `depth` or `verified.status` outside the `rf.reference/1` vocabulary |
 //! | `key-mismatch` | error | the heading number and the `[N]` entry number differ |
 //! | plus the parser's `entry-unnumbered`, `entry-missing`, `duplicate-key`, `duplicate-annotation-conflict`, `ambiguous-id`, `authors-unparsed`, `frontmatter-invalid`, `depth-invalid`, `depth-unparsed`, `depth-missing` |
@@ -192,6 +192,19 @@ pub fn check(records: &[Reference]) -> Vec<Finding> {
                     Severity::Warn,
                     r.key.clone(),
                     format!("doi {doi:?} is not a DOI, or ends in a stray character"),
+                ),
+                r,
+            ));
+        }
+        if let Some(date) = &r.checked
+            && !valid_iso_date(date)
+        {
+            out.push(with_source(
+                Finding::new(
+                    "malformed-date",
+                    Severity::Error,
+                    r.key.clone(),
+                    format!("checked {date:?} is not a YYYY-MM-DD calendar date"),
                 ),
                 r,
             ));
@@ -557,6 +570,10 @@ mod tests {
             verified("6", "12 November", "checked"),
             verified("7", "2026-11-12", "manual"),
         ];
+        let mut hand = verified("8", "2026-11-12", "manual");
+        hand.checked = Some("todo".into());
+        let mut records = records.to_vec();
+        records.push(hand);
         let found = check(&records);
         let got = rules(&found);
         assert_eq!(
@@ -568,6 +585,7 @@ mod tests {
                 ("malformed-date", Severity::Error, "5"),
                 ("invalid-value", Severity::Error, "6"),
                 ("malformed-date", Severity::Error, "6"),
+                ("malformed-date", Severity::Error, "8"),
             ]
         );
     }

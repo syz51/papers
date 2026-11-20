@@ -219,8 +219,7 @@ impl Reference {
         }
     }
 
-    /// True when the bibliographic fields (what `verify` checks) and the
-    /// hand-check date are equal.
+    /// True when the bibliographic fields (what `verify` checks) are equal.
     fn same_metadata(&self, other: &Reference) -> bool {
         self.title == other.title
             && self.authors == other.authors
@@ -228,7 +227,13 @@ impl Reference {
             && self.venue == other.venue
             && self.ids.doi == other.ids.doi
             && self.ids.arxiv == other.ids.arxiv
-            && self.checked == other.checked
+    }
+
+    /// True when `self.verified` records the hand check of another `checked`
+    /// date than `fresh` has. An index result does not depend on the date.
+    fn hand_check_changed(&self, fresh: &Reference) -> bool {
+        self.checked != fresh.checked
+            && self.verified.as_ref().is_some_and(|v| v.status == "manual")
     }
 }
 
@@ -364,7 +369,8 @@ pub fn keep_recorded_depth(fresh: &mut [Reference], previous: &[Reference]) {
 
 /// Combines freshly parsed records with the previous registry. Tool-owned state
 /// carries over by key: `texts`, unknown fields, ids other tools added
-/// (`openalex`, `dblp`), and `verified` while the checked metadata is unchanged.
+/// (`openalex`, `dblp`), and `verified` while the checked metadata is
+/// unchanged; a `manual` record also needs the same `checked` date.
 /// Keys that vanished from the source are kept (keys are never deleted) and
 /// returned so the caller can report them.
 pub fn merge(fresh: Vec<Reference>, previous: Vec<Reference>) -> (Vec<Reference>, Vec<String>) {
@@ -373,7 +379,7 @@ pub fn merge(fresh: Vec<Reference>, previous: Vec<Reference>) -> (Vec<Reference>
     let mut out = Vec::with_capacity(fresh.len());
     for mut r in fresh {
         if let Some(prev) = old.remove(&r.key) {
-            if r.same_metadata(&prev) {
+            if r.same_metadata(&prev) && !prev.hand_check_changed(&r) {
                 r.verified = prev.verified.clone();
             }
             r.ids.openalex = r.ids.openalex.or(prev.ids.openalex);

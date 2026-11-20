@@ -90,6 +90,36 @@ fn a_checked_entry_is_verified_by_hand_and_passes_the_check() {
     assert!(papers(&dir, &["registry", "build"]).status.success());
     assert_eq!(entry(&dir)["checked"], "2026-11-21");
     assert!(entry(&dir)["verified"].is_null());
+
+    // Without the date, the record of the hand check goes too.
+    assert!(papers(&dir, &["verify", "--record"]).status.success());
+    assert_eq!(entry(&dir)["verified"]["status"], "manual");
+    std::fs::write(
+        dir.join("notes/sbck-lunyu-jijie.md"),
+        NOTE.replace("checked: 2026-11-20\n", ""),
+    )
+    .unwrap();
+    assert!(papers(&dir, &["registry", "build"]).status.success());
+    assert!(entry(&dir).get("checked").is_none());
+    assert!(entry(&dir)["verified"].is_null());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A date that is not one is an error of the check, though verify records it.
+#[test]
+fn a_checked_value_that_is_no_date_fails_the_check() {
+    let dir = project("bad-date");
+    std::fs::write(
+        dir.join("notes/sbck-lunyu-jijie.md"),
+        NOTE.replace("2026-11-20", "2026-13-45"),
+    )
+    .unwrap();
+    assert!(papers(&dir, &["registry", "build"]).status.success());
+    let check = papers(&dir, &["registry", "check"]);
+    let printed = all(&check);
+    assert!(!check.status.success(), "{printed}");
+    assert!(printed.contains("malformed-date"), "{printed}");
+    assert!(printed.contains("checked \"2026-13-45\""), "{printed}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
