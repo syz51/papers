@@ -5,6 +5,7 @@
 //! | --- | --- | --- |
 //! | `verify-title` | error | no source title equals ours (case, accents, punctuation ignored) |
 //! | `verify-first-author` | error | our first author lacks the source's first surname |
+//! | `verify-author-script` | info | our first author's name has no Latin letters and the source's surname is in Latin letters; the names were not compared |
 //! | `verify-author-count` | error | author counts differ (skipped for "et al." lists) |
 //! | `verify-year` | error | notes: not the arXiv v1 year, or after the earliest Crossref/OpenAlex date; registry: outside the years the source reports |
 //! | `verify-venue` | warn | our venue does not name the source's journal (journal articles only) |
@@ -163,16 +164,33 @@ pub struct Diff {
 }
 
 fn diff(rule: &'static str, message: String) -> Diff {
-    let severity = if rule == "verify-venue" {
-        Severity::Warn
-    } else {
-        Severity::Error
+    let severity = match rule {
+        "verify-venue" => Severity::Warn,
+        "verify-author-script" => Severity::Info,
+        _ => Severity::Error,
     };
     Diff {
         rule,
         severity,
         message,
     }
+}
+
+/// True when no difference is more than a notice: the entry matches.
+fn matches(diffs: &[Diff]) -> bool {
+    diffs.iter().all(|d| d.severity == Severity::Info)
+}
+
+/// True when `name` has letters and none of them is a Latin letter, as a
+/// name in Chinese characters has.
+fn without_latin_letters(name: &str) -> bool {
+    let mut letters = name.chars().filter(|c| c.is_alphabetic()).peekable();
+    letters.peek().is_some()
+        && letters.all(|c| {
+            !text::fold(&c.to_string())
+                .chars()
+                .any(|f| f.is_ascii_alphabetic())
+        })
 }
 
 /// Title and author checks shared by every source.
@@ -200,11 +218,24 @@ fn compare_people(
     } else {
         &s.author_variants
     };
+    let names = || std::iter::once(first).chain(variants.iter().map(String::as_str));
     if let Some(family) = family
-        && !std::iter::once(first)
-            .chain(variants.iter().map(String::as_str))
-            .any(|name| text::has_surname(name, family))
+        && !names().any(|name| text::has_surname(name, family))
     {
+        let theirs = authors.first().map_or("", String::as_str);
+        // A name in Chinese characters cannot hold a romanised surname, so
+        // the two are not compared. A Latin spelling in `author_variants`
+        // is compared, and a wrong one is an error.
+        if names().all(without_latin_letters) && !without_latin_letters(family) {
+            diffs.push(diff(
+                "verify-author-script",
+                format!(
+                    "first author: ours {first:?} has no Latin letters and {src} has {theirs:?}; \
+                     not compared (add the {src} spelling to author_variants to compare them)"
+                ),
+            ));
+            return with_author_count(s, src, ours, authors, diffs);
+        }
         let tried = if variants.is_empty() {
             String::new()
         } else {
@@ -218,6 +249,16 @@ fn compare_people(
             ),
         ));
     }
+    with_author_count(s, src, ours, authors, diffs)
+}
+
+fn with_author_count(
+    s: &Subject,
+    src: &str,
+    ours: &[String],
+    authors: &[String],
+    mut diffs: Vec<Diff>,
+) -> Vec<Diff> {
     if !s.authors_truncated && ours.len() != authors.len() {
         diffs.push(diff(
             "verify-author-count",
@@ -438,7 +479,7 @@ impl Outcome {
     /// Counting label for the summary.
     pub fn label(&self) -> &'static str {
         match self {
-            Outcome::Checked { diffs, .. } if diffs.is_empty() => "match",
+            Outcome::Checked { diffs, .. } if matches(diffs) => "match",
             Outcome::Checked { .. } => "mismatch",
             Outcome::NotFound { .. } => "not found",
             Outcome::Failed { .. } => "failed",
@@ -460,14 +501,9 @@ impl Outcome {
     /// `(against, status)` for the registry's `verified` field.
     pub fn verified(&self) -> Option<(&'static str, &'static str)> {
         match self {
-            Outcome::Checked { against, diffs, .. } => Some((
-                against,
-                if diffs.is_empty() {
-                    "match"
-                } else {
-                    "mismatch"
-                },
-            )),
+            Outcome::Checked { against, diffs, .. } => {
+                Some((against, if matches(diffs) { "match" } else { "mismatch" }))
+            }
             Outcome::NotFound { against, .. } => Some((against, "not-found")),
             // The hand check the note records, not an index.
             Outcome::Manual(_) => Some(("note", "manual")),
@@ -809,6 +845,59 @@ mod tests {
             diffs[3].message.contains("ours 2026 vs arXiv v1 2022"),
             "{diffs:?}"
         );
+    }
+
+    /// A name in Chinese characters against a romanised index name is a
+    /// notice and the entry still matches; a Latin spelling is compared.
+    #[test]
+    fn a_name_without_latin_letters_is_not_compared_with_a_latin_surname() {
+        let title = "学而时习之与《论语》首章";
+        let p = paper(title, &["Yun Chen"]);
+        let mut s = subject(title, &["陈赟"], 2022, false);
+        let diffs = compare_paper(&s, &p);
+        assert_eq!(rules(&diffs), ["verify-author-script"]);
+        assert_eq!(diffs[0].severity, Severity::Info);
+        assert!(
+            diffs[0].message.contains("Yun Chen"),
+            "{}",
+            diffs[0].message
+        );
+        let outcome = Outcome::Checked {
+            against: "OpenAlex",
+            used: "title".into(),
+            diffs,
+            notices: vec![],
+        };
+        assert_eq!(outcome.label(), "match");
+        assert_eq!(outcome.verified(), Some(("OpenAlex", "match")));
+
+        // The author count is still compared.
+        s.authors = Some(vec!["陈赟".into(), "李零".into()]);
+        assert_eq!(
+            rules(&compare_paper(&s, &p)),
+            ["verify-author-script", "verify-author-count"]
+        );
+
+        // A Latin spelling in author_variants is compared.
+        s.authors = Some(vec!["陈赟".into()]);
+        s.author_variants = vec!["Yun Chen".into()];
+        assert!(compare_paper(&s, &p).is_empty());
+        s.author_variants = vec!["Ling Li".into()];
+        assert_eq!(rules(&compare_paper(&s, &p)), ["verify-first-author"]);
+
+        // Two names in Chinese characters are compared as before.
+        let p = paper(title, &["李零"]);
+        let s = subject(title, &["陈赟"], 2022, false);
+        let diffs = compare_paper(&s, &p);
+        assert_eq!(rules(&diffs), ["verify-first-author"]);
+        assert_eq!(diffs[0].severity, Severity::Error);
+
+        // A Latin name with a wrong surname is still an error.
+        let p = paper(title, &["Yun Chen"]);
+        let s = subject(title, &["Yun Chan"], 2022, false);
+        let diffs = compare_paper(&s, &p);
+        assert_eq!(rules(&diffs), ["verify-first-author"]);
+        assert_eq!(diffs[0].severity, Severity::Error);
     }
 
     #[test]

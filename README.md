@@ -214,6 +214,7 @@ Withdrawal and retraction findings are notices about the work, not metadata diff
 | --- | --- | --- |
 | `verify-title` | error | No source title equals ours; case, accents and punctuation are ignored. |
 | `verify-first-author` | error | Our first author lacks the source's first surname. |
+| `verify-author-script` | info | Our first author's name has no Latin letters, such as a name in Chinese characters, and the source's surname is in Latin letters. The two names are not compared, and the entry can still be a `match`. Add the source's spelling to `author_variants` to compare them. |
 | `verify-author-count` | error | The author counts differ. Skipped for "et al." lists. |
 | `verify-year` | error | For notes: not the arXiv v1 year, or after the earliest Crossref/OpenAlex date. For the registry: outside the years the source reports. |
 | `verify-venue` | warn | Our venue does not name the source's journal. Journal articles only. |
