@@ -4523,6 +4523,8 @@ mod tests {
                 &["Content-Type: application/octet-stream"],
                 "PK not a PDF",
             ),
+            // No Content-Type header at all.
+            response("200 OK", &[], &pdf),
         ]);
         let dir = std::env::temp_dir().join(format!("papers-read-octet-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -4538,10 +4540,18 @@ mod tests {
 
         let other = format!("{base}/downloadArticleFile.do?attachType=PDF&id=2");
         let name = url_file_name(&other).unwrap();
-        assert_ne!(read_url(other, &dir), Ok(true));
-        server.join().unwrap();
+        // Skipped, not saved as a PDF without text.
+        assert_eq!(read_url(other, &dir), Ok(false));
         assert!(!dir.join(format!("{name}.pdf")).exists());
         assert!(!dir.join(format!("{name}.txt")).exists());
+
+        let untyped = format!("{base}/downloadArticleFile.do?attachType=PDF&id=3");
+        assert_eq!(read_url(untyped.clone(), &dir), Ok(true));
+        server.join().unwrap();
+        assert_eq!(
+            manifest(&dir, &untyped).pdf_sha256(),
+            Some(pdf_sha256.as_str())
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
