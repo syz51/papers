@@ -147,6 +147,7 @@ Optional fields that `papers` adds to the contract:
 | Field | Meaning |
 | --- | --- |
 | `authors_truncated` | `true` when the source lists only the first authors ("et al."). It is omitted when false. `verify` then skips the author count, and exports end the list with "and others" or "et al.". |
+| `checked` | The date the metadata was confirmed by hand, for a work that no index lists, such as an edition of a classical text. Copied from a note's frontmatter. It is omitted when the note has none. `registry check` reports a value that is not a calendar date as `malformed-date`. A changed or removed date clears a `verified` record with the status `manual`. |
 | `author_variants` | Other spellings of the first author that an index uses when its metadata misspells the name; `verify` accepts any of them. Copied from a note's frontmatter. It is omitted when empty. |
 | `citekey` | A citation key that overrides the generated one in `bib` and `cite`. It is set by hand and kept when the registry is rebuilt. |
 | `texts[].retrieved` | When `read` downloaded the text, as a UTC RFC 3339 time. It is omitted for texts attached by hand without `--retrieved` and for texts recorded before `papers` added it. |
@@ -177,11 +178,11 @@ Every write (`registry build`, `registry attach`, `registry record-pdfs`, `regis
 | `duplicate-target-missing` | error | `duplicate_of` names a key the registry lacks. |
 | `duplicate-cycle` | error | Following `duplicate_of` from a key comes back to it, such as `1 → 2 → 1`. It is reported once, at the cycle's least key. |
 | `duplicate-chain` | warn | `duplicate_of` names a key that is itself a duplicate. The message names the key the chain ends at, which `duplicate_of` should name. |
-| `verified-mismatch` | warn | `verify --record` recorded `mismatch` or `not-found` in `verified.status`. Check the entry, then run `verify --keys <key> --record` again. |
+| `verified-mismatch` | warn | `verify --record` recorded `mismatch` or `not-found` in `verified.status`; `match` and `manual` give no finding. Check the entry, then run `verify --keys <key> --record` again. |
 | `malformed-doi` | warn | The `doi` does not parse as a DOI, or ends in a character other than an ASCII letter, an ASCII digit or `)`, such as a stray backtick. A few valid DOIs, such as old SICI DOIs ending in `#`, also get it. |
 | `no-identifier` | warn | The entry has no DOI, arXiv id or URL. |
-| `malformed-date` | error (warn for reported dates) | An access date, a reported date or `verified.at` is not a calendar date. |
-| `invalid-value` | error | `type` or `depth` is outside the `rf.reference/1` vocabulary, or `verified.status` is not `match`, `mismatch` or `not-found`. |
+| `malformed-date` | error (warn for reported dates) | An access date, a reported date, `checked` or `verified.at` is not a calendar date. |
+| `invalid-value` | error | `type` or `depth` is outside the `rf.reference/1` vocabulary, or `verified.status` is not `match`, `mismatch`, `not-found` or `manual`. |
 | `key-mismatch` | error | The heading number and the `[N]` entry number differ, or a note's id and its file name differ. |
 | `key-missing-from-source` | warn | A registry key is no longer in the source. |
 | `registry-stale` | warn | The registry differs from a fresh parse of the source. |
@@ -204,7 +205,7 @@ These parse issues are also reported:
 
 ### `verify` rules
 
-`verify` checks every registry entry, or the notes when there is no registry. Use `--keys`, `--unverified` or `--limit` to choose fewer. Responses are cached, so a rerun costs no requests. `--record` writes `verified{at, against, status}` back to the registry: `at` is the date, `against` the index, and `status` is `match`, `mismatch` or `not-found`. Only `verify --record` sets the field, and `registry build` keeps it while the checked metadata is unchanged. `registry check` checks its values and reports a recorded `mismatch` or `not-found` as `verified-mismatch`. An entry never checked has `verified: null`. An entry whose only DOI is an arXiv DOI is checked against arXiv. An entry with neither a title nor authors is skipped: there is nothing to compare, so it is never recorded as a match.
+`verify` checks every registry entry, or the notes when there is no registry. Use `--keys`, `--unverified` or `--limit` to choose fewer. Responses are cached, so a rerun costs no requests. `--record` writes `verified{at, against, status}` back to the registry: `at` is the date, `against` the index (or `note` for a hand check), and `status` is `match`, `mismatch`, `not-found` or `manual`. `manual` is recorded for an entry without a DOI or arXiv id whose note has a `checked` date: `verify` reports `verify-manual` and makes no title search for it. Only `verify --record` sets the field, and `registry build` keeps it while the checked metadata is unchanged. `registry check` checks its values and reports a recorded `mismatch` or `not-found` as `verified-mismatch`. An entry never checked has `verified: null`. An entry whose only DOI is an arXiv DOI is checked against arXiv. An entry with neither a title nor authors is skipped: there is nothing to compare, so it is never recorded as a match.
 
 Withdrawal and retraction findings are notices about the work, not metadata differences: they leave `verified.status` as `match`. The registry has no field for them; each `verify` run reports them again. Only a paper with more than one arXiv version can have a withdrawn version, so `verify` reads the version history (one request to `oaipmh.arxiv.org`, cached like the others) only for those papers.
 
@@ -221,7 +222,7 @@ Withdrawal and retraction findings are notices about the work, not metadata diff
 | `verify-updated` | info | Crossref lists another notice for the DOI, such as a correction or an expression of concern. |
 | `verify-not-found` | error (warn for title searches) | The source has no record for our identifier. |
 | `verify-failed` | error | A lookup failed, including the arXiv version history; the run exits 2. |
-| `verify-manual` | info | No index lists the work, and a note's `checked` date records a hand check. |
+| `verify-manual` | info | No index lists the work, and a note's `checked` date records a hand check. `registry build` copies the date into the entry's `checked` field, so the rule holds for registry entries too. |
 | `verify-skipped` | info | There is nothing to look up or compare: a duplicate, a non-paper without a DOI or arXiv id, or an entry with neither title nor authors. |
 
 When an index's metadata is wrong rather than the note, record why in the note's frontmatter instead of copying the error: `former_titles` lists earlier titles an index may still show, `author_variants` lists other spellings of the first author that an index uses (for example a name arXiv lists with a letter missing; `papers registry build` copies it into the registry), and `checked: <date>` marks a work no index lists whose metadata was confirmed by hand. `former_titles` and `author_variants` take a list or a single string.

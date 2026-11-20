@@ -22,7 +22,7 @@ pub const DEPTHS: [&str; 6] = [
     "reproduced",
 ];
 /// The `verified.status` values `verify --record` writes.
-pub const VERIFIED_STATUSES: [&str; 3] = ["match", "mismatch", "not-found"];
+pub const VERIFIED_STATUSES: [&str; 4] = ["match", "mismatch", "not-found", "manual"];
 pub const TYPES: [&str; 6] = ["paper", "dataset", "software", "web", "standard", "other"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,6 +54,11 @@ pub struct Reference {
     /// its metadata misspells the name. `verify` accepts any of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub author_variants: Vec<String>,
+    /// Optional: the date the metadata was confirmed by hand, for a work no
+    /// index lists. Copied from a note's frontmatter; `verify` then reports
+    /// `verify-manual` instead of searching by title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<String>,
     /// Fields this version does not know, kept when the registry is rewritten.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -169,7 +174,7 @@ pub struct Verified {
     /// `YYYY-MM-DD`.
     pub at: String,
     pub against: String,
-    /// `match`, `mismatch`, or `not-found`.
+    /// `match`, `mismatch`, `not-found`, or `manual`.
     pub status: String,
 }
 
@@ -209,6 +214,7 @@ impl Reference {
             verified: None,
             authors_truncated: false,
             author_variants: Vec::new(),
+            checked: None,
             extra: Map::new(),
         }
     }
@@ -221,6 +227,13 @@ impl Reference {
             && self.venue == other.venue
             && self.ids.doi == other.ids.doi
             && self.ids.arxiv == other.ids.arxiv
+    }
+
+    /// True when `self.verified` records the hand check of another `checked`
+    /// date than `fresh` has. An index result does not depend on the date.
+    fn hand_check_changed(&self, fresh: &Reference) -> bool {
+        self.checked != fresh.checked
+            && self.verified.as_ref().is_some_and(|v| v.status == "manual")
     }
 }
 
@@ -356,7 +369,8 @@ pub fn keep_recorded_depth(fresh: &mut [Reference], previous: &[Reference]) {
 
 /// Combines freshly parsed records with the previous registry. Tool-owned state
 /// carries over by key: `texts`, unknown fields, ids other tools added
-/// (`openalex`, `dblp`), and `verified` while the checked metadata is unchanged.
+/// (`openalex`, `dblp`), and `verified` while the checked metadata is
+/// unchanged; a `manual` record also needs the same `checked` date.
 /// Keys that vanished from the source are kept (keys are never deleted) and
 /// returned so the caller can report them.
 pub fn merge(fresh: Vec<Reference>, previous: Vec<Reference>) -> (Vec<Reference>, Vec<String>) {
@@ -365,7 +379,7 @@ pub fn merge(fresh: Vec<Reference>, previous: Vec<Reference>) -> (Vec<Reference>
     let mut out = Vec::with_capacity(fresh.len());
     for mut r in fresh {
         if let Some(prev) = old.remove(&r.key) {
-            if r.same_metadata(&prev) {
+            if r.same_metadata(&prev) && !prev.hand_check_changed(&r) {
                 r.verified = prev.verified.clone();
             }
             r.ids.openalex = r.ids.openalex.or(prev.ids.openalex);

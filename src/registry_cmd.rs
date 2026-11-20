@@ -175,6 +175,7 @@ fn fill_from(r: &mut Reference, prev: &Reference) {
     if r.author_variants.is_empty() {
         r.author_variants.clone_from(&prev.author_variants);
     }
+    fill(&mut r.checked, &prev.checked);
     fill(&mut r.year, &prev.year);
     fill(&mut r.venue, &prev.venue);
     fill(&mut r.ids.doi, &prev.ids.doi);

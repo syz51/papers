@@ -14,7 +14,7 @@
 //! | `verify-updated` | info | Crossref lists another notice for the DOI, such as a correction or expression of concern |
 //! | `verify-not-found` | error (warn for title searches) | the source has no record for our identifier |
 //! | `verify-failed` | error | a lookup failed (network or API error), including the arXiv version history; the run exits 2 |
-//! | `verify-manual` | info | no index lists the work; a note's `checked` date records a hand check |
+//! | `verify-manual` | info | no index lists the work; the `checked` date of a note or a registry entry records a hand check |
 //! | `verify-skipped` | info | nothing to look up: a non-paper without DOI or arXiv id, or a duplicate |
 //! | `frontmatter-invalid` | error | a note's frontmatter does not parse |
 
@@ -54,7 +54,8 @@ pub struct Subject {
     pub version: Option<String>,
     /// Other spellings of the first author that a source may use.
     pub author_variants: Vec<String>,
-    /// A note's hand-check date.
+    /// The hand-check date of a note, or of a registry entry that has no
+    /// DOI and no arXiv id, also none that does not parse.
     pub checked: Option<String>,
     pub duplicate_of: Option<String>,
     /// Why the entry cannot be read (bad frontmatter).
@@ -83,7 +84,12 @@ impl Subject {
             }),
             version: r.version.clone(),
             author_variants: r.author_variants.clone(),
-            checked: None,
+            // An entry with an id is checked against its index, and one whose
+            // id does not parse is searched by title as before.
+            checked: r
+                .checked
+                .clone()
+                .filter(|_| r.ids.doi.is_none() && r.ids.arxiv.is_none()),
             duplicate_of: r.duplicate_of.clone(),
             invalid: None,
             evidence: r
@@ -463,6 +469,8 @@ impl Outcome {
                 },
             )),
             Outcome::NotFound { against, .. } => Some((against, "not-found")),
+            // The hand check the note records, not an index.
+            Outcome::Manual(_) => Some(("note", "manual")),
             _ => None,
         }
     }
@@ -814,6 +822,23 @@ mod tests {
             let s = subject("Synthetic Widgets", &[ours], 2022, true);
             assert!(compare_paper(&s, &p).is_empty(), "{ours}");
         }
+    }
+
+    #[test]
+    fn a_registry_entry_takes_its_checked_date_only_without_an_id() {
+        let mut r = Reference::new("k".into());
+        r.title = Some("論語".into());
+        r.checked = Some("2026-11-20".into());
+        let s = Subject::from_reference(&r);
+        let outcome = check(&Http::new(), "", &s, &mut std::iter::empty());
+        assert_eq!(outcome.label(), "manual");
+        assert_eq!(outcome.verified(), Some(("note", "manual")));
+        // A DOI that does not parse is still an id: no hand check stands in.
+        r.ids.doi = Some("not a doi".into());
+        assert_eq!(Subject::from_reference(&r).checked, None);
+        r.ids.doi = None;
+        r.ids.arxiv = Some("2601.00001".into());
+        assert_eq!(Subject::from_reference(&r).checked, None);
     }
 
     #[test]
