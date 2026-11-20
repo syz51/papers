@@ -2205,10 +2205,12 @@ fn print_work(
     with_abstract: bool,
     json: bool,
 ) {
+    // By DOI, else by the OpenAlex id a note gives for a work without one.
     let note = w
         .doi
         .as_ref()
         .and_then(|d| doi_note(index, d))
+        .or_else(|| index.note(&format!("openalex:{}", w.id.to_ascii_uppercase())))
         .map(str::to_owned);
     if json {
         #[derive(Serialize)]
@@ -4061,27 +4063,45 @@ enum StubWork {
     Title(String),
 }
 
-/// The OpenAlex work whose title equals `title` after normalization. Other
-/// results are listed in the error, so the caller can choose one by id.
+/// The one OpenAlex work whose title equals `title` after normalization.
+/// With none or several, the error lists the results, so the caller can
+/// choose one by id.
 fn work_by_title(client: &openalex::Client, title: &str) -> Result<openalex::Work, String> {
     let mut results = client.search_title(title, TITLE_RESULTS)?;
-    if let Some(i) = results
-        .iter()
-        .position(|w| notes::title_matches(title, &w.title))
-    {
-        return Ok(results.swap_remove(i));
-    }
     if results.is_empty() {
         return Err(format!("OpenAlex found no works for title {title:?}"));
     }
-    let list: Vec<String> = results
-        .iter()
-        .map(|w| format!("openalex:{} {:?}", w.id, w.title))
+    let equal: Vec<usize> = (0..results.len())
+        .filter(|&i| notes::title_matches(title, &results[i].title))
         .collect();
+    if let [i] = equal[..] {
+        return Ok(results.swap_remove(i));
+    }
+    let describe = |w: &openalex::Work| {
+        let year = w
+            .publication_year
+            .map_or_else(String::new, |y| format!(" {y}"));
+        format!(
+            "openalex:{} {:?} ({}{year})",
+            w.id,
+            w.title,
+            w.authors.join(", ")
+        )
+    };
+    let (what, list): (&str, Vec<String>) = if equal.is_empty() {
+        (
+            "no OpenAlex work has",
+            results.iter().map(describe).collect(),
+        )
+    } else {
+        (
+            "several OpenAlex works have",
+            equal.iter().map(|&i| describe(&results[i])).collect(),
+        )
+    };
     Err(format!(
-        "no OpenAlex work has the title {title:?}; the closest are {}; \
-         run papers stub with the id of the right one",
-        list.join(", ")
+        "{what} the title {title:?}: {}; run papers stub with the id of the right one",
+        list.join("; ")
     ))
 }
 
@@ -4131,6 +4151,14 @@ fn write_stub(
     fields: &notes::StubFields,
     write: bool,
 ) -> Result<bool, String> {
+    // The file name is the note id, and this one is not the work's own.
+    if write && fields.id_needs_romanising() {
+        return Err(format!(
+            "the author or the title has no Latin letters, so the note id {} is not complete; \
+             run without --write and save the note under an id in Latin letters",
+            fields.note_id()
+        ));
+    }
     let template_path = &config.template;
     let template = std::fs::read_to_string(template_path)
         .map_err(|e| format!("template {}: {e}", template_path.display()))?;
@@ -6274,6 +6302,81 @@ mod tests {
         let e = work_by_title(&client, "Another Title").unwrap_err();
         assert!(e.contains("openalex:W9000000011"), "{e}");
         server.join().unwrap();
+        // A work without a year gives no stub.
+        let mut undated = w.clone();
+        undated.publication_year = None;
+        let e = work_stub_fields(&undated).err().unwrap();
+        assert!(e.contains("reports no year"), "{e}");
+    }
+
+    #[test]
+    fn a_title_that_two_works_share_gives_no_stub() {
+        let work = |id: &str, year: u32| {
+            format!(
+                r#"{{"id":"https://openalex.org/{id}","title":"Synthetic Widgets","publication_year":{year},"authorships":[]}}"#
+            )
+        };
+        let body = format!(
+            r#"{{"meta":{{"count":2}},"results":[{},{}]}}"#,
+            work("W9000000021", 2020),
+            work("W9000000022", 2021)
+        );
+        let (base, server) = http::serve(vec![http::response(
+            "200 OK",
+            &["Content-Type: application/json"],
+            &body,
+        )]);
+        let endpoint = format!("{base}/works");
+        let http = Http::new();
+        let e = work_by_title(&openalex::Client::at(&http, &endpoint), "synthetic widgets")
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(
+            e.starts_with("several OpenAlex works have the title"),
+            "{e}"
+        );
+        assert!(
+            e.contains("openalex:W9000000021") && e.contains("openalex:W9000000022"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_stub_whose_id_needs_romanising_is_not_written() {
+        let (dir, config) = registered_project("stub-romanise");
+        let fields = notes::StubFields {
+            title: "論語集解".into(),
+            authors: vec!["何晏".into()],
+            year: 2012,
+            year_comment: None,
+            venue: String::new(),
+            url: "https://openalex.org/W1".into(),
+            openalex: Some("W1".into()),
+        };
+        let got = write_stub(&config, &config.notes, &fields, true);
+        let listed: Vec<_> = std::fs::read_dir(&config.notes)
+            .map(|d| d.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            got.as_ref().is_err_and(|e| e.contains("no Latin letters")),
+            "{got:?}"
+        );
+        assert!(
+            !listed
+                .iter()
+                .any(|n| n.to_string_lossy().contains("anonymous")),
+            "{listed:?}"
+        );
+    }
+
+    #[test]
+    fn openalex_ids_are_no_other_reference() {
+        // `fetch` and `stub` look for an OpenAlex id where `Ref::parse` fails.
+        for input in ["openalex:W1", "W1", "https://openalex.org/W1"] {
+            assert!(Ref::parse(input).is_err(), "{input}");
+            assert_eq!(openalex::parse_id(input).as_deref(), Some("W1"), "{input}");
+        }
     }
 
     #[test]

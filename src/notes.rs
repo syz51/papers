@@ -244,7 +244,7 @@ impl StubFields {
 
     /// True when the note id lacks a part because the author's name or the
     /// title has no Latin letters; the id then needs a romanisation by hand.
-    fn id_needs_romanising(&self) -> bool {
+    pub fn id_needs_romanising(&self) -> bool {
         (!self.authors.is_empty() && self.family().is_none())
             || (!self.title.trim().is_empty() && crate::text::ascii_words(&self.title).is_empty())
     }
@@ -264,10 +264,7 @@ pub fn stub_fields(fields: &StubFields, template: &str, added: &str) -> Result<S
         .iter()
         .map(|a| yaml_scalar(a, true))
         .collect();
-    let has_openalex = template_meta
-        .lines()
-        .filter_map(template_field)
-        .any(|(field, ..)| field == "openalex");
+    let mut has_openalex = false;
     let mut out = String::from("---\n");
     for line in template_meta.lines() {
         let Some((field, example, hint)) = template_field(line) else {
@@ -300,12 +297,11 @@ pub fn stub_fields(fields: &StubFields, template: &str, added: &str) -> Result<S
                 continue;
             }
             "venue" => yaml_scalar(&fields.venue, false),
-            // A template without the field gets the id after the URL.
-            "url" => match &fields.openalex {
-                Some(id) if !has_openalex => format!("{}\nopenalex: {id}", fields.url),
-                _ => fields.url.clone(),
-            },
-            "openalex" if let Some(id) = &fields.openalex => id.clone(),
+            "url" => fields.url.clone(),
+            "openalex" if let Some(id) = &fields.openalex => {
+                has_openalex = true;
+                id.clone()
+            }
             "added" => added.to_owned(),
             _ => {
                 let placeholder = empty_like(example);
@@ -315,6 +311,10 @@ pub fn stub_fields(fields: &StubFields, template: &str, added: &str) -> Result<S
             }
         };
         let _ = writeln!(out, "{field}: {value}");
+    }
+    // A template without the field gets the id as the last field.
+    if let Some(id) = fields.openalex.as_ref().filter(|_| !has_openalex) {
+        let _ = writeln!(out, "openalex: {id}");
     }
     out.push_str("---\n");
     out.push_str(body);
@@ -674,10 +674,15 @@ mod tests {
     fn stub_of_an_openalex_work_holds_its_id_and_asks_for_a_latin_note_id() {
         let text = stub_fields(&openalex_fields(), TEMPLATE, "2026-11-20").unwrap();
         let (yaml, _) = split_frontmatter(&text).unwrap();
-        assert!(
-            yaml.contains("url: https://openalex.org/W2345273518\nopenalex: W2345273518\n"),
-            "{yaml}"
-        );
+        assert!(yaml.ends_with("\nopenalex: W2345273518"), "{yaml}");
+        // A template without a `url` field keeps the id too.
+        let no_url: String = TEMPLATE
+            .lines()
+            .filter(|l| !l.starts_with("url:"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let bare = stub_fields(&openalex_fields(), &no_url, "2026-11-20").unwrap();
+        assert_eq!(bare.matches("openalex: W2345273518").count(), 1, "{bare}");
         assert!(
             yaml.contains("id: 2012-anonymous-paper")
                 && yaml.contains(
