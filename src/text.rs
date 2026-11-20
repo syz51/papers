@@ -7,6 +7,27 @@ pub fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The words of `s`: each Chinese or Japanese character (Han, kana) is a word,
+/// as word processors count them, and the rest is split at white space and
+/// CJK punctuation. Korean spaces its words, so Hangul is split like Latin. A
+/// piece without a letter or digit, such as `，` or `(`, is no word.
+pub fn words(s: &str) -> usize {
+    let cjk = |c: char| matches!(c as u32, 0x3040..=0x309F | 0x30A1..=0x30FA | 0x30FC..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF);
+    // CJK and full-width punctuation (`、`, `。`, `「`, `・`, `，`, `（`)
+    // separates words and is none itself.
+    let gap = |c: char| {
+        cjk(c)
+            || matches!(c as u32, 0x3000..=0x303F | 0x30A0 | 0x30FB)
+            || (matches!(c as u32, 0xFF00..=0xFFEF) && !c.is_alphanumeric())
+    };
+    let other: String = s.chars().map(|c| if gap(c) { ' ' } else { c }).collect();
+    s.chars().filter(|c| cjk(*c)).count()
+        + other
+            .split_whitespace()
+            .filter(|w| w.chars().any(char::is_alphanumeric))
+            .count()
+}
+
 /// Removes accents (NFKD, then drops combining marks) and transliterates the
 /// common Latin letters that do not decompose.
 pub fn fold(s: &str) -> String {

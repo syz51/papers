@@ -20,7 +20,8 @@ pub const SCHEMA: &str = "rf.paper-structure/1";
 /// Appended to the text's file name: `87.txt.structure.json`.
 pub const SUFFIX: &str = ".structure.json";
 const UNKNOWN: &str = "unknown";
-/// A text with fewer words is short: a note or a card, not a paper. A text
+/// A text with fewer words ([`text::words`]) is short: a note or a card, not a
+/// paper. A text
 /// without a reference heading is counted in one group or the other.
 pub const SHORT_WORDS: usize = 2000;
 
@@ -130,7 +131,8 @@ pub struct Structure {
     /// plain text, which marks no table borders.
     pub tables: Known<Vec<Table>>,
     pub warnings: Vec<String>,
-    /// Words of the text, split at whitespace; not in the sidecar.
+    /// Words of the text ([`text::words`]: a Chinese or Japanese character
+    /// is a word); not in the sidecar.
     #[serde(skip)]
     pub words: usize,
 }
@@ -290,12 +292,22 @@ impl Targets {
     }
 }
 
+/// Compiles `[papers] structure_headings`.
+pub fn heading_patterns(patterns: &[String]) -> Result<Vec<Regex>, String> {
+    patterns
+        .iter()
+        .map(|p| Regex::new(p).map_err(|e| format!("[papers] structure_headings {p:?}: {e}")))
+        .collect()
+}
+
 /// Builds the structure of `content`. `markdown`: the text is Markdown, whose
-/// `#` headings are then the only headings.
+/// `#` headings are then the only headings. `configured`: in a plain text, a
+/// line that one of these matches is a top body heading.
 pub fn build(
     content: &str,
     info: TextInfo,
     markdown: bool,
+    configured: &[Regex],
     targets: &Targets,
     generator: String,
 ) -> Structure {
@@ -307,7 +319,7 @@ pub fn build(
     };
     let headings = match markdown {
         true => markdown_headings(&lines),
-        false => plain_headings(&lines, &mut warnings),
+        false => plain_headings(&lines, configured, &mut warnings),
     };
     let sections = sections(&lines, &headings, markdown, &mut warnings);
     let references = references(&lines, &sections, targets, markdown, &mut warnings);
@@ -327,7 +339,7 @@ pub fn build(
         references,
         tables,
         warnings,
-        words: content.split_whitespace().count(),
+        words: text::words(content),
     }
 }
 
@@ -496,7 +508,7 @@ fn clean(line: &str) -> String {
     text::squash(&line.replace('\u{c}', " "))
 }
 
-/// Lower case without whitespace and without a final `.` or `:`, so that
+/// Lower case without whitespace and without a final `.`, `:` or `：`, so that
 /// `R EFERENCES` and `Abstract.` compare as `references` and `abstract`.
 fn tight(s: &str) -> String {
     let t: String = s
@@ -504,7 +516,7 @@ fn tight(s: &str) -> String {
         .filter(|c| !c.is_whitespace())
         .flat_map(char::to_lowercase)
         .collect();
-    t.trim_end_matches(['.', ':']).to_owned()
+    t.trim_end_matches(['.', ':', '：']).to_owned()
 }
 
 #[derive(Debug, Clone)]
@@ -516,7 +528,18 @@ struct Heading {
     kind: Kind,
 }
 
-const ABSTRACTS: [&str; 5] = ["abstract", "概要", "要旨", "あらまし", "摘要"];
+const ABSTRACTS: [&str; 10] = [
+    "abstract",
+    "概要",
+    "要旨",
+    "あらまし",
+    "摘要",
+    "内容摘要",
+    "內容摘要",
+    "提要",
+    "内容提要",
+    "內容提要",
+];
 const REFERENCES: [&str; 7] = [
     "references",
     "bibliography",
@@ -554,6 +577,29 @@ const NAMED: [&str; 22] = [
 
 static INLINE_ABSTRACT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?i:abstract)\s*[—–:.\-]\s*\S").unwrap());
+/// The abstract's label of a Chinese article with the text on its line:
+/// `摘 要：…`, `内容提要：…`, `【摘要】…`. The label needs its colon or its
+/// brackets: `摘要` also starts a sentence.
+static CJK_INLINE_ABSTRACT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:[\[【［〔]\s*(?:[内內]\s*容\s*)?(?:摘|提)\s*要\s*[\]】］〕]\s*[:：]?|(?:[内內]\s*容\s*)?(?:摘|提)\s*要\s*[:：])\s*\S",
+    )
+    .unwrap()
+});
+/// The keywords line that follows such an abstract: `关键词：…`, `【關鍵詞】…`.
+static CJK_KEYWORDS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:[\[【［〔]\s*[关關]\s*[键鍵]\s*[词詞字]\s*[\]】］〕]|[关關]\s*[键鍵]\s*[词詞字]\s*[:：])",
+    )
+    .unwrap()
+});
+/// `一 标题`, `二、标题`.
+static CJK_NUMBERED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([一二三四五六七八九十]{1,3})(?:\s*[、．.]\s*|\s+)(\S.*)$").unwrap()
+});
+/// `（一）标题`.
+static CJK_SUBNUMBERED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[（(]([一二三四五六七八九十]{1,3})[）)]\s*(\S.*)$").unwrap());
 static NUMBER_PREFIX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:\d{1,2}|[IVXivx]{1,5})\.?\s+(.+)$").unwrap());
 static NUMBERED: LazyLock<Regex> =
@@ -639,6 +685,33 @@ fn is_title_case(title: &str) -> bool {
     !long.is_empty() && capital * 5 >= long.len() * 3
 }
 
+/// A Chinese numeral from 一 to 九十九.
+fn cjk_number(s: &str) -> Option<u32> {
+    let digit = |c: char| {
+        "一二三四五六七八九"
+            .chars()
+            .position(|d| d == c)
+            .map(|p| p as u32 + 1)
+    };
+    let chars: Vec<char> = s.chars().collect();
+    match chars[..] {
+        [d] => digit(d).or((d == '十').then_some(10)),
+        ['十', d] => Some(10 + digit(d)?),
+        [d, '十'] => Some(digit(d)? * 10),
+        [t, '十', d] => Some(digit(t)? * 10 + digit(d)?),
+        _ => None,
+    }
+}
+
+/// True when `title` reads as the words of a Chinese heading, not as a
+/// sentence or an item of a list in the running text.
+fn is_cjk_title(title: &str) -> bool {
+    title.chars().count() <= 40
+        && !title.contains('。')
+        && !title.ends_with(['，', '；', '：', '、', '？', '！', ',', ';', ':', '.'])
+        && title.chars().filter(|c| c.is_alphabetic()).count() >= 2
+}
+
 fn roman(s: &str) -> Option<u32> {
     let mut total = 0;
     let mut last = 0;
@@ -684,11 +757,22 @@ fn appendix(clean: &str, after_blank: bool) -> Option<Option<char>> {
 }
 
 /// The headings of a plain text, by pattern.
-fn plain_headings(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Heading> {
+fn plain_headings(
+    lines: &[&str],
+    configured: &[Regex],
+    warnings: &mut Vec<String>,
+) -> Vec<Heading> {
     let mut out: Vec<Heading> = Vec::new();
     // The last accepted top number, Arabic or Roman.
     let mut major = 0u32;
     let mut roman_major = 0u32;
+    // The last accepted Chinese numbers: `三`, and `（二）` under it.
+    // A text numbers its sections in one way: these count only while no
+    // Arabic or Roman number is accepted, and then no Arabic number counts.
+    let mut cjk_major = 0u32;
+    let mut cjk_minor = 0u32;
+    // The lines of the headings with Chinese numbers since the last start.
+    let mut cjk_lines: Vec<usize> = Vec::new();
     let mut in_refs = false;
     let mut in_appendix = false;
     let mut letter: Option<char> = None;
@@ -749,8 +833,23 @@ fn plain_headings(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Heading> {
             level,
             kind,
         };
+        // A configured pattern is the project's word on its corpus: its
+        // heading counts anywhere, and ends a reference list or an appendix.
+        // The numbers of its sections start again.
+        if configured.iter().any(|p| p.is_match(&c)) {
+            (in_refs, in_appendix, letter) = (false, false, None);
+            (major, roman_major, cjk_major, cjk_minor) = (0, 0, 0, 0);
+            cjk_lines.clear();
+            out.push(heading(&c, 1, Kind::Body));
+            continue;
+        }
         if !abstract_seen && !in_refs && !in_appendix {
-            if ABSTRACTS.contains(&tight(&c).as_str()) && c.chars().count() <= 20 {
+            // `【摘要】` alone on its line is the label too.
+            let label = tight(&c);
+            let label = label
+                .trim_start_matches(['[', '【', '［', '〔'])
+                .trim_end_matches([']', '】', '］', '〕']);
+            if ABSTRACTS.contains(&label) && c.chars().count() <= 20 {
                 abstract_seen = true;
                 out.push(heading(&c, 1, Kind::Abstract));
                 continue;
@@ -760,6 +859,17 @@ fn plain_headings(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Heading> {
                 out.push(heading("Abstract", 1, Kind::Abstract));
                 continue;
             }
+            if CJK_INLINE_ABSTRACT.is_match(&c) {
+                abstract_seen = true;
+                out.push(heading("摘要", 1, Kind::Abstract));
+                continue;
+            }
+        }
+        // The keywords line ends the abstract. What follows it up to the
+        // first heading is keywords and often running text: unknown.
+        if out.last().is_some_and(|h| h.kind == Kind::Abstract) && CJK_KEYWORDS.is_match(&c) {
+            out.push(heading("", 0, Kind::Unknown));
+            continue;
         }
         if c.chars().count() <= 40 && is_references(&c) {
             in_refs = true;
@@ -790,7 +900,7 @@ fn plain_headings(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Heading> {
                     last.line + 1
                 ));
             }
-            out.retain(|h| h.kind == Kind::Abstract);
+            out.retain(|h| matches!(h.kind, Kind::Abstract | Kind::Unknown));
             (in_refs, in_appendix, letter, major) = (false, false, None, 1);
             out.push(heading(&c, 1, Kind::Body));
             continue;
@@ -832,7 +942,8 @@ fn plain_headings(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Heading> {
             }
             continue;
         }
-        if let Some(m) = NUMBERED.captures(&c)
+        if cjk_major == 0
+            && let Some(m) = NUMBERED.captures(&c)
             && is_title(&m[3])
         {
             let n: u32 = m[1].parse().expect("digits");
@@ -865,7 +976,7 @@ fn plain_headings(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Heading> {
                     first + 1,
                     last + 1
                 ));
-                out.retain(|h| h.kind == Kind::Abstract);
+                out.retain(|h| matches!(h.kind, Kind::Abstract | Kind::Unknown));
                 major = 1;
                 out.push(heading(&c, 1, Kind::Body));
             }
@@ -878,6 +989,44 @@ fn plain_headings(lines: &[&str], warnings: &mut Vec<String>) -> Vec<Heading> {
         {
             roman_major += 1;
             out.push(heading(&c, 1, Kind::Body));
+            continue;
+        }
+        if major == 0
+            && roman_major == 0
+            && let Some(m) = CJK_NUMBERED.captures(&c)
+            && is_cjk_title(&m[2])
+        {
+            let n = cjk_number(&m[1]);
+            // `一` again after a close run of such headings: that run was a
+            // table of contents.
+            let contents = n == Some(1)
+                && cjk_major >= 2
+                && cjk_lines[cjk_lines.len() - 1] - cjk_lines[0] <= 4 * cjk_lines.len();
+            if contents {
+                warnings.push(format!(
+                    "lines {}-{} read as a table of contents; its headings are not sections",
+                    cjk_lines[0] + 1,
+                    cjk_lines[cjk_lines.len() - 1] + 1
+                ));
+                out.retain(|h| !cjk_lines.contains(&h.line));
+                cjk_lines.clear();
+                cjk_major = 0;
+            }
+            if n == Some(cjk_major + 1) {
+                (cjk_major, cjk_minor) = (cjk_major + 1, 0);
+                cjk_lines.push(i);
+                out.push(heading(&c, 1, Kind::Body));
+            }
+            continue;
+        }
+        if cjk_major > 0
+            && let Some(m) = CJK_SUBNUMBERED.captures(&c)
+            && is_cjk_title(&m[2])
+            && cjk_number(&m[1]) == Some(cjk_minor + 1)
+        {
+            cjk_minor += 1;
+            cjk_lines.push(i);
+            out.push(heading(&c, 2, Kind::Body));
             continue;
         }
         let name = c.trim_end_matches(['.', ':']);
@@ -989,7 +1138,8 @@ fn sections(
         let end = headings.get(n + 1).map_or(lines.len(), |next| next.line) - 1;
         let mut section = Section {
             kind: h.kind,
-            heading: Some(h.text.clone()),
+            // The span after a keywords line has no heading.
+            heading: (h.kind != Kind::Unknown).then(|| h.text.clone()),
             level: h.level,
             first_line: h.line + 1,
             last_line: end + 1,
@@ -997,7 +1147,7 @@ fn sections(
         if h.kind == Kind::Abstract && end - h.line >= ABSTRACT_MAX {
             // The first blank line after the abstract's text, else the cap.
             let text_from = (h.line..=end)
-                .find(|&i| i > h.line || h.text == "Abstract" && clean(lines[i]) != "Abstract")
+                .find(|&i| i > h.line || clean(lines[i]) != h.text)
                 .and_then(|from| (from..=end).find(|&i| !clean(lines[i]).is_empty()));
             let cut = text_from
                 .and_then(|from| (from..=end).find(|&i| clean(lines[i]).is_empty()))
@@ -1483,7 +1633,14 @@ mod tests {
     }
 
     fn structure(content: &str, markdown: bool, targets: &Targets) -> Structure {
-        build(content, info(), markdown, targets, "papers test".into())
+        build(
+            content,
+            info(),
+            markdown,
+            &[],
+            targets,
+            "papers test".into(),
+        )
     }
 
     fn spans(s: &Structure) -> Vec<(Kind, usize, usize)> {
@@ -1491,6 +1648,265 @@ mod tests {
             .iter()
             .map(|x| (x.kind, x.first_line, x.last_line))
             .collect()
+    }
+
+    const ARTICLE: &str = "“学而时习之”与《论语》的开端\n\n陈　赟\n\n　　摘　要：《论语》以“学而时习之”开端，导向的是人的自修之道。\n\n它体现的是孔子下学而上达的踪迹。\n\n　　关键词：论语；开端；学\n\n　　在某种意义上，《论语》彰显的是一个文化生命。\n\n一　《论语》为何以“学而时习”开端\n\n正文。\n（一）学的意义\n正文。\n二、结语\n一个或有或无的现象。\n参考文献\n[1] 朱熹. 四书章句集注. 1983.\n[2] 程树德. 论语集释. 1990.\n[3] 杨伯峻. 论语译注. 1980.\n";
+
+    fn headed(s: &Structure) -> Vec<(Kind, Option<&str>, u8, usize, usize)> {
+        s.sections
+            .iter()
+            .map(|x| {
+                (
+                    x.kind,
+                    x.heading.as_deref(),
+                    x.level,
+                    x.first_line,
+                    x.last_line,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_chinese_article_has_an_abstract_and_numbered_sections() {
+        let s = structure(ARTICLE, false, &Targets::default());
+        assert_eq!(
+            headed(&s),
+            [
+                (Kind::Front, None, 0, 1, 4),
+                (Kind::Abstract, Some("摘要"), 1, 5, 8),
+                // The keywords and the text before the first heading.
+                (Kind::Unknown, None, 0, 9, 12),
+                (
+                    Kind::Body,
+                    Some("一 《论语》为何以“学而时习”开端"),
+                    1,
+                    13,
+                    15
+                ),
+                (Kind::Body, Some("（一）学的意义"), 2, 16, 17),
+                (Kind::Body, Some("二、结语"), 1, 18, 19),
+                (Kind::References, Some("参考文献"), 1, 20, 23),
+            ]
+        );
+        assert!(s.warnings.is_empty(), "{:?}", s.warnings);
+        // Each Chinese character is a word, not each run between spaces.
+        assert_eq!(s.words, text::words(ARTICLE));
+        assert!(s.words > 100, "{}", s.words);
+        assert!(ARTICLE.split_whitespace().count() < 30);
+    }
+
+    #[test]
+    fn chinese_abstract_labels_in_their_forms() {
+        for label in [
+            "摘要：",
+            "摘　要:",
+            "内容提要：",
+            "內容提要：",
+            "【摘要】",
+            "［摘 要］：",
+            "[内容摘要] ",
+        ] {
+            let text = format!("题目\n\n{label}本文讨论学。\n\n关键词：学\n\n一、引言\n正文。\n");
+            let s = structure(&text, false, &Targets::default());
+            assert_eq!(
+                spans(&s),
+                [
+                    (Kind::Front, 1, 2),
+                    (Kind::Abstract, 3, 4),
+                    (Kind::Unknown, 5, 6),
+                    (Kind::Body, 7, 8),
+                ],
+                "{label}"
+            );
+        }
+        // The label alone on its line, with a full-width colon.
+        let s = structure(
+            "题目\n摘要：\n本文讨论学。\n一、引言\n正文。\n",
+            false,
+            &Targets::default(),
+        );
+        assert_eq!(headed(&s)[1], (Kind::Abstract, Some("摘要："), 1, 2, 3));
+        let s = structure(
+            "题目\n【摘 要】\n本文讨论学。\n关键词：学\n一、引言\n正文。\n",
+            false,
+            &Targets::default(),
+        );
+        assert_eq!(
+            spans(&s),
+            [
+                (Kind::Front, 1, 1),
+                (Kind::Abstract, 2, 3),
+                (Kind::Unknown, 4, 4),
+                (Kind::Body, 5, 6),
+            ]
+        );
+        // A sentence that starts with the word is no label.
+        let s = structure(
+            "题目\n摘要是一篇文章的概括。\n正文。\n",
+            false,
+            &Targets::default(),
+        );
+        assert_eq!(spans(&s), [(Kind::Unknown, 1, 3)]);
+        // A keywords line with no abstract before it changes nothing.
+        let s = structure(
+            "题目\n关键词：学\n一、引言\n正文。\n",
+            false,
+            &Targets::default(),
+        );
+        assert_eq!(spans(&s), [(Kind::Front, 1, 2), (Kind::Body, 3, 4)]);
+    }
+
+    #[test]
+    fn chinese_numbers_are_headings_only_in_order_and_as_titles() {
+        // A list item is a sentence; `三` does not follow `一`; `（一）`
+        // needs a numbered heading above it.
+        let text = "（一）不是标题\n一、学而时习之，不亦说乎。\n三 跳号\n一个人的学问\n一、引言\n正文\n二 方法\n（一）材料\n（三）跳号\n（二）步骤\n三、结语\n";
+        let s = structure(text, false, &Targets::default());
+        let headings: Vec<_> = s
+            .sections
+            .iter()
+            .filter_map(|x| x.heading.as_deref())
+            .collect();
+        assert_eq!(
+            headings,
+            [
+                "一、引言",
+                "二 方法",
+                "（一）材料",
+                "（二）步骤",
+                "三、结语"
+            ]
+        );
+        assert_eq!(cjk_number("十"), Some(10));
+        assert_eq!(cjk_number("十二"), Some(12));
+        assert_eq!(cjk_number("二十"), Some(20));
+        assert_eq!(cjk_number("九十九"), Some(99));
+        assert_eq!(cjk_number("十十"), None);
+        assert_eq!(cjk_number("一二"), None);
+    }
+
+    #[test]
+    fn chinese_numbers_with_arabic_numbers_a_contents_list_and_chapters() {
+        let headings = |s: &Structure| -> Vec<(String, u8)> {
+            s.sections
+                .iter()
+                .filter_map(|x| Some((x.heading.clone()?, x.level)))
+                .collect()
+        };
+        let h = |t: &str, level: u8| (t.to_owned(), level);
+        // Arabic items under Chinese headings are no headings, and they do
+        // not remove the Chinese ones as a table of contents.
+        let text = "一、引言\n1. 背景\n2. 意义\n二、方法\n1. 材料\n正文\n";
+        let s = structure(text, false, &Targets::default());
+        assert_eq!(headings(&s), [h("一、引言", 1), h("二、方法", 1)]);
+        assert!(
+            !s.warnings.iter().any(|w| w.contains("contents")),
+            "{:?}",
+            s.warnings
+        );
+        // Chinese items under Arabic headings are no headings.
+        let text = "1 Introduction\n一、背景\n二、意义\n2 Method\n正文\n";
+        let s = structure(text, false, &Targets::default());
+        assert_eq!(headings(&s), [h("1 Introduction", 1), h("2 Method", 1)]);
+        // A contents list, then the sections.
+        let text =
+            "目录\n一 引言\n二 方法\n三 结语\n\n一 引言\n正文\n（一）背景\n正文\n二 方法\n正文\n";
+        let s = structure(text, false, &Targets::default());
+        assert_eq!(
+            headed(&s),
+            [
+                (Kind::Front, None, 0, 1, 5),
+                (Kind::Body, Some("一 引言"), 1, 6, 7),
+                (Kind::Body, Some("（一）背景"), 2, 8, 9),
+                (Kind::Body, Some("二 方法"), 1, 10, 11),
+            ]
+        );
+        assert!(
+            s.warnings.contains(
+                &"lines 2-4 read as a table of contents; its headings are not sections".to_owned()
+            ),
+            "{:?}",
+            s.warnings
+        );
+        // Under configured chapter lines, the numbers start again.
+        let patterns = heading_patterns(&["^第.章".to_owned()]).unwrap();
+        let text = "第一章 学\n一 引言\n正文\n二 方法\n正文\n三 结语\n正文\n正文\n正文\n正文\n正文\n正文\n正文\n第二章 政\n一 引言\n正文\n二 方法\n";
+        let s = build(
+            text,
+            info(),
+            false,
+            &patterns,
+            &Targets::default(),
+            "papers test".into(),
+        );
+        assert_eq!(
+            headings(&s),
+            [
+                h("第一章 学", 1),
+                h("一 引言", 1),
+                h("二 方法", 1),
+                h("三 结语", 1),
+                h("第二章 政", 1),
+                h("一 引言", 1),
+                h("二 方法", 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_configured_pattern_splits_a_classical_text() {
+        let text = "#+TITLE: 論語\n<pb:KR1h0005_SBCK_001-1a>¶\n論語學而第一　何晏集解(凢十六章)¶\n子曰學而時習之不亦悦乎¶\n有朋自逺方来不亦樂乎¶\n論語爲政第二　何晏集解(凢卄四章)¶\n子曰爲政以徳¶\n論語卷第一(經一千四百七十字)¶\n";
+        let none = structure(text, false, &Targets::default());
+        assert_eq!(spans(&none), [(Kind::Unknown, 1, 8)]);
+        assert_eq!(none.words, 72);
+
+        let patterns =
+            heading_patterns(&[r"^論語.{2,4}第[一二三四五六七八九十]+\s".to_owned()]).unwrap();
+        let s = build(
+            text,
+            info(),
+            false,
+            &patterns,
+            &Targets::default(),
+            "papers test".into(),
+        );
+        assert_eq!(
+            headed(&s),
+            [
+                (Kind::Front, None, 0, 1, 2),
+                (
+                    Kind::Body,
+                    Some("論語學而第一 何晏集解(凢十六章)¶"),
+                    1,
+                    3,
+                    5
+                ),
+                (
+                    Kind::Body,
+                    Some("論語爲政第二 何晏集解(凢卄四章)¶"),
+                    1,
+                    6,
+                    8
+                ),
+            ]
+        );
+        // A Markdown text keeps its `#` headings as the only headings.
+        let md = build(
+            text,
+            info(),
+            true,
+            &patterns,
+            &Targets::default(),
+            "papers test".into(),
+        );
+        assert_eq!(spans(&md), [(Kind::Unknown, 1, 8)]);
+
+        let bad = heading_patterns(&["第(".to_owned()]).unwrap_err();
+        assert!(
+            bad.starts_with("[papers] structure_headings \"第(\": "),
+            "{bad}"
+        );
     }
 
     fn entry(key: &str, doi: Option<&str>, arxiv: Option<&str>, title: &str) -> Reference {
