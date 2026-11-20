@@ -4509,6 +4509,42 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Journal systems such as Magtech send an open PDF as a plain download.
+    /// The bytes decide then: a PDF is saved and extracted, anything else is
+    /// skipped as before.
+    #[test]
+    fn reads_a_pdf_sent_as_octet_stream_and_skips_other_downloads() {
+        use crate::http::response;
+        let pdf = tiny_pdf("Synthetic Journal Article");
+        let (base, server) = http::serve(vec![
+            response("200 OK", &["Content-Type: application/octet-stream"], &pdf),
+            response(
+                "200 OK",
+                &["Content-Type: application/octet-stream"],
+                "PK not a PDF",
+            ),
+        ]);
+        let dir = std::env::temp_dir().join(format!("papers-read-octet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let url = format!("{base}/downloadArticleFile.do?attachType=PDF&id=1");
+        assert_eq!(read_url(url.clone(), &dir), Ok(true));
+        let text = manifest(&dir, &url);
+        assert_eq!(text.origin.as_deref(), Some(url.as_str()));
+        let saved =
+            std::fs::read_to_string(dir.join(text.path.rsplit('/').next().unwrap())).unwrap();
+        assert!(saved.contains("Synthetic Journal Article"), "{saved}");
+        let pdf_sha256 = http::sha256_hex(pdf.as_bytes());
+        assert_eq!(text.pdf_sha256(), Some(pdf_sha256.as_str()));
+
+        let other = format!("{base}/downloadArticleFile.do?attachType=PDF&id=2");
+        let name = url_file_name(&other).unwrap();
+        assert_ne!(read_url(other, &dir), Ok(true));
+        server.join().unwrap();
+        assert!(!dir.join(format!("{name}.pdf")).exists());
+        assert!(!dir.join(format!("{name}.txt")).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A text recorded in layout mode is kept, and a later run does not
     /// replace it with plain text unless `--extraction plain` asks for that.
     #[test]
