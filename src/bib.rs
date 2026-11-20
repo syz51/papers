@@ -74,26 +74,53 @@ fn ascii_word(s: &str) -> String {
         .collect()
 }
 
+/// The non-ASCII letters and digits of `s`, for a name or title that
+/// [`ascii_word`] leaves empty (Chinese characters); at most `max` of them.
+fn script_word(s: &str, max: usize) -> String {
+    s.chars()
+        .filter(|c| !c.is_ascii() && c.is_alphanumeric())
+        .take(max)
+        .collect()
+}
+
+/// The first title characters a key takes when the title has no Latin word.
+const TITLE_CHARS: usize = 4;
+
+/// The key part for an author name: the family name in ASCII, empty when the
+/// name has no Latin letters.
+fn author_word(name: &str) -> String {
+    match split_name(name) {
+        Name::Person { family, .. } => ascii_word(family.split(", ").next().unwrap_or(&family)),
+        Name::Literal(l) => ascii_word(l.split_whitespace().next().unwrap_or(&l)),
+    }
+}
+
+/// `<author><year><title word>`. A first author whose name has no Latin
+/// letters gives the family name of the entry's first `author_variants`
+/// spelling that has some (its romanisation), else the name's own characters.
+/// A title with no Latin word gives its first characters.
 fn base_key(r: &Reference) -> String {
-    let author = r
-        .authors
-        .as_ref()
-        .and_then(|a| a.first())
-        .map(|a| match split_name(a) {
-            Name::Person { family, .. } => ascii_word(family.split(", ").next().unwrap_or(&family)),
-            Name::Literal(l) => ascii_word(l.split_whitespace().next().unwrap_or(&l)),
+    let first = r.authors.as_ref().and_then(|a| a.first());
+    let author = first
+        .map(|a| author_word(a))
+        .filter(|a| !a.is_empty())
+        .or_else(|| {
+            let first = first?;
+            r.author_variants
+                .iter()
+                .map(|v| author_word(v))
+                .find(|v| !v.is_empty())
+                .or_else(|| Some(script_word(first, usize::MAX)))
         })
         .filter(|a| !a.is_empty())
         .unwrap_or_else(|| "anon".to_owned());
     let year = r.year.map_or_else(|| "nd".to_owned(), |y| y.to_string());
-    let word = r
-        .title
-        .as_deref()
-        .unwrap_or_default()
+    let title = r.title.as_deref().unwrap_or_default();
+    let word = title
         .split(|c: char| c.is_whitespace() || c == '-' || c == ':')
         .map(ascii_word)
         .find(|w| !w.is_empty() && !STOP_WORDS.contains(&w.as_str()))
-        .unwrap_or_default();
+        .unwrap_or_else(|| script_word(title, TITLE_CHARS));
     format!("{author}{year}{word}")
 }
 
@@ -483,5 +510,23 @@ mod tests {
         w.kind = Some("web".into());
         assert_eq!(csl(&w, "k")["type"], "webpage");
         assert_eq!(csl(&w, "k")["author"][0], json!({"literal": "Widgetco"}));
+    }
+
+    #[test]
+    fn citation_keys_for_names_and_titles_without_latin_letters() {
+        let chen = rec("1", "陈赟", Some(2012), "“学而时习之”与《论语》的开端");
+        let li = rec("2", "李零", Some(2012), "丧家狗：我读《论语》");
+        let mut romanised = rec("3", "陈赟", Some(2012), "“学而时习之”与《论语》的开端");
+        romanised.author_variants = vec!["Yun Chen".into()];
+        let mut edition = Reference::new("4".into());
+        edition.title = Some("論語集解".into());
+        // A Latin title with stop words only still gives no title word.
+        let latin = rec("5", "Ann Lee", Some(2020), "The");
+        let keys = citation_keys(&[chen, li, romanised, edition, latin]);
+        assert_eq!(keys["1"], "陈赟2012学而时习");
+        assert_eq!(keys["2"], "李零2012丧家狗我");
+        assert_eq!(keys["3"], "chen2012学而时习");
+        assert_eq!(keys["4"], "anonnd論語集解");
+        assert_eq!(keys["5"], "lee2020");
     }
 }

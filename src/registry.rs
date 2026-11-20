@@ -370,7 +370,9 @@ pub fn keep_recorded_depth(fresh: &mut [Reference], previous: &[Reference]) {
 /// Combines freshly parsed records with the previous registry. Tool-owned state
 /// carries over by key: `texts`, unknown fields, ids other tools added
 /// (`openalex`, `dblp`), and `verified` while the checked metadata is
-/// unchanged; a `manual` record also needs the same `checked` date.
+/// unchanged; a `manual` record also needs the same `checked` date. A note
+/// can give `openalex` too: its value wins, and a previous value that is no
+/// work id is not carried over, so removing a bad one from the note clears it.
 /// Keys that vanished from the source are kept (keys are never deleted) and
 /// returned so the caller can report them.
 pub fn merge(fresh: Vec<Reference>, previous: Vec<Reference>) -> (Vec<Reference>, Vec<String>) {
@@ -382,7 +384,10 @@ pub fn merge(fresh: Vec<Reference>, previous: Vec<Reference>) -> (Vec<Reference>
             if r.same_metadata(&prev) && !prev.hand_check_changed(&r) {
                 r.verified = prev.verified.clone();
             }
-            r.ids.openalex = r.ids.openalex.or(prev.ids.openalex);
+            r.ids.openalex = r.ids.openalex.or(prev
+                .ids
+                .openalex
+                .filter(|id| crate::openalex::parse_id(id).is_some()));
             r.ids.dblp = r.ids.dblp.or(prev.ids.dblp);
             for (k, v) in prev.ids.extra {
                 r.ids.extra.entry(k).or_insert(v);
@@ -520,5 +525,27 @@ mod tests {
             line.contains(r#""abstract":"Words.","abstract_source":"arxiv:2601.99901v4""#),
             "{line}"
         );
+    }
+
+    #[test]
+    fn a_recorded_openalex_value_that_is_no_work_id_is_not_carried_over() {
+        let with = |id: Option<&str>| {
+            let mut r = Reference::new("1".into());
+            r.ids.openalex = id.map(str::to_owned);
+            r
+        };
+        let merged = |fresh: Option<&str>, prev: Option<&str>| {
+            merge(vec![with(fresh)], vec![with(prev)]).0[0]
+                .ids
+                .openalex
+                .clone()
+        };
+        assert_eq!(merged(None, Some("W77")).as_deref(), Some("W77"));
+        assert_eq!(
+            merged(None, Some("https://openalex.org/W77")).as_deref(),
+            Some("https://openalex.org/W77")
+        );
+        assert_eq!(merged(Some("W78"), Some("W77")).as_deref(), Some("W78"));
+        assert_eq!(merged(None, Some("2345273518")), None);
     }
 }

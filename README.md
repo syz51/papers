@@ -48,7 +48,7 @@ This needs Rust 1.99 or newer (edition 2024). `papers read` can retry a page tha
 
 | Command | What it does | Example |
 | --- | --- | --- |
-| `fetch` | Metadata for arXiv ids, DOIs, SSRN/NBER URLs, or `--title` | `papers fetch 2601.00001 10.1234/abc` |
+| `fetch` | Metadata for arXiv ids, DOIs, SSRN/NBER URLs, OpenAlex work ids (`openalex:W…`), or `--title` | `papers fetch 2601.00001 10.1234/abc` |
 | `search` | Search arXiv (default), OpenAlex, DBLP, Semantic Scholar, or CiNii Research | `papers search --source openalex "retrieval evaluation" --since 2024-01-01` |
 | `seen` | Is a work already in the registry or notes? Prints matching keys | `papers seen 10.1234/abc` |
 | `registry build` | Parse the catalogue or notes into the registry, keeping tool-added state | `papers registry build` |
@@ -64,7 +64,7 @@ This needs Rust 1.99 or newer (edition 2024). `papers read` can retry a page tha
 | `cited-by` | Works citing a paper | `papers cited-by 10.1234/abc --source s2` |
 | `bib` | Export registry entries as BibTeX or CSL-JSON | `papers bib 12 40 --format csl-json` |
 | `cite` | Number citations in Markdown by first appearance and print the reference list | `papers cite intro.md method.md --out build/` |
-| `stub` | Print, or `--write`, a paper note from the archive's template | `papers stub 2601.00001 --write` |
+| `stub` | Print, or `--write`, a paper note from the archive's template, for an arXiv id, a DOI, an OpenAlex work id (`openalex:W…`), or `--title` | `papers stub 2601.00001 --write` |
 | `config` | Show the resolved configuration | `papers config --json` |
 
 Paths that `papers` prints (a result's `note`, a written stub, and registry `texts`) are relative to the project root, the directory holding `research.toml`.
@@ -87,6 +87,7 @@ Paths that `papers` prints (a result's `note`, a written stub, and registry `tex
   ```
 
 - `papers read <ref>` prints the same block. When a recorded text still has its recorded sha256, `read` prints its path and manifest and downloads nothing. `--force` downloads.
+- `papers fetch` and `papers stub` take an OpenAlex work id as `openalex:W2345273518`, as its `https://openalex.org/…` URL, or as a bare `W2345273518`, for a work that has no DOI or arXiv id. `papers stub --title "<title>"` takes the OpenAlex work whose title is equal after normalisation; when none is, it lists the closest works by id and writes nothing. When several works have that title, it lists them too. Such a stub holds the id in an `openalex` line, and its `url` is the DOI, else the OpenAlex page. When the first author's name or the title has no Latin letters, the stub's `id` line carries a TODO, because the note id needs a romanisation by hand; `--write` then refuses, so print the stub and save it under the id you choose.
 - `papers search`, `refs` and `cited-by` start each result that the archive holds with `seen: key 87`. They match by DOI, arXiv id, OpenAlex id, URL and normalised title.
 - `papers search` prints the time and result count of the last run of the same search, from the search log, on stderr. The same search has the same source, query and `--since`, and for arXiv the same `--category`: `papers: searched before: last run 2026-11-07T03:00:00Z, 20 results (1 run of this arxiv query in .research/papers/search.jsonl)`.
 - `papers search` on arXiv AND-s plain words. When such a search of two or more words finds nothing, it says so on stderr and names the retries: fewer words, `ti:`/`abs:` field syntax, or `--source openalex` (with `--since` or `--category`, it names those filters too).
@@ -182,7 +183,7 @@ Every write (`registry build`, `registry attach`, `registry record-pdfs`, `regis
 | `malformed-doi` | warn | The `doi` does not parse as a DOI, or ends in a character other than an ASCII letter, an ASCII digit or `)`, such as a stray backtick. A few valid DOIs, such as old SICI DOIs ending in `#`, also get it. |
 | `no-identifier` | warn | The entry has no DOI, arXiv id or URL. |
 | `malformed-date` | error (warn for reported dates) | An access date, a reported date, `checked` or `verified.at` is not a calendar date. |
-| `invalid-value` | error | `type` or `depth` is outside the `rf.reference/1` vocabulary, or `verified.status` is not `match`, `mismatch`, `not-found` or `manual`. |
+| `invalid-value` | error | `type` or `depth` is outside the `rf.reference/1` vocabulary, `verified.status` is not `match`, `mismatch`, `not-found` or `manual`, or `ids.openalex` is not an OpenAlex work id. |
 | `key-mismatch` | error | The heading number and the `[N]` entry number differ, or a note's id and its file name differ. |
 | `key-missing-from-source` | warn | A registry key is no longer in the source. |
 | `registry-stale` | warn | The registry differs from a fresh parse of the source. |
@@ -224,6 +225,8 @@ Withdrawal and retraction findings are notices about the work, not metadata diff
 | `verify-failed` | error | A lookup failed, including the arXiv version history; the run exits 2. |
 | `verify-manual` | info | No index lists the work, and a note's `checked` date records a hand check. `registry build` copies the date into the entry's `checked` field, so the rule holds for registry entries too. |
 | `verify-skipped` | info | There is nothing to look up or compare: a duplicate, a non-paper without a DOI or arXiv id, or an entry with neither title nor authors. |
+
+A note's frontmatter can set two more registry fields. `type` gives the entry's `type` (`paper`, `dataset`, `software`, `web`, `standard` or `other`); a note without it is a `paper`. `openalex` gives `ids.openalex`, written as `W…`, `openalex:W…` or the work's URL. `registry check` reports another `type`, or an `openalex` value that is no work id, as `invalid-value`. A note's own `kind` field is not read. A note's `openalex` value replaces the recorded one. A note without the field keeps a recorded work id, which another tool may have added; a recorded value that is no work id is dropped at the next build.
 
 When an index's metadata is wrong rather than the note, record why in the note's frontmatter instead of copying the error: `former_titles` lists earlier titles an index may still show, `author_variants` lists other spellings of the first author that an index uses (for example a name arXiv lists with a letter missing; `papers registry build` copies it into the registry), and `checked: <date>` marks a work no index lists whose metadata was confirmed by hand. `former_titles` and `author_variants` take a list or a single string.
 
@@ -431,6 +434,8 @@ Searches and PDF downloads are never cached. API keys travel in headers and neve
 Citation keys are `<first author's surname><year><first significant title word>`, in lowercase ASCII:
 
 - Without authors the surname part is `anon`; without a year, the year part is `nd`.
+- A first author whose name has no Latin letters, such as a name in Chinese characters, gives the surname of the first `author_variants` spelling that has some (`author_variants: [Yun Chen]` gives `chen`; the spelling is read given name first, as OpenAlex writes it). Without such a spelling, the name's own characters are the author part (`陈赟2012…`). To get an ASCII key, add the spelling or set `citekey`.
+- A title with no Latin word gives its first 4 characters as the title part.
 - When keys collide, they take `a`, `b`, … in registry key order across the whole registry, so a subset export never changes a key.
 - A `citekey` field overrides the generated key. Generated keys skip every pinned key, taking the next suffix instead. Two entries that pin the same `citekey` are an error in `bib` and `cite`.
 

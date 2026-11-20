@@ -171,6 +171,20 @@ pub fn short_id(id: &str) -> &str {
     id.rsplit('/').next().unwrap_or(id)
 }
 
+/// The work id (`W123`) that user input names: `openalex:W123`, an
+/// openalex.org work URL, or a bare `W123`, in any letter case. `None` for
+/// anything else.
+pub fn parse_id(input: &str) -> Option<String> {
+    let s = input.trim().to_ascii_uppercase();
+    let rest = ["OPENALEX:", "HTTPS://OPENALEX.ORG/", "HTTP://OPENALEX.ORG/"]
+        .iter()
+        .find_map(|p| s.strip_prefix(p))
+        .unwrap_or(&s);
+    let rest = rest.strip_prefix("WORKS/").unwrap_or(rest);
+    let digits = rest.strip_prefix('W')?;
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then(|| rest.to_owned())
+}
+
 impl From<RawWork> for Work {
     fn from(w: RawWork) -> Self {
         let venue_source = w.primary_location.as_ref().and_then(|l| l.source.as_ref());
@@ -508,5 +522,29 @@ mod tests {
         assert_eq!(results[1].doi, None);
         // A missing title falls back to the display name, without markup.
         assert_eq!(results[2].title, "Order-Book Spoofing in Simulated Venues");
+    }
+
+    #[test]
+    fn parses_work_ids_from_user_input() {
+        for input in [
+            "openalex:W2345273518",
+            "OpenAlex:w2345273518",
+            " W2345273518 ",
+            "https://openalex.org/W2345273518",
+            "https://openalex.org/works/W2345273518",
+        ] {
+            assert_eq!(parse_id(input).as_deref(), Some("W2345273518"), "{input}");
+        }
+        for input in [
+            "openalex:",
+            "W",
+            "W12x",
+            "A123",
+            "10.1234/W123",
+            "https://example.org/W123",
+            "2601.00001",
+        ] {
+            assert_eq!(parse_id(input), None, "{input}");
+        }
     }
 }
